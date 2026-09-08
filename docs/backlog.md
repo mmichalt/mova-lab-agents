@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 is complete. Remaining tickets are unstarted.
+**Status:** AG-001 and AG-002 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -29,7 +29,7 @@ are stable identifiers, not issue numbers from an external tracker.
 ### Milestone 1 — Standalone generator
 
 - [x] [AG-001 — Bootstrap TypeScript and Express](#ag-001)
-- [ ] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
+- [x] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
 - [ ] [AG-003 — Docker support and CI](#ag-003)
 - [ ] [AG-004 — Recording-proposal contracts](#ag-004)
 - [ ] [AG-005 — One structured LLM generation operation](#ag-005)
@@ -108,7 +108,7 @@ build/start check without provider credentials.
 **Stage:** 1  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-001](#ag-001)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand trust boundaries and process
 lifecycle before adding slow external operations.
@@ -146,7 +146,7 @@ development shell and understand build-time versus runtime dependencies.
 
 **Implementation scope:** Add a multi-stage Debian-slim Dockerfile, non-root runtime,
 production-only dependencies, Docker ignore rules, environment documentation,
-and CI for offline tests, type-checking, and production build. Add `compose.yaml`
+and CI for offline tests, type-checking, Biome, and production build. Add `compose.yaml`
 with the service and an optional `local-model` profile containing the official
 Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 
@@ -155,6 +155,7 @@ Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 - The image builds from the committed lockfile and serves health.
 - Runtime runs as non-root and does not contain the local `.env`.
 - CI and standalone service health/startup work without a GPU, Ollama, downloaded models, or an LLM API key.
+- CI runs `biome ci` (lint, format, and import sorting), `npm run typecheck`, `npm test`, and `npm run build`. Do not add ESLint or Prettier.
 - README explains local and Docker startup and the expected environment variables.
 - Document host-specific GPU prerequisites (Linux NVIDIA Container Toolkit or
   Windows Docker/WSL2 setup), a tested Ollama image version/digest, explicit model
