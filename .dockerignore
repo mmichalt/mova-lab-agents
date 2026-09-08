@@ -6,6 +6,7 @@ node_modules
 dist
 coverage
 tests
+evals
 docs
 *.md
 compose.yaml

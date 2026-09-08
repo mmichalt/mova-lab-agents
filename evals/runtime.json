@@ -1,0 +1,31 @@
+{
+  "promptVersion": "content-drafts/v1",
+  "model": {
+    "tag": "qwen3:4b-instruct",
+    "quantization": "Q4_K_M",
+    "digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0"
+  },
+  "runtime": {
+    "ollamaImage": "ollama/ollama:0.33.3@sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2",
+    "ollamaVersion": "0.33.3",
+    "numCtx": 4096,
+    "numPredict": 2000,
+    "temperature": 0.3,
+    "numParallel": 1,
+    "maxLoadedModels": 1,
+    "noCloud": true
+  },
+  "hardware": {
+    "cpu": "14th-generation i7",
+    "ramGb": 32,
+    "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU, 8151 MiB",
+    "os": "Ubuntu 26.04 LTS / WSL2"
+  },
+  "smoke": {
+    "ran": true,
+    "recordedAt": "2026-09-08",
+    "command": "npm run smoke:local",
+    "report": "evals/smoke-report.json",
+    "note": "See evals/smoke-results.md. Wording is stochastic; do not expect identical phrases."
+  }
+}

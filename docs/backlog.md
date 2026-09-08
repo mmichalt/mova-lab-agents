@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-005 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-006 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -33,7 +33,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-003 — Docker support and CI](#ag-003)
 - [x] [AG-004 — Recording-proposal contracts](#ag-004)
 - [x] [AG-005 — One structured LLM generation operation](#ag-005)
-- [ ] [AG-006 — Provider tests and baseline examples](#ag-006)
+- [x] [AG-006 — Provider tests and baseline examples](#ag-006)
 - [ ] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
 - [ ] [AG-008 — Deterministic content validation](#ag-008)
 - [ ] [AG-009 — Concurrent semantic reviews](#ag-009)
@@ -275,8 +275,8 @@ Ollama, or live inference.
 **Title:** Test the provider boundary and establish baseline examples  
 **Stage:** 2  
 **Repository:** `mova-lab-agents`  
-**Dependencies:** [AG-005](#ag-005), [AG-003](#ag-003)\
-**Status:** Unstarted
+**Dependencies:** [AG-005](#ag-005), [AG-003](#ag-003)  
+**Status:** Complete
 
 **Problem and learning objective:** Distinguish testing the integration protocol
 from evaluating whether generated content is useful.
@@ -310,6 +310,17 @@ actual quality/latency/GPU results, or clearly state that it was not run.
 
 **Out of scope:** Full evaluation runner, model leaderboard, and fabricated
 live-provider results.
+
+Recorded: `npm test` (96), `npm run typecheck`, `npx biome ci .`, `npm run build`,
+and `docker compose config` pass without GPU, Ollama, or live inference. Fake HTTP
+coverage includes generated output, missing usage, wrong shape, invalid JSON,
+explicit/free-text refusal, truncation, stalled bodies, aborts, 404/503,
+load/OOM, and unreachable Ollama; chat payloads have no fabricated provider IDs.
+Local smoke (`npm run smoke:local`, 2026-09-08): `qwen3:4b-instruct` digest
+`0edcdef34593…`, Q4_K_M, Ollama 0.33.3, RTX 5060 Laptop 8151 MiB, 100% GPU,
+cold 14.3 s / warm 12.8 s, 12-exercise 21.3 s / 1452 output tokens, no truncation;
+4096/2000 sufficed. Л-only failed literal target-letter presence. Details in
+`evals/smoke-results.md`.
 
 ### AG-007
 

@@ -60,8 +60,16 @@ phrase is a mechanical check later; it does not establish phonetic correctness,
 hard/soft realization, or therapeutic appropriateness.
 
 Schema cases and provider-boundary tests run with `npm test` (no GPU, Ollama, or
-live inference). Provider tests use a local fake HTTP server and assert native
-Ollama chat fields. Do not treat those fixtures as quality evidence.
+live inference). Provider tests use a local fake HTTP server plus synthetic
+Ollama chat fixtures in `tests/fixtures/ollama.ts`. They inspect `/api/chat`
+path, messages, `format`/`options`, completion, refusal, errors, aborts, and
+present or missing usage. Application attempt IDs are logged; provider request
+IDs are not fabricated. Do not treat those fixtures as quality evidence.
+
+Seeded request cases live in `evals/corpus.json` (Р, Л, both, and a 12-exercise
+maximum). Expected qualities are properties (`ukrainian-script`, literal target
+letter, count, assigned sounds), not exact generated strings. Prompt, model,
+sampling, and hardware metadata are in `evals/runtime.json`.
 
 Optional live generation (Ollama must already have the model):
 
@@ -84,7 +92,8 @@ npm run lint        # biome check .
 npm run format      # biome check --write .
 npx biome ci .      # CI: lint, format, and import sorting
 npm run typecheck   # tsc --noEmit
-npm test            # node:test tests/**/*.test.ts
+npm test            # node:test tests/**/*.test.ts (no Ollama)
+npm run smoke:local # optional live GPU/model smoke; never part of CI
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
 ```
@@ -145,10 +154,38 @@ docker compose exec ollama ollama ps
 
 After a prompt, `ollama ps` should show `100% GPU`. Record CPU offload instead
 of assuming GPU acceleration. Models persist in the `ollama` volume at
-`/root/.ollama`. Generation smoke coverage belongs to later tickets. From the
-host, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`; the Compose
-`agents` service always uses `http://ollama:11434`, even if `.env` sets the
-host URL.
+`/root/.ollama`. From the host, `OLLAMA_BASE_URL` defaults to
+`http://localhost:11434`; the Compose `agents` service always uses
+`http://ollama:11434`, even if `.env` sets the host URL.
+
+### Local generation smoke
+
+Ordinary `npm test` never contacts Ollama. The optional smoke needs the Compose
+`local-model` profile, a pulled `qwen3:4b-instruct`, and a running service.
+It does not pull models, change context/output to hide truncation, or treat a
+truncated envelope as success.
+
+```sh
+docker compose --profile local-model up -d ollama
+docker compose exec ollama ollama pull qwen3:4b-instruct
+npm run dev
+npm run smoke:local
+```
+
+`SMOKE_BASE_URL` defaults to `http://127.0.0.1:$PORT`. The script unloads the
+model and waits until it is gone from `/api/ps`, then records cold and warm
+latency for the mixed Р/Л case, GPU share from `GET /api/ps`, structured-output
+mapping for Р, Л, and both, and a 12-exercise maximum-size request. It exits
+non-zero on HTTP failure, truncation (`PROVIDER_INCOMPLETE`), or when
+`size_vram` is not exactly equal to `size` (partial CPU offload, including
+values that would round to 100%). Property failures (for example missing target letters) are
+recorded and do not fail the process. HTTP bodies omit usage; match `requestId`
+to `llm attempt completed` logs. Record digest, quantization, Ollama version,
+wall times, GPU percent, measured `nvidia-smi` hardware, and whether 4096
+context / 2000 output sufficed in `evals/smoke-results.md`,
+`evals/smoke-report.json`, and `evals/runtime.json`. If more capacity is needed,
+measure 8192 context and a larger `num_predict`, then update this README and
+the architecture plan. Wording is stochastic; do not expect identical phrases.
 
 ### GPU prerequisites
 
