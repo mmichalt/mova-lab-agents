@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createApp } from './app.ts';
-import { loadConfig, type Config } from './config.ts';
+import { type Config, loadConfig } from './config.ts';
 import { createLogger, type Logger } from './logger.ts';
 
 export const SHUTDOWN_DRAIN_MS = 10_000;

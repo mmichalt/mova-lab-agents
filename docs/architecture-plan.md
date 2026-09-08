@@ -127,6 +127,7 @@ compose.yaml        # service and optional local-model profile for Ollama
 .gitignore
 package.json
 package-lock.json
+biome.json
 tsconfig.json
 tsconfig.build.json
 README.md
@@ -344,7 +345,7 @@ Implement:
 - Service-token authentication for business endpoints.
 - No browser CORS configuration: the browser eventually talks to Mova-Lab.
 - Graceful shutdown: stop accepting requests, allow a bounded drain, then abort remaining work.
-- CI for type-checking, tests, and production build.
+- CI for type-checking, tests, Biome (`biome ci`), and production build.
 
 **Why sufficient:** There is one process, no workflow storage, and no business integration.
 

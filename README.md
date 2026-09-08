@@ -34,6 +34,8 @@ remaining in-flight work.
 ```sh
 npm install
 npm run dev         # native TypeScript: node --env-file-if-exists=.env src/server.ts
+npm run lint        # biome check .
+npm run format      # biome check --write .
 npm run typecheck   # tsc --noEmit
 npm test            # node:test tests/**/*.test.ts
 npm run build       # tsc -p tsconfig.build.json

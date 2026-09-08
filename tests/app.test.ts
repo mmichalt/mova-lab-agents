@@ -99,7 +99,11 @@ test('malformed and oversized JSON return sanitized errors', async (t) => {
 
 test('unexpected errors omit stacks and secrets from the public body', async (t) => {
   const chunks: string[] = [];
-  const log = createLogger('error', { write(msg) { chunks.push(msg); } });
+  const log = createLogger('error', {
+    write(msg) {
+      chunks.push(msg);
+    },
+  });
   const { server, url } = await listen(createApp({ config, logger: log, testRoutes: true }));
   t.after(() => shutDown(server, 100));
   const response = await fetch(`${url}/__test/boom`);
@@ -117,7 +121,11 @@ test('unexpected errors omit stacks and secrets from the public body', async (t)
 
 test('logger redacts authorization values', () => {
   const chunks: string[] = [];
-  const log = createLogger('info', { write(msg) { chunks.push(msg); } });
+  const log = createLogger('info', {
+    write(msg) {
+      chunks.push(msg);
+    },
+  });
   log.info({ headers: { authorization: 'Bearer leaked-token' } }, 'check');
   const text = chunks.join('');
   assert.equal(text.includes('leaked-token'), false);

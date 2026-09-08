@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.ts';
 
 const root = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -19,13 +19,19 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
   assert.throws(() => loadConfig({}), /Invalid configuration/);
   assert.throws(() => loadConfig({ SERVICE_TOKEN: '' }), /Invalid configuration/);
   assert.throws(() => loadConfig({ SERVICE_TOKEN: '   ' }), /Invalid configuration/);
-  assert.throws(() => loadConfig({ SERVICE_TOKEN: 'tok en' }), (err: Error) => {
-    assert.match(err.message, /Invalid configuration/);
-    assert.equal(err.message.includes('tok en'), false);
-    return true;
-  });
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'tok en' }),
+    (err: Error) => {
+      assert.match(err.message, /Invalid configuration/);
+      assert.equal(err.message.includes('tok en'), false);
+      return true;
+    },
+  );
   assert.throws(() => loadConfig({ SERVICE_TOKEN: 'token', PORT: 'abc' }), /Invalid configuration/);
-  assert.throws(() => loadConfig({ SERVICE_TOKEN: 'token', LOG_LEVEL: 'verbose' }), /Invalid configuration/);
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', LOG_LEVEL: 'verbose' }),
+    /Invalid configuration/,
+  );
 });
 
 test('invalid configuration exits before listening', async () => {

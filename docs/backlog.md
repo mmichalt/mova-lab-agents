@@ -146,7 +146,7 @@ development shell and understand build-time versus runtime dependencies.
 
 **Implementation scope:** Add a multi-stage Debian-slim Dockerfile, non-root runtime,
 production-only dependencies, Docker ignore rules, environment documentation,
-and CI for offline tests, type-checking, and production build. Add `compose.yaml`
+and CI for offline tests, type-checking, Biome, and production build. Add `compose.yaml`
 with the service and an optional `local-model` profile containing the official
 Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 
@@ -155,6 +155,7 @@ Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 - The image builds from the committed lockfile and serves health.
 - Runtime runs as non-root and does not contain the local `.env`.
 - CI and standalone service health/startup work without a GPU, Ollama, downloaded models, or an LLM API key.
+- CI runs `biome ci` (lint, format, and import sorting), `npm run typecheck`, `npm test`, and `npm run build`. Do not add ESLint or Prettier.
 - README explains local and Docker startup and the expected environment variables.
 - Document host-specific GPU prerequisites (Linux NVIDIA Container Toolkit or
   Windows Docker/WSL2 setup), a tested Ollama image version/digest, explicit model
