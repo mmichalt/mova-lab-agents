@@ -1,0 +1,40 @@
+{
+  "requestId": "11111111-1111-4111-8111-111111111111",
+  "requiresHumanApproval": true,
+  "checks": [
+    {
+      "status": "passed",
+      "issues": [
+        {
+          "source": "content",
+          "code": "LETTER_PRESENCE_ONLY",
+          "path": "proposals[0].phrase",
+          "severity": "warning",
+          "message": "Cyrillic letter presence is not phonetic, hard/soft, or therapeutic validation."
+        }
+      ]
+    }
+  ],
+  "proposals": [
+    {
+      "localId": "proposal-1",
+      "type": "recording",
+      "title": "Риба в річці",
+      "phrase": "Риба пливе в річці",
+      "childHint": "Скажи фразу повільно",
+      "teacherNote": "Повільний темп, наголос на першому складі.",
+      "targetSound": "р",
+      "difficulty": "easy"
+    },
+    {
+      "localId": "proposal-2",
+      "type": "recording",
+      "title": "Лис і ліс",
+      "phrase": "Лис біжить до лісу",
+      "childHint": "Повтори за зразком",
+      "teacherNote": "Короткі слова; не поспішати.",
+      "targetSound": "л",
+      "difficulty": "easy"
+    }
+  ]
+}

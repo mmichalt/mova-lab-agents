@@ -1,0 +1,114 @@
+import { z } from 'zod';
+
+export const limits = {
+  title: 160,
+  phrase: 500,
+  childHint: 500,
+  teacherNote: 1000,
+  theme: 120,
+  teacherInstructions: 1000,
+  ageMin: 1,
+  ageMax: 18,
+  exerciseCountDefault: 6,
+  exerciseCountMax: 12,
+  refusalReason: 1000,
+} as const;
+
+export const targetSounds = ['р', 'л'] as const;
+
+const targetSoundSchema = z.enum(targetSounds);
+const requestSoundSchema = z.string().trim().toLowerCase().pipe(targetSoundSchema);
+const nonempty = (max: number) => z.string().trim().min(1).max(max);
+const tokenCount = z.int().nonnegative().nullable();
+
+export const contentRequestSchema = z
+  .strictObject({
+    ageYears: z.int().min(limits.ageMin).max(limits.ageMax),
+    targetSounds: z
+      .array(requestSoundSchema)
+      .min(1)
+      .transform((sounds) => [...new Set(sounds)]),
+    difficulty: z.literal('easy'),
+    theme: z.string().trim().min(1).max(limits.theme),
+    exerciseCount: z.int().min(1).max(limits.exerciseCountMax).default(limits.exerciseCountDefault),
+    teacherInstructions: z.string().trim().min(1).max(limits.teacherInstructions).optional(),
+  })
+  .refine((req) => req.exerciseCount >= req.targetSounds.length, {
+    path: ['exerciseCount'],
+    error: 'Must be at least the number of requested sounds',
+  });
+
+const proposalFields = {
+  type: z.literal('recording'),
+  title: nonempty(limits.title),
+  phrase: nonempty(limits.phrase),
+  childHint: nonempty(limits.childHint),
+  teacherNote: nonempty(limits.teacherNote),
+  targetSound: targetSoundSchema,
+  difficulty: z.literal('easy'),
+};
+
+export const generatedProposalSchema = z.strictObject(proposalFields);
+
+export const recordingProposalSchema = z.strictObject({
+  localId: z.string().min(1),
+  ...proposalFields,
+});
+
+export const modelOutputSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('generated'),
+    proposals: z.array(generatedProposalSchema).min(1).max(limits.exerciseCountMax),
+  }),
+  z.strictObject({
+    status: z.literal('refused'),
+    reason: nonempty(limits.refusalReason),
+  }),
+]);
+
+export const validationIssueSchema = z.strictObject({
+  source: z.enum(['schema', 'content', 'age', 'language', 'application']),
+  code: z.string().min(1),
+  path: z.string().min(1).optional(),
+  severity: z.enum(['error', 'warning']),
+  message: z.string().min(1),
+});
+
+export const checkResultSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('passed'),
+    issues: z.array(validationIssueSchema),
+  }),
+  z.strictObject({
+    status: z.literal('failed'),
+    issues: z.array(validationIssueSchema).min(1),
+  }),
+  z.strictObject({
+    status: z.literal('unavailable'),
+    errorCode: z.string().min(1),
+  }),
+]);
+
+export const llmUsageSchema = z.strictObject({
+  model: z.string().min(1),
+  inputTokens: tokenCount,
+  cachedInputTokens: tokenCount,
+  outputTokens: tokenCount,
+  estimatedCostUsd: z.number().nonnegative().nullable(),
+});
+
+export const generationResultSchema = z.strictObject({
+  requestId: z.string().min(1),
+  proposals: z.array(recordingProposalSchema).min(1).max(limits.exerciseCountMax),
+  checks: z.array(checkResultSchema),
+  requiresHumanApproval: z.literal(true),
+});
+
+export type ContentRequest = z.infer<typeof contentRequestSchema>;
+export type GeneratedProposal = z.infer<typeof generatedProposalSchema>;
+export type RecordingProposal = z.infer<typeof recordingProposalSchema>;
+export type ModelOutput = z.infer<typeof modelOutputSchema>;
+export type ValidationIssue = z.infer<typeof validationIssueSchema>;
+export type CheckResult = z.infer<typeof checkResultSchema>;
+export type LlmUsage = z.infer<typeof llmUsageSchema>;
+export type GenerationResult = z.infer<typeof generationResultSchema>;
