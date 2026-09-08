@@ -1,7 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** All 28 tickets are unstarted. This backlog describes future work;
-the service has not been implemented.
+**Status:** AG-001 is complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -22,12 +21,14 @@ are stable identifiers, not issue numbers from an external tracker.
 - Mark a ticket complete only after its acceptance criteria and verification pass.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
+- Use ponytail skill to reduce LOC bloating
+- After ticket is implemented, ask Opus 5 high to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
 
 ## Ticket index
 
 ### Milestone 1 — Standalone generator
 
-- [ ] [AG-001 — Bootstrap TypeScript and Express](#ag-001)
+- [x] [AG-001 — Bootstrap TypeScript and Express](#ag-001)
 - [ ] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
 - [ ] [AG-003 — Docker support and CI](#ag-003)
 - [ ] [AG-004 — Recording-proposal contracts](#ag-004)
@@ -77,7 +78,7 @@ or published automatically.
 **Stage:** 1  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** None  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Establish the execution environment while
 understanding the distinction between an Express app, a listening process,
