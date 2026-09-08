@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-006 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-007 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -34,7 +34,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-004 — Recording-proposal contracts](#ag-004)
 - [x] [AG-005 — One structured LLM generation operation](#ag-005)
 - [x] [AG-006 — Provider tests and baseline examples](#ag-006)
-- [ ] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
+- [x] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
 - [ ] [AG-008 — Deterministic content validation](#ag-008)
 - [ ] [AG-009 — Concurrent semantic reviews](#ag-009)
 - [ ] [AG-010 — Workflow state and bounded content revision](#ag-010)
@@ -328,7 +328,7 @@ cold 14.3 s / warm 12.8 s, 12-exercise 21.3 s / 1452 output tokens, no truncatio
 **Stage:** 3  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-006](#ag-006)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn sequential orchestration and make
 intermediate content decisions inspectable.
@@ -350,6 +350,15 @@ that downstream calls do not occur after upstream failure.
 
 **Out of scope:** Generic workflow engines, agent classes, parallel steps,
 tool calling, and hidden shared chat memory.
+
+Recorded: `POST /content-drafts` calls `selectVocabulary` then `generateExercises`.
+The second user payload is `{ request, vocabulary }` from the validated first-step
+object, not the raw model string. Failed vocabulary (refusal, invalid JSON, or
+sounds that do not cover the request) makes one `/api/chat` call. Logs include
+`step` and prompt version (`vocabulary/v1`, `exercises/v1`) and omit raw words
+and phrases. Transport lives in `src/llm/ollama.ts`. `npm test` (104),
+`npm run typecheck`, `npx biome ci .`, `npm run build`, and
+`docker compose config` pass without GPU, Ollama, or live inference.
 
 ### AG-008
 

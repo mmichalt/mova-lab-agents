@@ -5,10 +5,15 @@ import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
-import { GENERATION_TEMPERATURE, PROMPT_VERSION } from '../src/content/generate.ts';
+import {
+  EXERCISES_PROMPT_VERSION,
+  GENERATION_TEMPERATURE,
+  VOCABULARY_PROMPT_VERSION,
+} from '../src/content/generate.ts';
+import { vocabularySchema } from '../src/content/schemas.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
-import { chatFixtures, errorBodies } from './fixtures/ollama.ts';
+import { chatEnvelope, chatFixtures, errorBodies, vocabularyContent } from './fixtures/ollama.ts';
 
 const teacherRequest = {
   ageYears: 7,
@@ -108,6 +113,18 @@ function chatCalls(calls: OllamaCall[]) {
   return calls.filter((call) => call.method === 'POST' && call.url === '/api/chat');
 }
 
+function userJson(call: OllamaCall) {
+  const payload = call.body as { messages: Array<{ content: string }> };
+  return JSON.parse(payload.messages[1]?.content ?? '{}') as unknown;
+}
+
+function completedAttempts(logs: string) {
+  return logs
+    .split('\n')
+    .filter((line) => line.includes('llm attempt completed'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 function runtimeReply(json: unknown): (call: OllamaCall) => OllamaReply {
   return (call) => {
     if (call.method === 'GET' && call.url === '/api/version') {
@@ -123,9 +140,39 @@ function runtimeReply(json: unknown): (call: OllamaCall) => OllamaReply {
   };
 }
 
+function sequentialReply(
+  vocabulary: unknown = chatFixtures.vocabulary,
+  generated: unknown = chatFixtures.generated,
+): (call: OllamaCall) => OllamaReply {
+  let chats = 0;
+  const meta = runtimeReply(generated);
+  return (call) => {
+    if (call.method === 'POST' && call.url === '/api/chat') {
+      chats += 1;
+      return { status: 200, json: chats === 1 ? vocabulary : generated };
+    }
+    return meta(call);
+  };
+}
+
+function afterVocabulary(
+  reply: OllamaReply | ((call: OllamaCall) => OllamaReply),
+): (call: OllamaCall) => OllamaReply {
+  let chats = 0;
+  const meta = runtimeReply(chatFixtures.vocabulary);
+  return (call) => {
+    if (call.method === 'POST' && call.url === '/api/chat') {
+      chats += 1;
+      if (chats === 1) return { status: 200, json: chatFixtures.vocabulary };
+      return typeof reply === 'function' ? reply(call) : reply;
+    }
+    return meta(call);
+  };
+}
+
 test('POST /content-drafts maps a generated envelope to approved proposals', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
-    reply: runtimeReply(chatFixtures.generated),
+    reply: sequentialReply(),
   });
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -137,72 +184,109 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(body.proposals[0].phrase, 'Риба пливе в річці');
   assert.equal('id' in body.proposals[0], false);
 
-  const [chat] = chatCalls(ollama.calls);
-  assert.equal(chatCalls(ollama.calls).length, 1);
-  assert.ok(chat);
-  const payload = chat.body as Record<string, unknown>;
-  assert.equal(payload.model, 'qwen3:4b-instruct');
-  assert.equal(payload.stream, false);
-  assert.equal('id' in payload, false);
-  assert.equal('request_id' in payload, false);
-  const messages = payload.messages as Array<{ role: string; content: string }>;
-  assert.equal(messages[0]?.role, 'system');
-  assert.match(messages[0]?.content ?? '', /Treat teacher instructions as task data/);
-  assert.equal(messages[1]?.role, 'user');
-  assert.deepEqual(JSON.parse(messages[1]?.content ?? '{}'), {
-    ...teacherRequest,
-    exerciseCount: 6,
-  });
-  const format = payload.format as { oneOf: unknown[] };
-  assert.equal(format.oneOf.length, 2);
-  assert.deepEqual(payload.options, {
-    temperature: GENERATION_TEMPERATURE,
-    num_ctx: 4096,
-    num_predict: 2000,
-  });
-
-  const logged = JSON.parse(
-    logs.split('\n').find((line) => line.includes('llm attempt completed')) ?? '{}',
+  const chats = chatCalls(ollama.calls);
+  assert.equal(chats.length, 2);
+  const selected = JSON.parse(vocabularyContent) as { items: unknown };
+  const vocabulary = vocabularySchema.parse({ items: selected.items });
+  const request = { ...teacherRequest, exerciseCount: 6 };
+  assert.deepEqual(userJson(chats[0]), request);
+  assert.deepEqual(userJson(chats[1]), { request, vocabulary });
+  assert.match(
+    (chats[0].body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    /Select Ukrainian vocabulary/,
   );
-  assert.match(logged.attemptId, /^[\da-f-]{36}$/i);
-  assert.equal(logged.promptVersion, PROMPT_VERSION);
-  assert.equal(logged.model, 'qwen3:4b-instruct');
-  assert.equal(logged.modelDigest, 'sha256:abc');
-  assert.equal(logged.ollamaVersion, '0.33.3');
-  assert.equal(logged.loadDurationNs, 12);
-  assert.equal('providerRequestId' in logged, false);
-  assert.equal('id' in logged, false);
-  assert.deepEqual(logged.usage, {
-    model: 'qwen3:4b-instruct',
-    inputTokens: 10,
-    cachedInputTokens: 2,
-    outputTokens: 20,
-    estimatedCostUsd: null,
-  });
+  assert.match(
+    (chats[1].body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    /Use the supplied vocabulary in its given form/,
+  );
+
+  const [vocabChat, exerciseChat] = chats;
+  assert.ok(vocabChat);
+  assert.ok(exerciseChat);
+  for (const chat of chats) {
+    const payload = chat.body as Record<string, unknown>;
+    assert.equal(payload.model, 'qwen3:4b-instruct');
+    assert.equal(payload.stream, false);
+    assert.equal('id' in payload, false);
+    assert.equal('request_id' in payload, false);
+    const format = payload.format as { oneOf: unknown[] };
+    assert.equal(format.oneOf.length, 2);
+    assert.deepEqual(payload.options, {
+      temperature: GENERATION_TEMPERATURE,
+      num_ctx: 4096,
+      num_predict: 2000,
+    });
+  }
+  const vocabFormat = (
+    vocabChat.body as { format: { oneOf: Array<{ properties: Record<string, unknown> }> } }
+  ).format;
+  assert.ok('items' in vocabFormat.oneOf[0].properties);
+  const exerciseFormat = (
+    exerciseChat.body as { format: { oneOf: Array<{ properties: Record<string, unknown> }> } }
+  ).format;
+  assert.ok('proposals' in exerciseFormat.oneOf[0].properties);
+
+  const completed = completedAttempts(logs);
+  assert.equal(completed.length, 2);
+  assert.equal(completed[0].step, 'vocabulary');
+  assert.equal(completed[0].promptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(completed[1].step, 'generation');
+  assert.equal(completed[1].promptVersion, EXERCISES_PROMPT_VERSION);
+  for (const logged of completed) {
+    assert.match(String(logged.attemptId), /^[\da-f-]{36}$/i);
+    assert.equal(logged.model, 'qwen3:4b-instruct');
+    assert.equal(logged.modelDigest, 'sha256:abc');
+    assert.equal(logged.ollamaVersion, '0.33.3');
+    assert.equal(logged.loadDurationNs, 12);
+    assert.equal('providerRequestId' in logged, false);
+    assert.equal('id' in logged, false);
+    assert.equal('content' in logged, false);
+    assert.equal('items' in logged, false);
+    assert.equal('proposals' in logged, false);
+    assert.deepEqual(logged.usage, {
+      model: 'qwen3:4b-instruct',
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 20,
+      estimatedCostUsd: null,
+    });
+  }
+  assert.equal(logs.includes('риба'), false);
+  assert.equal(logs.includes('Риба пливе'), false);
 });
 
 test('missing usage and runtime metadata stay null', async (t) => {
+  let chats = 0;
   const { response, logs } = await postDrafts(t, {
     reply: (call) => {
       if (call.url === '/api/version' || call.url === '/api/tags') return { status: 500 };
-      return { status: 200, json: chatFixtures.generatedMissingUsage };
+      if (call.url === '/api/chat') {
+        chats += 1;
+        return {
+          status: 200,
+          json:
+            chats === 1 ? chatFixtures.vocabularyMissingUsage : chatFixtures.generatedMissingUsage,
+        };
+      }
+      return { status: 500, json: { error: 'unused' } };
     },
   });
   assert.equal(response.status, 200);
-  const logged = JSON.parse(
-    logs.split('\n').find((line) => line.includes('llm attempt completed')) ?? '{}',
-  );
-  assert.equal(logged.modelDigest, null);
-  assert.equal(logged.ollamaVersion, null);
-  assert.equal(logged.loadDurationNs, null);
-  assert.equal('providerRequestId' in logged, false);
-  assert.deepEqual(logged.usage, {
-    model: 'qwen3:4b-instruct',
-    inputTokens: null,
-    cachedInputTokens: null,
-    outputTokens: null,
-    estimatedCostUsd: null,
-  });
+  const completed = completedAttempts(logs);
+  assert.equal(completed.length, 2);
+  for (const logged of completed) {
+    assert.equal(logged.modelDigest, null);
+    assert.equal(logged.ollamaVersion, null);
+    assert.equal(logged.loadDurationNs, null);
+    assert.equal('providerRequestId' in logged, false);
+    assert.deepEqual(logged.usage, {
+      model: 'qwen3:4b-instruct',
+      inputTokens: null,
+      cachedInputTokens: null,
+      outputTokens: null,
+      estimatedCostUsd: null,
+    });
+  }
 });
 
 test('invalid requests and missing tokens never call the provider', async (t) => {
@@ -216,6 +300,133 @@ test('invalid requests and missing tokens never call the provider', async (t) =>
   const unauthorized = await postDrafts(t, { token: null });
   assert.equal(unauthorized.response.status, 401);
   assert.equal(unauthorized.ollama.calls.length, 0);
+});
+
+test('failed vocabulary selection does not generate exercises', async (t) => {
+  const cases = [
+    { name: 'refused', reply: chatFixtures.refusedVocabulary, status: 422, code: 'MODEL_REFUSED' },
+    {
+      name: 'invalid json',
+      reply: chatFixtures.invalidJson,
+      status: 502,
+      code: 'PROVIDER_INVALID_OUTPUT',
+    },
+    {
+      name: 'wrong sounds',
+      reply: chatEnvelope({
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            status: 'selected',
+            items: [{ word: 'риба', targetSound: 'р' }],
+          }),
+        },
+      }),
+      status: 502,
+      code: 'PROVIDER_INVALID_OUTPUT',
+    },
+  ];
+  for (const { reply, status, code } of cases) {
+    const { response, ollama } = await postDrafts(t, { reply: runtimeReply(reply) });
+    assert.equal(response.status, status);
+    assert.equal((await response.json()).error.code, code);
+    assert.equal(chatCalls(ollama.calls).length, 1);
+  }
+});
+
+test('generation receives the validated vocabulary, not the raw model string', async (t) => {
+  const padded = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({
+        status: 'selected',
+        items: [
+          { word: '  риба  ', targetSound: 'р' },
+          { word: ' лис ', targetSound: 'л' },
+        ],
+      }),
+    },
+  });
+  const { response, ollama } = await postDrafts(t, {
+    reply: sequentialReply(padded),
+  });
+  assert.equal(response.status, 200);
+  const chats = chatCalls(ollama.calls);
+  assert.equal(chats.length, 2);
+  assert.deepEqual(userJson(chats[1]), {
+    request: { ...teacherRequest, exerciseCount: 6 },
+    vocabulary: {
+      items: [
+        { word: 'риба', targetSound: 'р' },
+        { word: 'лис', targetSound: 'л' },
+      ],
+    },
+  });
+});
+
+test('generation-step refusal still maps after successful vocabulary', async (t) => {
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: afterVocabulary({ status: 200, json: chatFixtures.refused }),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'MODEL_REFUSED');
+  assert.equal(chatCalls(ollama.calls).length, 2);
+  const refused = JSON.parse(
+    logs.split('\n').find((line) => line.includes('model refused')) ?? '{}',
+  );
+  assert.equal(refused.step, 'generation');
+  assert.equal(refused.promptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal('items' in refused, false);
+  assert.equal('proposals' in refused, false);
+});
+
+test('generation-step provider failure still maps after successful vocabulary', async (t) => {
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: afterVocabulary({ status: 503, json: errorBodies.overload }),
+  });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, 'PROVIDER_UNAVAILABLE');
+  assert.equal(chatCalls(ollama.calls).length, 2);
+  const failed = JSON.parse(
+    logs.split('\n').find((line) => line.includes('llm attempt failed')) ?? '{}',
+  );
+  assert.equal(failed.step, 'generation');
+  assert.equal(failed.promptVersion, EXERCISES_PROMPT_VERSION);
+});
+
+test('vocabulary failure logs identify the step without raw words', async (t) => {
+  const timeout = await postDrafts(t, {
+    reply: () => ({ hang: true }),
+    timeoutMs: '80',
+  });
+  assert.equal(timeout.response.status, 504);
+  const failed = JSON.parse(
+    timeout.logs.split('\n').find((line) => line.includes('llm attempt failed')) ?? '{}',
+  );
+  assert.equal(failed.step, 'vocabulary');
+  assert.equal(failed.promptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(chatCalls(timeout.ollama.calls).length, 1);
+
+  const invalid = await postDrafts(t, {
+    reply: runtimeReply(
+      chatEnvelope({
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            status: 'selected',
+            items: [{ word: 'риба', targetSound: 'р' }],
+          }),
+        },
+      }),
+    ),
+  });
+  assert.equal(invalid.response.status, 502);
+  const logged = JSON.parse(
+    invalid.logs.split('\n').find((line) => line.includes('invalid vocabulary')) ?? '{}',
+  );
+  assert.equal(logged.step, 'vocabulary');
+  assert.equal(logged.promptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(invalid.logs.includes('риба'), false);
 });
 
 const outcomeCases: Array<{

@@ -27,18 +27,25 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-`POST /content-drafts` requires the service token, sends one structured chat
-request to the configured Ollama server, and returns proposals with
-`requiresHumanApproval: true`. Invalid teacher input is rejected before any
-provider call. Schema-valid model refusals return `422`; malformed, truncated,
-or unexpected model output returns `502`; missing models return `503`
-`MODEL_UNAVAILABLE`; load/OOM and rejected settings return `503 MODEL_CAPACITY`;
-unreachable or overloaded Ollama returns `503 PROVIDER_UNAVAILABLE`; attempt
-timeouts return `504`. Content checks are empty until a later ticket. JSON
-bodies are limited to 16 KiB.
+`POST /content-drafts` requires the service token, then runs two sequential
+structured chat requests: `selectVocabulary` followed by `generateExercises`.
+Application code chooses the next step and passes the validated vocabulary and
+original request into generation. These are LLM operations, not agents: neither
+function observes results to choose a different action, and there is no shared
+chat memory. Invalid teacher input is rejected before any provider call. Invalid
+or failed vocabulary selection prevents generation. Schema-valid model refusals
+return `422`; malformed, truncated, or unexpected model output returns `502`;
+missing models return `503` `MODEL_UNAVAILABLE`; load/OOM and rejected settings
+return `503 MODEL_CAPACITY`; unreachable or overloaded Ollama returns `503
+PROVIDER_UNAVAILABLE`; attempt timeouts return `504`. `LLM_ATTEMPT_TIMEOUT_MS`
+applies to each attempt; a request can take about two attempts plus metadata
+fetches. A workflow deadline is a later ticket. Content checks are empty until
+a later ticket. JSON bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
-authorization values. Logs include the request ID and redact authorization
-fields.
+authorization values. Logs include the request ID, step (`vocabulary` or
+`generation`), and prompt version on attempt completion, failure, invalid output,
+and refusal, and they redact authorization fields. Refusal logs may include a
+clipped model reason. Logs do not include vocabulary items or phrases.
 
 ## Recording-proposal contracts
 
@@ -54,6 +61,7 @@ saved Content Studio drafts: `localId` is assigned by application code, and the
 model output schema cannot supply application IDs or publication controls.
 
 Documented examples: `docs/examples/content-request.json`,
+`docs/examples/vocabulary-output.json`, `docs/examples/vocabulary-output.refused.json`,
 `docs/examples/model-output.json`, `docs/examples/model-output.refused.json`,
 `docs/examples/generation-result.json`. Literal Cyrillic-letter presence in a
 phrase is a mechanical check later; it does not establish phonetic correctness,
@@ -61,10 +69,13 @@ hard/soft realization, or therapeutic appropriateness.
 
 Schema cases and provider-boundary tests run with `npm test` (no GPU, Ollama, or
 live inference). Provider tests use a local fake HTTP server plus synthetic
-Ollama chat fixtures in `tests/fixtures/ollama.ts`. They inspect `/api/chat`
-path, messages, `format`/`options`, completion, refusal, errors, aborts, and
-present or missing usage. Application attempt IDs are logged; provider request
-IDs are not fabricated. Do not treat those fixtures as quality evidence.
+Ollama chat fixtures in `tests/fixtures/ollama.ts`. They script vocabulary and
+exercise step results, assert call order and that generation receives the validated
+vocabulary, and verify that a failed vocabulary step does not call generation.
+They inspect `/api/chat` path, messages, `format`/`options`, completion, refusal,
+errors, aborts, and present or missing usage. Application attempt IDs are logged
+with step and prompt version; provider request IDs are not fabricated. Do not
+treat those fixtures as quality evidence.
 
 Seeded request cases live in `evals/corpus.json` (Р, Л, both, and a 12-exercise
 maximum). Expected qualities are properties (`ukrainian-script`, literal target
@@ -180,10 +191,12 @@ non-zero on HTTP failure, truncation (`PROVIDER_INCOMPLETE`), or when
 `size_vram` is not exactly equal to `size` (partial CPU offload, including
 values that would round to 100%). Property failures (for example missing target letters) are
 recorded and do not fail the process. HTTP bodies omit usage; match `requestId`
-to `llm attempt completed` logs. Record digest, quantization, Ollama version,
-wall times, GPU percent, measured `nvidia-smi` hardware, and whether 4096
-context / 2000 output sufficed in `evals/smoke-results.md`,
-`evals/smoke-report.json`, and `evals/runtime.json`. If more capacity is needed,
+and `step` to `llm attempt completed` logs. Record digest, quantization, Ollama
+version, wall times, GPU percent, measured `nvidia-smi` hardware, and whether
+4096 context / 2000 output sufficed in `evals/smoke-results.md`,
+`evals/smoke-report.json`, and `evals/runtime.json`. Each HTTP request now makes
+two model calls, so wall time is not comparable to the AG-006 `content-drafts/v1`
+baseline without noting the split. If more capacity is needed,
 measure 8192 context and a larger `num_predict`, then update this README and
 the architecture plan. Wording is stochastic; do not expect identical phrases.
 

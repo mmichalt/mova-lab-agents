@@ -12,6 +12,8 @@ import {
   modelOutputSchema,
   recordingProposalSchema,
   validationIssueSchema,
+  vocabularyOutputSchema,
+  vocabularySchema,
 } from '../src/content/schemas.ts';
 
 const examples = new URL('../docs/examples/', import.meta.url);
@@ -227,6 +229,53 @@ test('model output accepts generated example and schema-valid refusal', () => {
   });
 });
 
+test('vocabulary output accepts selected example and schema-valid refusal', () => {
+  assert.deepEqual(vocabularyOutputSchema.parse(loadExample('vocabulary-output.json')), {
+    status: 'selected',
+    items: [
+      { word: 'риба', targetSound: 'р' },
+      { word: 'річка', targetSound: 'р' },
+      { word: 'лис', targetSound: 'л' },
+      { word: 'ліс', targetSound: 'л' },
+    ],
+  });
+  assert.deepEqual(vocabularyOutputSchema.parse(loadExample('vocabulary-output.refused.json')), {
+    status: 'refused',
+    reason: 'Неможливо дібрати словник для цієї теми в межах easy.',
+  });
+  assert.deepEqual(
+    vocabularySchema.parse({
+      items: [{ word: '  риба  ', targetSound: 'р' }],
+    }),
+    { items: [{ word: 'риба', targetSound: 'р' }] },
+  );
+});
+
+test('vocabulary output rejects empty items, extra fields, and application IDs', () => {
+  assert.equal(vocabularyOutputSchema.safeParse({ status: 'selected', items: [] }).success, false);
+  assert.equal(
+    vocabularyOutputSchema.safeParse({
+      status: 'selected',
+      items: [{ word: 'риба', targetSound: 'р', id: 'cms-1' }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    vocabularyOutputSchema.safeParse({
+      status: 'selected',
+      items: [{ word: 'риба', targetSound: 'р' }],
+      localId: 'x',
+    }).success,
+    false,
+  );
+  assert.equal(
+    vocabularySchema.safeParse({
+      items: [{ word: 'я'.repeat(limits.vocabWord + 1), targetSound: 'р' }],
+    }).success,
+    false,
+  );
+});
+
 test('model output rejects publication controls, application IDs, and localId', () => {
   const generated = {
     status: 'generated',
@@ -271,6 +320,20 @@ test('model JSON Schema forbids extra properties and pins field limits', () => {
   assert.equal(schemaProp(item, 'teacherNote').maxLength, limits.teacherNote);
   assert.equal(schemaProp(refused, 'reason').maxLength, limits.refusalReason);
   assert.equal(schemaProp(generated, 'proposals').maxItems, limits.exerciseCountMax);
+});
+
+test('vocabulary JSON Schema forbids extra properties and pins word limits', () => {
+  const schema = schemaObject(z.toJSONSchema(vocabularyOutputSchema));
+  assert.ok(Array.isArray(schema.oneOf) && schema.oneOf.length === 2);
+  const selected = schemaObject(schema.oneOf[0]);
+  const refused = schemaObject(schema.oneOf[1]);
+  assert.equal(selected.additionalProperties, false);
+  assert.equal(refused.additionalProperties, false);
+  const item = schemaObject(schemaProp(selected, 'items').items);
+  assert.equal(item.additionalProperties, false);
+  assert.deepEqual(Object.keys(schemaObject(item.properties)), ['word', 'targetSound']);
+  assert.equal(schemaProp(item, 'word').maxLength, limits.vocabWord);
+  assert.equal(schemaProp(selected, 'items').maxItems, limits.vocabItemsMax);
 });
 
 test('domain proposal requires application-assigned localId', () => {
