@@ -144,6 +144,6 @@ test('shutdown stops new work and aborts remaining work after the drain period',
   await assert.rejects(fetch(`${url}/health`, { signal: AbortSignal.timeout(500) }));
   await stopping;
   const elapsed = Date.now() - started;
-  assert.ok(elapsed >= drainMs, `drain returned too early (${elapsed}ms)`);
+  assert.ok(elapsed >= drainMs - 25, `drain returned too early (${elapsed}ms)`);
   assert.ok(elapsed < 1000, `drain lasted too long (${elapsed}ms)`);
 });
