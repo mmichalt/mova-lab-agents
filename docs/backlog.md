@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-004 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-005 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -32,7 +32,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
 - [x] [AG-003 — Docker support and CI](#ag-003)
 - [x] [AG-004 — Recording-proposal contracts](#ag-004)
-- [ ] [AG-005 — One structured LLM generation operation](#ag-005)
+- [x] [AG-005 — One structured LLM generation operation](#ag-005)
 - [ ] [AG-006 — Provider tests and baseline examples](#ag-006)
 - [ ] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
 - [ ] [AG-008 — Deterministic content validation](#ag-008)
@@ -224,7 +224,7 @@ application categories, and patient data.
 **Stage:** 2  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-004](#ag-004)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Observe exactly what messages and parameters
 are sent to a model and how its response becomes trusted application data.
@@ -260,6 +260,15 @@ user input makes no provider call.
 
 **Out of scope:** Provider switching, streaming, decomposition, automatic retries,
 revision, persistence, and approval endpoints.
+
+Recorded: `POST /content-drafts` sends one native Ollama `/api/chat` attempt
+(`stream: false`, `format` from `z.toJSONSchema`, temperature 0.3, configured
+ctx/predict). Fake HTTP coverage includes generated output, schema-valid
+refusal, free-text/invalid JSON/schema/truncated/tool-call failures, 404/503,
+queue-wait and stalled-body timeouts, and unreachable Ollama. Invalid input and
+missing tokens make no provider call. `npm test` (91), `npm run typecheck`,
+`npx biome ci .`, `npm run build`, and `docker compose config` pass without GPU,
+Ollama, or live inference.
 
 ### AG-006
 

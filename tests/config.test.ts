@@ -13,6 +13,11 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
   assert.equal(config.port, 3000);
   assert.equal(config.logLevel, 'info');
   assert.equal(config.serviceToken, 'token');
+  assert.equal(config.ollamaBaseUrl, 'http://localhost:11434');
+  assert.equal(config.ollamaModel, 'qwen3:4b-instruct');
+  assert.equal(config.ollamaNumCtx, 4096);
+  assert.equal(config.ollamaNumPredict, 2000);
+  assert.equal(config.llmAttemptTimeoutMs, 120000);
 });
 
 test('loadConfig rejects missing, empty, or invalid values', () => {
@@ -30,6 +35,23 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
   assert.throws(() => loadConfig({ SERVICE_TOKEN: 'token', PORT: 'abc' }), /Invalid configuration/);
   assert.throws(
     () => loadConfig({ SERVICE_TOKEN: 'token', LOG_LEVEL: 'verbose' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', OLLAMA_BASE_URL: 'file:///tmp' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () =>
+      loadConfig({ SERVICE_TOKEN: 'token', OLLAMA_BASE_URL: 'http://user:pass@localhost:11434' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', LLM_ATTEMPT_TIMEOUT_MS: '0' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', OLLAMA_BASE_URL: 'http://localhost:11434/proxy' }),
     /Invalid configuration/,
   );
 });

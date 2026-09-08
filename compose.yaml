@@ -15,6 +15,12 @@ services:
       PORT: "3000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SERVICE_TOKEN: ${SERVICE_TOKEN:?set SERVICE_TOKEN in .env}
+      # Host .env uses localhost for npm; that hostname is this container.
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-2000}
+      LLM_ATTEMPT_TIMEOUT_MS: ${LLM_ATTEMPT_TIMEOUT_MS:-120000}
 
   ollama:
     profiles: [local-model]

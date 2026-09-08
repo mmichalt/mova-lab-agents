@@ -20,9 +20,22 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `PORT` | `3000` | Empty values use the default. `0` binds an ephemeral port. |
 | `LOG_LEVEL` | `info` | Pino level: `fatal` … `silent`. |
 | `SERVICE_TOKEN` | (required) | Shared inbound token; `Authorization: Bearer <token>`. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin for host processes (`npm run dev`). The Compose `agents` service always uses `http://ollama:11434` and ignores this host value. Requests cannot choose a server, pull a model, or fall back to the cloud. |
+| `OLLAMA_MODEL` | `qwen3:4b-instruct` | Explicit local model tag. |
+| `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`. |
+| `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
+| `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-Business routes require the service token. JSON bodies are limited to 16 KiB.
+`POST /content-drafts` requires the service token, sends one structured chat
+request to the configured Ollama server, and returns proposals with
+`requiresHumanApproval: true`. Invalid teacher input is rejected before any
+provider call. Schema-valid model refusals return `422`; malformed, truncated,
+or unexpected model output returns `502`; missing models return `503`
+`MODEL_UNAVAILABLE`; load/OOM and rejected settings return `503 MODEL_CAPACITY`;
+unreachable or overloaded Ollama returns `503 PROVIDER_UNAVAILABLE`; attempt
+timeouts return `504`. Content checks are empty until a later ticket. JSON
+bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID and redact authorization
 fields.
@@ -46,7 +59,18 @@ Documented examples: `docs/examples/content-request.json`,
 phrase is a mechanical check later; it does not establish phonetic correctness,
 hard/soft realization, or therapeutic appropriateness.
 
-Schema cases run with `npm test` (no GPU, Ollama, or live inference).
+Schema cases and provider-boundary tests run with `npm test` (no GPU, Ollama, or
+live inference). Provider tests use a local fake HTTP server and assert native
+Ollama chat fields. Do not treat those fixtures as quality evidence.
+
+Optional live generation (Ollama must already have the model):
+
+```sh
+curl -sS http://127.0.0.1:3000/content-drafts \
+  -H "Authorization: Bearer $SERVICE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/content-request.json
+```
 
 SIGTERM/SIGINT stop accepting connections, drain for **10 seconds**, then abort
 remaining in-flight work.
@@ -93,8 +117,9 @@ docker build -t mova-lab-agents .
 docker run --rm -e SERVICE_TOKEN=replace-me -p 127.0.0.1:3000:3000 mova-lab-agents
 ```
 
-`GET /health` is process liveness only. The service does not need a GPU,
-Ollama, or an LLM API key.
+`GET /health` is process liveness only. Ordinary CI does not need a GPU,
+Ollama, or an LLM API key. `POST /content-drafts` uses the configured local
+Ollama URL and model; it never pulls models or falls back to a cloud provider.
 
 ### Local Ollama (`local-model` profile)
 
@@ -120,7 +145,10 @@ docker compose exec ollama ollama ps
 
 After a prompt, `ollama ps` should show `100% GPU`. Record CPU offload instead
 of assuming GPU acceleration. Models persist in the `ollama` volume at
-`/root/.ollama`. Generation smoke coverage belongs to later tickets.
+`/root/.ollama`. Generation smoke coverage belongs to later tickets. From the
+host, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`; the Compose
+`agents` service always uses `http://ollama:11434`, even if `.env` sets the
+host URL.
 
 ### GPU prerequisites
 
