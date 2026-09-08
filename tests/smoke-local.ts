@@ -42,11 +42,20 @@ function gpuShare(ps: Record<string, unknown>, model: string) {
     const item = entry as Record<string, unknown>;
     return item.name === model || item.model === model;
   }) as Record<string, unknown> | undefined;
-  if (!found) return { processor: 'not-loaded', size: null, sizeVram: null, gpuPercent: null };
+  if (!found) {
+    return {
+      processor: 'not-loaded',
+      size: null,
+      sizeVram: null,
+      gpuPercent: null,
+      fullyOnGpu: false,
+    };
+  }
   const size = typeof found.size === 'number' ? found.size : null;
   const sizeVram = typeof found.size_vram === 'number' ? found.size_vram : null;
+  const fullyOnGpu = size !== null && size > 0 && sizeVram === size;
   const gpuPercent = size && sizeVram !== null ? Math.round((sizeVram / size) * 100) : null;
-  return { processor: found.processor ?? null, size, sizeVram, gpuPercent };
+  return { processor: found.processor ?? null, size, sizeVram, gpuPercent, fullyOnGpu };
 }
 
 function nvidiaGpu() {
@@ -157,7 +166,7 @@ async function main() {
     },
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (!settingsSufficed || truncated || gpu.gpuPercent !== 100) process.exitCode = 1;
+  if (!settingsSufficed || truncated || !gpu.fullyOnGpu) process.exitCode = 1;
 }
 
 function summarize(

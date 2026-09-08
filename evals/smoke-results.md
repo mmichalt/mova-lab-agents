@@ -6,7 +6,7 @@ Command: `npm run smoke:local` against host `npm run dev` and Compose
 
 The script writes wall time, HTTP status, GPU share, hardware, and property
 checks to stdout. That JSON is saved as [`smoke-report.json`](smoke-report.json)
-(`gpuPercent` 100, all HTTP 200, no truncation). Token and load columns are
+(`size` = `size_vram`, all HTTP 200, no truncation). Token and load columns are
 **not** in the HTTP body; they come from matching `llm attempt completed`
 log lines on the same `requestId`. Application `attemptId` values were logged;
 provider request IDs were not fabricated.
@@ -33,7 +33,8 @@ process.
 ## GPU
 
 After the verified cold mixed request, `GET /api/ps` reported `size` =
-`size_vram` = 3178149969 (~3.2 GB), **100% GPU**. `ollama ps` showed
+`size_vram` = 3178149969 (~3.2 GB), so the smoke treated it as fully on GPU
+(byte-equal, not a rounded percentage). `ollama ps` showed
 `qwen3:4b-instruct ... 3.2 GB  100% GPU  4096`. No CPU offload. The script
 unloaded the model (`keep_alive: 0`) and waited until `/api/ps` was empty
 before timing the cold run.

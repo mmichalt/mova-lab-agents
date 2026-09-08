@@ -176,8 +176,9 @@ npm run smoke:local
 model and waits until it is gone from `/api/ps`, then records cold and warm
 latency for the mixed Р/Л case, GPU share from `GET /api/ps`, structured-output
 mapping for Р, Л, and both, and a 12-exercise maximum-size request. It exits
-non-zero on HTTP failure, truncation (`PROVIDER_INCOMPLETE`), or GPU share
-other than 100%. Property failures (for example missing target letters) are
+non-zero on HTTP failure, truncation (`PROVIDER_INCOMPLETE`), or when
+`size_vram` is not exactly equal to `size` (partial CPU offload, including
+values that would round to 100%). Property failures (for example missing target letters) are
 recorded and do not fail the process. HTTP bodies omit usage; match `requestId`
 to `llm attempt completed` logs. Record digest, quantization, Ollama version,
 wall times, GPU percent, measured `nvidia-smi` hardware, and whether 4096
