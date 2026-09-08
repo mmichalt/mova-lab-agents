@@ -400,9 +400,10 @@ In the planned Compose file, name the inference service `ollama`, use the offici
 `ollama/ollama` image with a recorded tested version/digest, mount a named volume
 at `/root/.ollama`, and request NVIDIA GPU access (equivalent to `--gpus all`).
 Use a current compatible NVIDIA driver; Linux Docker also needs NVIDIA Container
-Toolkit. Windows Docker GPU setup requires its supported WSL2 backend. Document
-the host-specific prerequisites when implementing; the workstation OS is not yet
-specified. Keep GPU tooling out of the Express image.
+Toolkit. Windows Docker GPU setup requires its supported WSL2 backend. This
+workstation is Ubuntu 26.04 LTS on WSL2; enable Docker Desktop WSL integration
+and NVIDIA GPU-PV before using the `local-model` profile. Keep GPU tooling out
+of the Express image.
 [Ollama Docker setup](https://docs.ollama.com/docker),
 [Docker Desktop GPU support](https://docs.docker.com/desktop/features/gpu/).
 

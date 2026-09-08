@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 and AG-002 are complete. Remaining tickets are unstarted.
+**Status:** AG-001, AG-002, and AG-003 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -30,7 +30,7 @@ are stable identifiers, not issue numbers from an external tracker.
 
 - [x] [AG-001 — Bootstrap TypeScript and Express](#ag-001)
 - [x] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
-- [ ] [AG-003 — Docker support and CI](#ag-003)
+- [x] [AG-003 — Docker support and CI](#ag-003)
 - [ ] [AG-004 — Recording-proposal contracts](#ag-004)
 - [ ] [AG-005 — One structured LLM generation operation](#ag-005)
 - [ ] [AG-006 — Provider tests and baseline examples](#ag-006)
@@ -139,7 +139,7 @@ checks for infrastructure that does not yet exist.
 **Stage:** 1  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-002](#ag-002)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Make the service reproducible outside the
 development shell and understand build-time versus runtime dependencies.
@@ -159,8 +159,8 @@ Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 - README explains local and Docker startup and the expected environment variables.
 - Document host-specific GPU prerequisites (Linux NVIDIA Container Toolkit or
   Windows Docker/WSL2 setup), a tested Ollama image version/digest, explicit model
-  pull, and `ollama ps` verification. The workstation OS still needs establishing
-  during implementation; do not assume GPU passthrough is already configured.
+  pull, and `ollama ps` verification. This workstation is Ubuntu 26.04 LTS on
+  WSL2; do not assume GPU passthrough is already configured.
 - Ollama uses `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, and
   `OLLAMA_NO_CLOUD=1`; publish its API only on `127.0.0.1:11434` for host access.
 - Document host URL `http://localhost:11434` versus Compose URL
@@ -171,6 +171,14 @@ and execute the CI commands locally. Validate Compose configuration without a
 GPU. Separately verify local GPU access and model-volume persistence when the
 profile is exercised; record unavailable hardware checks rather than claiming
 they passed. Generation smoke coverage belongs to AG-006.
+
+Recorded on Ubuntu 26.04 LTS / WSL2, Node 24.19, Docker Desktop 4.87.0:
+image built from the lockfile; runtime user `node`; no `.env` or TypeScript in
+the image; `GET /health` returned `{"status":"ok"}`; `biome ci`, typecheck,
+tests, build, and `docker compose config` passed. GPU: RTX 5060 Laptop visible
+to `nvidia-smi` and inside the Ollama container; `/root/.ollama` survived
+restart. Host `11434` was already bound by another stack; Compose-network
+`http://ollama:11434/api/tags` returned 200. `qwen3:4b-instruct` was not pulled.
 
 **Out of scope:** Deployment, Kubernetes, database containers, Redis, and changes
 to Mova-Lab deployment.

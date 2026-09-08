@@ -1,0 +1,33 @@
+# Host Ollama URL: http://localhost:11434
+# Compose Ollama URL: http://ollama:11434
+# Start Ollama with: docker compose --profile local-model up -d ollama
+
+name: mova-lab-agents
+
+services:
+  agents:
+    build: .
+    image: mova-lab-agents
+    stop_grace_period: 15s
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      PORT: "3000"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:?set SERVICE_TOKEN in .env}
+
+  ollama:
+    profiles: [local-model]
+    image: ollama/ollama:0.33.3@sha256:32931b46719f673c05fdbaa81ccb26da18ea4a1c57590a754874ab28ba269eb2
+    ports:
+      - "127.0.0.1:${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NO_CLOUD: "1"
+    gpus: all
+
+volumes:
+  ollama:
