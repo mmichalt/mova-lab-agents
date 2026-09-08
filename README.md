@@ -56,7 +56,7 @@ that file even for `config` and the `local-model` profile.
 
 The image is a multi-stage Debian slim build: TypeScript compiles in the first
 stage; the runtime has production `npm ci` from the lockfile, runs as `node`,
-and does not contain `.env`. GPU access uses Compose `gpus: all` (Compose v2.3+).
+and does not contain `.env`. GPU access uses Compose `gpus: all` (Compose 2.30+).
 
 ```sh
 docker compose up --build -d
