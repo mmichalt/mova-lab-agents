@@ -16,6 +16,7 @@ The decisions we settled on are:
 - Start with recording exercises targeting **Р and Л**.
 - Accept structured fields, with optional teacher instructions.
 - Deliver standalone, reviewable proposals before integrating the Teacher UI.
+- Run local inference with Ollama in Docker and `qwen3:4b-instruct` as the learning baseline.
 - Introduce SQLite when workflows need persistence.
 - Later, human approval accepts a fixed revision and imports it into Content
   Studio as **unpublished drafts**.
@@ -48,7 +49,7 @@ Initially:
 HTTP request
     → Express route
     → explicit generation function
-    → OpenAI API
+    → Ollama HTTP API → local qwen3:4b-instruct
     → runtime validation
     → draft proposal response
 
@@ -120,6 +121,7 @@ tests/
   config.test.ts
 
 Dockerfile
+compose.yaml        # service and optional local-model profile for Ollama
 .dockerignore
 .env.example
 .gitignore
@@ -147,7 +149,7 @@ src/
     validation.ts    # ordinary deterministic checks
 
   llm/
-    openai.ts        # provider client, request/response boundary
+    ollama.ts        # native fetch, request/response boundary
     content.ts       # vocabulary, generation, review, revision calls
     prompts.ts       # named, versioned prompt definitions
 
@@ -275,7 +277,7 @@ information and evaluations.
 
 | Stage | Endpoint | Behavior |
 | --- | --- | --- |
-| 1 | `GET /health` | Process liveness; no paid provider calls. |
+| 1 | `GET /health` | Process liveness; no model or other external calls. |
 | 2–5 | `POST /content-drafts` | Synchronous generation; `200` with proposals and checks. No retrieval guarantee. |
 | 7 | `POST /workflows/content-generation` | Create and persist a run; initially execute synchronously to a checkpoint, then return `201` with the run. |
 | 7 | `GET /workflows/:id` | Retrieve authorized workflow state, output revision, checks, and import progress. |
@@ -329,6 +331,11 @@ Configuration starts with `PORT`, `LOG_LEVEL`, and an inbound service token.
 Add provider configuration in stage 2. Use Node's environment-file support
 locally; exclude `.env` from Git and Docker context.
 
+Add Compose support for the service and an optional `local-model` profile for
+Ollama, with a persistent model volume and NVIDIA GPU access. Keep the service's
+health/startup and CI independent of Ollama; model download and GPU verification
+are explicit local setup steps. Stage 2 defines that setup and provider configuration.
+
 Implement:
 
 - A small JSON request limit, initially 16 KiB.
@@ -367,14 +374,72 @@ validated request
 **Problem:** Turn a teacher's requirements into structured content without
 concealing the model interaction.
 
-**Initial provider:** OpenAI, using its official SDK and Responses API. Start with
-`gpt-4.1-mini-2025-04-14` as a pinned learning baseline. It supports structured
-output and tool calling and avoids introducing reasoning-specific settings
-immediately. This is a baseline to evaluate, not a claim that it is the best
-Ukrainian content model.
-[Model documentation](https://developers.openai.com/api/docs/models/gpt-4.1-mini).
+**Initial provider:** Local Ollama, using Node's native `fetch` and
+`POST /api/chat`. Start with `qwen3:4b-instruct` (Q4_K_M, approximately 2.5 GB
+download) as the learning baseline. Runtime memory exceeds download size. Evaluate
+its Ukrainian wording and Р/Л exercise quality before treating its proposals as
+useful; hardware fit alone does not establish quality.
+[Model documentation](https://ollama.com/library/qwen3:4b-instruct).
 
-Do not use the Agents SDK or an orchestration framework.
+Use one model for vocabulary, generation, review, and later agent decisions,
+with separate prompts and explicit inputs. No provider SDK, provider-switching
+framework, or orchestration framework is needed. Cloud providers are deferred;
+there is no automatic cloud fallback.
+
+**Local development setup:** The target workstation has a 14th-generation i7,
+32 GB RAM, and an RTX 5060, assumed to be the standard 8 GB VRAM model. Begin
+with the 4B quantized model, a 4,096-token context, and one inference request at
+a time. These are starting settings to measure, not a throughput guarantee.
+System RAM does not extend GPU VRAM. Compare a larger quantized model only when
+quality measurements justify it and memory/latency checks pass.
+[GPU support](https://docs.ollama.com/gpu),
+[RTX 5060 specifications](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5060-family/).
+
+In the planned Compose file, name the inference service `ollama`, use the official
+`ollama/ollama` image with a recorded tested version/digest, mount a named volume
+at `/root/.ollama`, and request NVIDIA GPU access (equivalent to `--gpus all`).
+Use a current compatible NVIDIA driver; Linux Docker also needs NVIDIA Container
+Toolkit. Windows Docker GPU setup requires its supported WSL2 backend. Document
+the host-specific prerequisites when implementing; the workstation OS is not yet
+specified. Keep GPU tooling out of the Express image.
+[Ollama Docker setup](https://docs.ollama.com/docker),
+[Docker Desktop GPU support](https://docs.docker.com/desktop/features/gpu/).
+
+Set Ollama's `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, and
+`OLLAMA_NO_CLOUD=1`. Publish
+`127.0.0.1:11434:11434` for host development; containers on the Compose network
+use `http://ollama:11434`. Pull models explicitly, never during an HTTP generation
+request or ordinary CI. Planned setup/verification commands:
+
+```bash
+docker compose --profile local-model up -d ollama
+docker compose exec ollama ollama pull qwen3:4b-instruct
+docker compose exec ollama ollama run qwen3:4b-instruct
+docker compose exec ollama ollama ps
+```
+
+After a prompt, verify `100% GPU` in `ollama ps`; record partial CPU offload
+instead of assuming GPU acceleration. Keep the downloaded model across container
+restarts. Record its digest from `/api/tags` and the Ollama version because tags
+can change; do not automatically pull a new model during a run.
+[Memory/concurrency guidance](https://docs.ollama.com/faq),
+[Model metadata](https://docs.ollama.com/api/tags).
+
+Stage-2 service configuration (parse with Zod):
+
+| Variable | Initial value | Purpose |
+| --- | --- | --- |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` on host; `http://ollama:11434` in Compose | Trusted local server address, never supplied by a content request. |
+| `OLLAMA_MODEL` | `qwen3:4b-instruct` | Explicit local model tag. |
+| `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`; shared input/output context capacity. |
+| `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`; maximum generated tokens. |
+| `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | Configurable attempt deadline, including queue wait, loading, and body reading. |
+
+Test maximum-size requests, schemas, review feedback, and later tool history
+against the context budget. Do not silently drop requirements or accept truncated
+output. If the 12-exercise case needs more room, measure an 8,192-token context
+and a larger output allowance, then record the tested settings in both documents.
+The defaults are provisional until the local smoke test passes.
 
 **Messages actually sent:**
 
@@ -394,38 +459,52 @@ The system message carries application instructions; the user message supplies
 the particular task. Keeping them separate makes the trust boundary legible.
 A system instruction is still not an authorization mechanism.
 
-Use `responses.create` with a strict JSON-schema response format generated from
-the output schema. Inspect response status and refusal content before parsing
-the returned JSON, then validate locally.
+Send `model`, `messages`, `stream: false`, and a JSON Schema generated with
+`z.toJSONSchema()` in `format`. Define a model-facing envelope with either
+`status: "generated"` and `proposals`, or `status: "refused"` and `reason`;
+validate that union locally and map only generated proposals to the domain result.
+The schema excludes application-assigned local IDs. Ollama has no dedicated
+OpenAI-style refusal field: a schema-valid refusal is terminal; free-text refusal
+is invalid output, not a reliably detectable protocol event. Do not guess refusal
+from keywords or claim complete refusal detection.
+
+Check HTTP errors and validate the Ollama response envelope before parsing
+`message.content`. Require completion, reject truncation and unexpected tool calls
+in this generation operation, then parse JSON and apply the local output schema.
+Keep response-body reading inside the attempt deadline.
+[Chat API](https://docs.ollama.com/api/chat).
 
 Structured output constrains the response shape; it does not prove that an animal
 name is appropriate, a phrase contains the intended sound, or an exercise
 satisfies the application's business rules. Refusal and incomplete output need
 explicit handling.
-[Structured output documentation](https://developers.openai.com/api/docs/guides/structured-outputs).
+[Structured output documentation](https://docs.ollama.com/capabilities/structured-outputs).
 
 **Parameters to teach:**
 
-- `model`: capability, price, latency, and reproducibility baseline.
-- `temperature`: start at `0.3` for generation; demonstrate how sampling changes variety. Zero is not a reproducibility guarantee.
-- `top_p`: leave at its default while learning temperature.
-- `max_output_tokens`: initially 3,000 per generation call.
-- Deadline: initially 30 seconds per provider attempt.
-- `store: false`: do not rely on provider-side response storage for workflow state.
-- No streaming initially; the consumer needs a complete validated object.
+- `model`: capability, memory, latency, and reproducibility baseline.
+- `options.temperature`: start at `0.3` for generation; demonstrate how sampling changes variety. Zero is not a reproducibility guarantee.
+- `options.top_p`: leave at its default while learning temperature.
+- `options.num_ctx` and `options.num_predict`: context and output limits from configuration above.
+- Deadline: initially 120 seconds per provider attempt, configurable after measurement.
+- Use the instruct baseline without adding a thinking phase; evaluate any different model's supported settings separately.
+- `stream: false`: the consumer needs a complete validated object.
+- Pass conversation state explicitly; Ollama model residency is not workflow persistence.
 
 Temperature and other settings are model-specific. A later provider or model
 must be evaluated with its supported parameters.
 
 Keep the entire first operation readable in one module. When more operations
 arrive, extract only repeated provider transport, usage collection, and response
-handling into `llm/openai.ts`. Domain schemas and orchestration must not import
-OpenAI response types.
+handling into `llm/ollama.ts`. Domain schemas and orchestration must not depend
+on Ollama response envelopes.
 
-Disable SDK automatic retries initially with `maxRetries: 0`; otherwise a
-“single call” lesson may hide several HTTP attempts. Introduce visible application
-retries in stage 5.
-[Official SDK retry behavior](https://github.com/openai/openai-node#retries).
+Issue one HTTP attempt initially, with no application retries until stage 5.
+Assign application attempt IDs for correlation; do not invent provider request IDs.
+Map `prompt_eval_count` to input tokens, `eval_count` to output tokens, and
+`prompt_eval_cached_count` to cached input tokens only when reported; retain
+missing values as `null`. Local inference has no per-token API bill; leave `estimatedCostUsd` null
+for unmeasured electricity/hardware cost and label that explicitly in reports.
 
 **Malformed-output policy:** Fail explicitly. Do not strip code fences, extract
 arbitrary JSON substrings, or coerce incorrect types into accepted content.
@@ -438,8 +517,10 @@ collect examples of weaknesses.
 to diagnose in one prompt. Stage 3 separates responsibilities; stage 5 handles repair.
 
 **Acceptance:** Synthetic provider responses cover valid output, invalid JSON,
-wrong shape, refusal, truncation, timeout, and authentication failure. One
-optional manual paid smoke test verifies actual account/model compatibility.
+wrong shape, schema-valid refusal, free-text refusal, truncation, timeout, missing
+model, and unavailable server. An optional manual local smoke test verifies GPU
+use, schema compatibility, Ukrainian quality, maximum-size inputs, and cold/warm
+latency without cloud credentials. Offline tests cannot establish model quality.
 
 **Learned:** Messages, sampling, structured output, runtime validation, provider
 errors, and usage metadata.
@@ -520,8 +601,9 @@ candidate → deterministic checks
                 merge results
 ```
 
-**Problem:** Independent semantic checks should not unnecessarily add their
-latencies together.
+**Problem:** Learn how independent semantic checks start, settle, and retain
+partial results when one fails. Concurrent submission does not guarantee faster
+inference on one GPU.
 
 Run deterministic validation first. A schema check is too cheap to justify
 parallel execution and may establish whether reviewers can safely consume the candidate.
@@ -533,6 +615,8 @@ Then introduce two independent LLM operations:
 
 Both receive the same immutable candidate and request. Neither receives the
 other reviewer's verdict.
+Keep an explicit refused branch in subsequent structured operation schemas too;
+it is terminal for generation and cannot be treated as a successful review.
 
 **Teach `Promise.all`:**
 
@@ -543,8 +627,12 @@ const [age, language] = await Promise.all([
 ]);
 ```
 
-Both operations are started before awaiting the combined result. Elapsed time
-approaches the slower operation instead of their sum.
+Both operations are started before awaiting the combined result. With sufficient
+provider capacity, elapsed time can approach the slower operation instead of
+their sum. The local baseline keeps `OLLAMA_NUM_PARALLEL=1`, so Ollama queues
+inference and latency may approach the sum. Keep the concurrency lesson and
+controlled-promise tests; only increase GPU inference concurrency after measuring
+memory and latency. Queue wait counts toward each attempt's timeout.
 
 However:
 
@@ -566,7 +654,7 @@ cannot silently become a pass.
 **Why sufficient:** There are only two fixed branches, and their results can be
 merged explicitly.
 
-**Failure modes and next concept:** Rate limits, correlated model errors, and
+**Failure modes and next concept:** Local saturation, correlated model errors, and
 reviewer disagreement appear. Stage 5 bounds retries and revisions; stage 8
 bounds concurrent runs; stage 10 measures whether reviewers improve outcomes.
 
@@ -614,7 +702,7 @@ type GenerationState = {
 ```
 
 Define `Vocabulary`, `AttemptSummary`, and `WorkflowError` only from fields needed
-by these operations. Keep SDK objects, `Error` instances, promises, and controllers
+by these operations. Keep transport objects, `Error` instances, promises, and controllers
 outside serializable state.
 
 The orchestrator owns mutations. Parallel checks return results; they never edit
@@ -624,18 +712,18 @@ the state directly.
 
 | Mechanism | Trigger | Behavior |
 | --- | --- | --- |
-| Transport retry | Rate limit, temporary upstream failure, connection failure | Repeat the same operation and input. |
+| Transport retry | Temporary overload, upstream failure, connection failure | Repeat the same operation and input. |
 | Content revision | Schema/content failure or a completed reviewer's blocking finding | Generate a new candidate using explicit feedback. |
 
 Defaults:
 
 - Initial candidate plus at most **two revisions**.
 - At most **two transport attempts** per operation.
-- Retry temporary connection errors, 429, and 5xx with jittered backoff; respect `Retry-After` within the remaining deadline.
-- Do not retry invalid credentials, invalid provider configuration, or refusals.
+- Retry temporary connection errors, 429, and transient 5xx (including queue overload) with jittered backoff; respect `Retry-After` within the remaining deadline. Do not classify every 5xx as transient: model load/OOM errors need operator action.
+- Do not retry a missing model (404), invalid provider configuration, unsupported settings, model load/OOM failures, or schema-valid refusals. Never auto-pull models or fall back to a cloud provider.
 - A malformed generation response consumes a candidate attempt. Regeneration receives schema errors without unsafe local repair.
 - A malformed reviewer response is a review-operation failure; allow one bounded re-ask, then fail.
-- Stage 5 adds a maximum of 20 provider requests and a 180-second workflow deadline. Every provider attempt counts.
+- Stage 5 adds a maximum of 20 provider requests and configurable `WORKFLOW_TIMEOUT_MS`, initially `600000` (10 minutes). Every provider attempt counts; queue wait and model loading consume the deadline. Persist the chosen limit/deadline with the run; tune using measured local latency without resetting active budgets.
 - Revalidate every new candidate. Passing results from a previous version cannot validate a changed candidate.
 - Keep original requirements fixed through revisions.
 - Stop on repeated identical invalid candidates or exhausted limits.
@@ -644,8 +732,8 @@ An operationally unavailable reviewer does not trigger content revision:
 changing the exercise cannot fix a network timeout.
 
 Use `AbortSignal` propagation for deadlines. `Promise.race` alone does not stop
-underlying work, and cancellation cannot guarantee that an upstream provider
-incurred no cost.
+underlying work, and cancellation cannot guarantee that Ollama immediately stops
+GPU computation. Use the smaller of remaining workflow time and attempt timeout.
 
 **Human checkpoint in this stage:** Return `READY_FOR_REVIEW` proposals with
 `requiresHumanApproval: true`. There is no durable approval endpoint yet;
@@ -676,7 +764,7 @@ workflow → Mova-Lab API → constraints/search results
 Model-selected tool use:
 model → proposed tool call → validate/authorize → execute
   ^                                             |
-  └──────── tool result + call identifier ───────┘
+  └──────── assistant/tool message history ──────┘
 ```
 
 **Problem:** The workflow needs authoritative application information instead of guesses.
@@ -700,16 +788,28 @@ This is the first actual agent loop under our definition:
 2. Inspect returned tool requests.
 3. Validate tool name and arguments.
 4. Execute authorized application code.
-5. Return bounded results using the matching tool-call identifier.
-6. Ask the model for its next action or final structured vocabulary.
+5. Append the assistant's tool-call message and each bounded result as a `tool`
+   message with the corresponding `tool_name`, preserving call/result order.
+6. Ask the model for its next action. When tool selection finishes, use a separate
+   schema-constrained call without tools for the final vocabulary; it also counts
+   toward the five-turn and overall request budgets.
 
 The model proposes calls; the server executes them. Tool definitions do not grant
 access by themselves.
-[Function-calling protocol](https://developers.openai.com/api/docs/guides/function-calling).
+[Ollama tool-calling protocol](https://docs.ollama.com/capabilities/tool-calling).
+
+Use native `tools` and `message.tool_calls`, with locally validated argument
+objects; do not assume an OpenAI `call_id` exists. Preserve any identifiers/indexes
+the tested Ollama version supplies and assign local audit IDs as needed. Keep
+tool selection separate from `format`-constrained final output so that support
+for tools and structured output need not imply support for both in one call.
+Run an explicit local tool smoke test with stub search data for the chosen model;
+tool reliability is a separate measurement from Ukrainian generation quality.
 
 Set a maximum of four tool calls and five model turns for vocabulary selection.
 Execute requested calls sequentially initially; parallel tool calls add little
-to this lesson. On exhaustion, fail the step explicitly.
+to this lesson. Reserve the final turn for schema-constrained vocabulary; once
+only that turn remains, omit tools. On exhaustion, fail the step explicitly.
 
 **Companion Mova-Lab work:**
 
@@ -787,6 +887,10 @@ transactions. This stage supports one host; do not place SQLite on a network fil
 
 Save each step's validated output and checkpoint transition atomically.
 
+At this stage, `/ready` checks SQLite and Ollama/model availability with bounded
+metadata requests such as `/api/tags`; it does not generate text, pull weights,
+or guarantee sufficient free VRAM. `/health` remains process liveness only.
+
 **State model:**
 
 ```text
@@ -811,7 +915,7 @@ It never means published.
 - Heartbeat during active execution; checkpoint updates must match the current claim token.
 - Expired claims become resumable. A stale executor cannot overwrite a newer executor's state.
 - Resume from the last committed checkpoint; preserve revision and request counters.
-- If the provider answered but the process died before saving, that call may repeat and cost money. Do not claim exactly-once LLM execution.
+- If Ollama answered but the process died before saving, that call may repeat and consume compute. Do not claim exactly-once LLM execution.
 
 Stage 7 deliberately remains synchronous during active execution. After a restart,
 mark interrupted runs resumable and use the authorized resume endpoint. Do not
@@ -883,7 +987,7 @@ separate API and worker entry points.
 - **Consumer:** Worker claims the run and resumes it.
 - **Acknowledgement:** Completing the worker handler marks the queue job complete. Application checkpoints must be committed first.
 - **Retry:** Temporary execution failures cause another delivery within a bounded attempt policy.
-- **Concurrency:** Initially one worker process with two concurrent runs.
+- **Concurrency:** Initially one worker process with one active run, sharing the local Ollama instance. Review requests can still fan out within a run while Ollama executes one inference at a time; increase run concurrency only after measuring queue wait and GPU memory.
 - **Failure handling:** Retain failed jobs and persisted error details; provide an operator re-drive procedure.
 
 Reaching `AWAITING_APPROVAL` completes the current queue job. Never keep a worker
@@ -918,7 +1022,7 @@ or a clear rejection.
 **Why sufficient:** One queue and one worker type remove HTTP lifecycle dependence
 without turning the service into several microservices.
 
-**Failure modes and next concept:** More workers can exceed provider limits;
+**Failure modes and next concept:** More workers can saturate local inference;
 SQLite eventually restricts deployment topology. Add shared provider rate limiting
 when adding worker replicas, and migrate to PostgreSQL before running across
 multiple hosts.
@@ -987,6 +1091,8 @@ failure explicitly.
 
 **Acceptance:** Script valid and invalid action sequences, missing prerequisites,
 unknown actions, premature finish, repeated-action loops, and attempts to bypass approval.
+Evaluate the selected local model on bounded action sequences before enabling
+real supervisor experiments; successful generation is not proof of planning quality.
 
 **Learned:** Supervisors, constrained planning, policy enforcement, and the
 practical reliability tradeoff of model-controlled execution.
@@ -1009,7 +1115,7 @@ Observability begins earlier; this stage makes it systematic:
 | Stage | Introduce |
 | --- | --- |
 | 1 | Request IDs, structured logs, error codes, request duration. |
-| 2 | Provider request ID, model, prompt version, latency, reported tokens. |
+| 2 | Application attempt ID, model tag/digest, Ollama version, prompt version, latency, reported tokens, and model-load timing. |
 | 3–5 | Step timing, candidate versions, validation findings, retries, revisions. |
 | 7 | Workflow IDs, durable attempt history, approval/import audit events. |
 | 8 | Queue wait, deliveries, stale claims, worker failures. |
@@ -1019,10 +1125,13 @@ At stage 10, trace the HTTP request, queue execution, workflow steps, provider
 attempts, and Mova-Lab calls. Use links across asynchronous jobs and approval
 requests; do not keep a span open for days while waiting for a human.
 
-Record estimated cost from a versioned price table, using reported input,
-cached-input, and output usage. Missing usage or unknown pricing is `null`,
-not zero. Provider charges after lost responses may be unknown; reconcile
-aggregate estimates against provider billing.
+Record reported input, cached-input (when available), and output usage without
+double counting. Missing usage remains `null`. Track wall time and Ollama load,
+prompt-evaluation, and generation durations with explicit units; report cold and
+warm runs separately. Local per-token API charges are absent, but electricity
+and hardware costs are unmeasured: keep `estimatedCostUsd: null` with that label.
+Add a versioned price table and billing reconciliation only if a paid provider
+is introduced. Never present missing measurements as zero total cost.
 
 **Evaluation system:**
 
@@ -1062,10 +1171,15 @@ Evaluations estimate the quality of variable model outputs across a representati
 
 Avoid exact-string golden answers. Many different exercises can be acceptable.
 
-The paid evaluation runner is an explicit command, excluded from normal CI,
-with a maximum call/spend budget and three repetitions per case. Compare
-prompt/model versions on the same cases. Maintain a holdout subset that is not
-used to tune prompts.
+The local evaluation runner is an explicit command, excluded from normal CI,
+with maximum call, generated-token, and elapsed-time budgets and three repetitions
+per case. Reserve call/token allowances before concurrent submissions and cap
+each call's output and timeout by its remaining allowance; stop if
+usage is unavailable and the token budget cannot be established. Compare prompts
+and models on the same cases, recording model digest/quantization, Ollama version,
+context/output settings, hardware, and concurrency. Maintain a holdout subset
+that is not used to tune prompts. Add an explicit spend budget only when a paid
+provider exists.
 
 An LLM judge can assist later, but it must be calibrated against therapist
 ratings; agreement between two model calls is not independent proof of correctness.
@@ -1110,10 +1224,11 @@ useful; omit raw upstream bodies, credentials, and stack traces.
 | Insufficient authority | `403` | No state-changing action. |
 | Missing or inaccessible run | `404` | Avoid leaking other users' run existence. |
 | Stale approval or conflicting idempotency key | `409` | Preserve existing state. |
-| Provider refusal | `422` with a distinct code | Terminal; do not revise around it. |
+| Schema-valid model refusal | `422` with a distinct code | Terminal; do not revise around it. Free-text refusal follows malformed-output policy. |
 | Content revisions exhausted | `422` | Preserve failed candidate and feedback internally. |
 | Provider/tool malformed response | `502` | Apply only the defined bounded policy. |
 | Temporary provider/tool failure | `503` | Retry when classified as transient. |
+| Local model missing, unsupported settings, or model load/OOM failure | `503` with a distinct configuration/capacity code | Stop; operator fixes setup, no automatic pull or fallback. |
 | Workflow deadline | `504` for synchronous execution | Abort and record failure where persisted. |
 | Unexpected application error | `500` | Log once with correlation fields. |
 
@@ -1125,7 +1240,7 @@ Keep expected validation findings as data. Throw for operational failures and
 programming errors. One concrete error type carrying a code, safe message,
 and retryability is enough; no exception-class hierarchy is needed.
 
-### Testing without paid API calls
+### Testing without live model calls
 
 Inject concrete functions at external boundaries. A scripted fake LLM function
 can return successive candidates or throw designated errors. Derive its signature
@@ -1140,7 +1255,7 @@ and final transitions.
 | Deterministic functions | Table-driven normalization, counts, duplicates, and limits. |
 | Schemas | Missing fields, unknown fields, wrong types, and boundary lengths. |
 | Orchestration | Scripted success/failure sequences and checks of call order/input. |
-| Provider adapter | Fake SDK HTTP transport returning realistic Responses envelopes; verify messages, schema configuration, parsing, refusal, and usage. |
+| Provider adapter | Local fake HTTP server returning native Ollama envelopes; verify path, messages, format/options, parsing, completion, refusal envelope, errors, aborts, and usage. |
 | Parallel checks | Controlled promises, partial failure, abort propagation. |
 | Tools | Local fake HTTP server; validate path, auth, query bounds, response parsing, and errors. |
 | Persistence | Temporary real SQLite databases, transaction conflicts, reopening after checkpoints. |
@@ -1151,8 +1266,10 @@ and final transitions.
 Do not mock SQLite's transaction behavior or BullMQ's delivery semantics when
 those are what the test must prove.
 
-Normal CI has no provider credentials. An optional paid smoke test and the
-evaluation runner are separate, explicit commands.
+Normal CI requires no GPU, downloaded model, running Ollama, or cloud credentials.
+An optional local smoke test and the evaluation runner are separate, explicit
+commands. They record actual model results; fake responses do not count as quality
+evidence. CI must not pull models or invoke live inference.
 
 ### Security and data handling
 
@@ -1169,14 +1286,20 @@ evaluation runner are separate, explicit commands.
 - Initial diagnostic retention: seven days. Purge terminal workflow content after 30 days; retain minimal idempotency tombstones for 90 days. Pending human reviews are not silently purged.
 - Store real imported content and its audit history under Mova-Lab's policies.
 
-`store: false` is a request-storage choice, not a promise of zero provider
-retention. Before real deployment, check account-specific provider data controls;
-the application design should already minimize transmitted data.
+Local model requests stay within the configured host/Compose network. Bind the
+unauthenticated Ollama API to host loopback when publishing its port; do not expose
+it directly to browsers or the public network. Keep its base URL in trusted
+configuration, use only explicitly downloaded local models, and disable Ollama
+cloud features with `OLLAMA_NO_CLOUD=1`. Model downloads still require network
+access. Local execution does not remove the application's data-minimization,
+authorization, log-redaction, or retention requirements.
+[Local-only configuration](https://docs.ollama.com/faq).
 
 ### Versioning and recovery
 
 - Version prompts in Git from stage 2.
 - Record prompt, model, schema, and workflow versions with every persisted run.
+- Include model digest, quantization, Ollama version, and context/sampling settings. If the recorded model is unavailable or its tag resolves to a different digest, fail recovery explicitly instead of silently substituting weights.
 - Existing runs resume using their recorded workflow version.
 - Do not reinterpret old checkpoints using incompatible new code.
 - Initially retain handlers for active versions; if a version is no longer supported, fail recovery explicitly rather than guessing.
@@ -1223,7 +1346,7 @@ Basic observability and synthetic evaluation cases begin before the final milest
 | Second LLM provider | Evaluations, availability, or cost create a concrete reason. Add a second adapter against existing domain contracts. |
 | PostgreSQL | Multiple hosts, concurrent writers, or SQLite contention require it. |
 | Transactional outbox | Dispatch grows beyond a single reconstructible queue command. |
-| Shared provider limiter | More than one worker process can exceed account limits. |
+| Shared provider limiter | Additional worker processes saturate local inference or exceed a future provider's limits. |
 | Embeddings/vector search | Exact and lexical search measurably miss useful duplicate or vocabulary matches. |
 | MCP | Tools need to serve multiple independent clients through a shared protocol. |
 | Graph/agent framework | Explicit workflows have accumulated repeated persistence, scheduling, or graph-maintenance problems that a framework actually solves. |

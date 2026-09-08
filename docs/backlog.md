@@ -14,8 +14,10 @@ are stable identifiers, not issue numbers from an external tracker.
 - Update the relevant explanation and verification commands as behavior is implemented.
 - Use explicit TypeScript functions and small modules. Add no generic repositories,
   dependency-injection containers, abstract agent classes, or orchestration frameworks.
-- Ordinary automated verification must not call a paid LLM API.
-- Paid smoke tests and evaluations are separate, explicitly invoked activities.
+- Use local Ollama in Docker with `qwen3:4b-instruct` as the initial model, via native Node `fetch`; no cloud fallback or provider SDK.
+- Target the 14th-generation i7, 32 GB RAM, and RTX 5060 (assumed 8 GB VRAM) workstation; start with one loaded model and one inference at a time.
+- Ordinary automated verification requires no GPU, downloaded models, running Ollama, or cloud credentials and must not invoke live inference.
+- Local smoke tests and evaluations are separate, explicitly invoked activities; record actual results and model/runtime versions.
 - Keep publication outside this service and outside all model-visible tools.
 - Mark a ticket complete only after its acceptance criteria and verification pass.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
@@ -143,17 +145,30 @@ development shell and understand build-time versus runtime dependencies.
 
 **Implementation scope:** Add a multi-stage Debian-slim Dockerfile, non-root runtime,
 production-only dependencies, Docker ignore rules, environment documentation,
-and CI for offline tests, type-checking, and production build.
+and CI for offline tests, type-checking, and production build. Add `compose.yaml`
+with the service and an optional `local-model` profile containing the official
+Ollama image, a persistent `/root/.ollama` volume, and NVIDIA GPU access.
 
 **Acceptance criteria:**
 
 - The image builds from the committed lockfile and serves health.
 - Runtime runs as non-root and does not contain the local `.env`.
-- CI succeeds without an LLM API key.
+- CI and standalone service health/startup work without a GPU, Ollama, downloaded models, or an LLM API key.
 - README explains local and Docker startup and the expected environment variables.
+- Document host-specific GPU prerequisites (Linux NVIDIA Container Toolkit or
+  Windows Docker/WSL2 setup), a tested Ollama image version/digest, explicit model
+  pull, and `ollama ps` verification. The workstation OS still needs establishing
+  during implementation; do not assume GPU passthrough is already configured.
+- Ollama uses `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`, and
+  `OLLAMA_NO_CLOUD=1`; publish its API only on `127.0.0.1:11434` for host access.
+- Document host URL `http://localhost:11434` versus Compose URL
+  `http://ollama:11434`; model downloads happen outside image builds and CI.
 
 **Verification:** Build and run the image, inspect its runtime user, request health,
-and execute the CI commands locally.
+and execute the CI commands locally. Validate Compose configuration without a
+GPU. Separately verify local GPU access and model-volume persistence when the
+profile is exercised; record unavailable hardware checks rather than claiming
+they passed. Generation smoke coverage belongs to AG-006.
 
 **Out of scope:** Deployment, Kubernetes, database containers, Redis, and changes
 to Mova-Lab deployment.
@@ -185,7 +200,7 @@ application-assigned and application content IDs absent.
 **Verification:** Table-driven valid, missing, oversized, unknown-field, wrong-type,
 unsupported-sound, and count-boundary cases.
 
-**Out of scope:** Paid generation, new exercise types, phonetic transcription,
+**Out of scope:** Live generation, new exercise types, phonetic transcription,
 application categories, and patient data.
 
 ### AG-005
@@ -199,21 +214,34 @@ application categories, and patient data.
 **Problem and learning objective:** Observe exactly what messages and parameters
 are sent to a model and how its response becomes trusted application data.
 
-**Implementation scope:** Add OpenAI's SDK and `POST /content-drafts`. Use the
-planned model baseline, versioned prompts, strict structured output, local
-validation, a 30-second attempt timeout, `store: false`, and disabled SDK retries.
-Capture model, provider request ID, prompt version, timing, and reported usage.
+**Implementation scope:** Add `POST /content-drafts` using native `fetch` to
+Ollama's `POST /api/chat`. Send `qwen3:4b-instruct`, versioned messages,
+`stream: false`, and `format: z.toJSONSchema(...)`; parse and validate the native
+response envelope and `message.content`. Use the architecture's model-facing
+generated/refused union and map generated proposals to the existing domain result.
+Add validated `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX` (4096),
+`OLLAMA_NUM_PREDICT` (2000), and `LLM_ATTEMPT_TIMEOUT_MS` (120000). Send context,
+output, and temperature (0.3) under `options`. Make one attempt with no retries.
+Capture application attempt ID, model tag/digest, Ollama version, prompt version,
+wall/load timing, and reported usage; leave unmeasured local cost null.
 
 **Acceptance criteria:**
 
 - Valid requests produce proposals with `requiresHumanApproval: true`.
 - System instructions and teacher task data are visibly separate.
-- Refusals, incomplete output, invalid JSON, and schema failures have explicit
-  safe outcomes; there is no permissive text-repair parser.
+- Schema-valid refusals are terminal; free-text refusals follow invalid-output
+  handling. Do not assume a dedicated provider refusal field or detect refusal
+  through guessed keywords.
+- HTTP errors, missing model, incomplete/truncated output, unexpected tool calls,
+  invalid JSON, and schema failures have explicit outcomes; no permissive repair.
+- Timeout/abort covers queue wait, model loading, and response-body reading.
+- The server URL/model come from trusted configuration; requests cannot choose
+  endpoints, pull models, or trigger a cloud fallback. No provider API key is needed.
 - Only the provider module depends on provider response types.
 
-**Verification:** Use a fake transport for a successful response and malformed or
-refused response; confirm invalid user input makes no provider call.
+**Verification:** Use a local fake HTTP server for successful, malformed, and
+schema-valid refused responses; assert native request fields and confirm invalid
+user input makes no provider call.
 
 **Out of scope:** Provider switching, streaming, decomposition, automatic retries,
 revision, persistence, and approval endpoints.
@@ -223,28 +251,38 @@ revision, persistence, and approval endpoints.
 **Title:** Test the provider boundary and establish baseline examples  
 **Stage:** 2  
 **Repository:** `mova-lab-agents`  
-**Dependencies:** [AG-005](#ag-005)  
+**Dependencies:** [AG-005](#ag-005), [AG-003](#ag-003)\
 **Status:** Unstarted
 
 **Problem and learning objective:** Distinguish testing the integration protocol
 from evaluating whether generated content is useful.
 
-**Implementation scope:** Add synthetic Responses API fixtures and fake SDK
-HTTP transport coverage. Seed a small synthetic request corpus, prompt/model
-version metadata, and a documented optional paid smoke-test procedure.
+**Implementation scope:** Add synthetic Ollama chat fixtures and local fake HTTP
+transport coverage. Seed a small synthetic request corpus and prompt/model/runtime
+metadata. Document an optional local smoke-test procedure using AG-003's Compose
+setup, without making GPU/model availability a dependency of ordinary tests.
 
 **Acceptance criteria:**
 
-- Tests inspect messages and schema settings and cover valid output, wrong shape,
-  invalid JSON, refusal, truncation, timeout, credentials failure, and usage parsing.
-- Normal tests work without credentials and do not contact the real provider.
+- Tests inspect path, messages, format/options, and cover valid output, wrong shape,
+  invalid JSON, explicit/free-text refusal, truncation, stalled response bodies,
+  aborts, missing model (404), overload (503), model load/OOM errors, unreachable
+  Ollama, and present/missing usage. Provider request IDs must not be fabricated.
+- Normal tests work without GPU/models/credentials and do not contact Ollama.
 - Initial examples cover Р, Л, and both; expected qualities are properties rather
   than exact generated strings.
-- The single-call baseline remains reproducible through recorded versions.
+- Record model tag/digest/quantization, Ollama version, context/output/sampling
+  settings, and hardware so the baseline can be reproduced without implying
+  identical stochastic wording.
+- Local smoke checks cover `100% GPU`, cold/warm latency, structured output,
+  Ukrainian quality, and maximum-size/12-exercise requests. Record whether the
+  initial 4096-context/2000-output settings suffice; if more capacity is needed,
+  measure adjusted settings and update both planning documents. Never silently
+  drop requirements to fit context or label truncated output a success.
 
-**Verification:** Run the suite with provider credentials absent and inspect
-transport-call assertions. The separately documented real API smoke test is
-optional and explicitly paid.
+**Verification:** Run the suite without Ollama or provider credentials and inspect
+transport-call assertions. Invoke the local model smoke test separately; record
+actual quality/latency/GPU results, or clearly state that it was not run.
 
 **Out of scope:** Full evaluation runner, model leaderboard, and fabricated
 live-provider results.
@@ -322,10 +360,16 @@ and the difference between negative feedback and operational failure.
 **Implementation scope:** Add age/instruction and language/theme review operations
 after deterministic checks. Use `Promise.allSettled`, immutable inputs, structured
 verdicts, and explicit result aggregation.
+Reuse the same local model for both prompts. Keep Ollama inference concurrency at
+one: requests may queue even though both application operations have started.
+Structured operation schemas retain an explicit refused branch; a refused review
+cannot become a pass or trigger candidate revision.
 
 **Acceptance criteria:**
 
 - Both reviews start independently and neither sees the other's verdict.
+- Document that concurrent promises do not guarantee GPU speedup; queue wait
+  consumes attempt deadlines. Increase inference concurrency only after measurement.
 - Invalid deterministic input skips semantic review.
 - Successful feedback survives another review's failure.
 - A required unavailable review blocks success and cannot be treated as content
@@ -380,14 +424,17 @@ and cancellation are separate mechanisms with separate limits.
 
 **Implementation scope:** Add retry classification, jittered backoff, bounded
 `Retry-After` handling, shared provider-call accounting, abort propagation, and
-the 180-second generation deadline. Keep SDK retries disabled.
+configurable `WORKFLOW_TIMEOUT_MS` (initially 600000, ten minutes). Use the smaller
+of remaining workflow time and the configured 120000-ms attempt timeout; include
+queue wait/loading and preserve chosen deadlines during recovery.
 
 **Acceptance criteria:**
 
 - At most two transport attempts occur per operation; every attempt consumes the
   overall 20-provider-request allowance.
-- Temporary network, 429, and 5xx errors can retry; credentials/configuration
-  failures and refusals cannot.
+- Temporary network, 429, and transient 5xx overload errors can retry; missing
+  models, invalid settings, model load/OOM failures, and schema-valid refusals
+  cannot. No auto-pull or cloud fallback; do not treat every 5xx as transient.
 - A malformed reviewer response permits one bounded re-ask and otherwise fails.
 - Transport retries never consume a new candidate version or reset revision limits.
 - No attempt starts after the deadline or call budget is exhausted.
@@ -396,7 +443,7 @@ the 180-second generation deadline. Keep SDK retries disabled.
 remaining-deadline checks, aborted calls, retry exhaustion, and cumulative budgets.
 
 **Out of scope:** Distributed rate limiting, queues, durable resumption, and
-claims of zero billing after cancellation.
+claims that cancellation immediately stops all GPU computation.
 
 ## Milestone 2: tools and durable human approval
 
@@ -478,8 +525,13 @@ and a universal API client framework.
 an allowed action, observes its result, and chooses whether more work is needed.
 
 **Implementation scope:** Expose read-only exercise search to vocabulary selection
-using explicit function-call definitions and a small dispatcher. Preserve tool-call
-identifiers and return validated observations to the model.
+using Ollama's native `tools`/`message.tool_calls` and a small dispatcher. Validate
+argument objects, append the assistant tool-call message, then matching `tool`
+messages with `tool_name` in call order. Preserve supplied identifiers/indexes
+and use local audit IDs as needed; do not require an OpenAI-style `call_id`.
+After tool selection finishes, make a separate schema-constrained final vocabulary
+call without tools; reserve the last of the five allowed turns for it and count
+it within the existing request budget.
 
 **Acceptance criteria:**
 
@@ -489,10 +541,15 @@ identifiers and return validated observations to the model.
 - Unknown tools, injected actor/URL arguments, and exhausted limits fail safely.
 - Final vocabulary still passes runtime validation.
 - Mutation, approval, publication, shell, filesystem, and generic HTTP tools are absent.
+- An explicit local smoke procedure evaluates native tool selection and result
+  handling with stub search data; generation quality alone does not prove tool
+  reliability, and simultaneous tools-plus-format support is not assumed.
 
-**Verification:** Script tool-call sequences, malformed arguments, mismatched or
-missing call identifiers, malicious retrieved text, tool errors, and exhaustion.
-Assert actual dispatcher decisions without paid API access.
+**Verification:** Script single/multiple tool calls, argument objects, result/name
+ordering (including repeated tool names), absence of optional call IDs, malicious
+retrieved text, tool errors, and exhaustion including the final vocabulary call.
+Assert dispatcher decisions without live inference; run the local tool smoke
+separately and record its results.
 
 **Out of scope:** MCP, parallel tool execution, a supervisor, and automatic API discovery.
 
@@ -549,6 +606,8 @@ active execution. Add infrastructure readiness.
 - A completed generation reaches `AWAITING_APPROVAL`; execution failure is persisted.
 - Creation returns the documented persisted-run representation.
 - The old synchronous endpoint is marked development-only during caller migration.
+- Readiness checks SQLite and local model availability via bounded metadata
+  requests, without generation or model pulls; liveness stays independent.
 
 **Verification:** Test duplicate and concurrent creation, conflicting hashes,
 owner access, safe serialization, persisted failure, and reopening before retrieval.
@@ -577,7 +636,8 @@ recorded workflow version and remaining limits.
 - Concurrent claims produce a single current owner.
 - Expired owners cannot save results after another owner claims the run.
 - Resume skips committed successful work and preserves counters and generation deadline.
-- Incompatible workflow versions fail explicitly.
+- Incompatible workflow versions or unavailable/changed recorded model digests
+  fail explicitly instead of silently substituting code or weights.
 - A missing checkpoint may cause a repeated LLM call; this limitation is documented.
 
 **Verification:** Use two database connections and controlled time to exercise
@@ -585,7 +645,7 @@ claim races, heartbeat expiry, stale writes, restart after every checkpoint,
 unsupported versions, and exhausted budgets.
 
 **Out of scope:** Queue-driven resumption, budget resets, unrestricted terminal-run
-restarts, and exactly-once provider billing guarantees.
+restarts, and exactly-once LLM execution guarantees.
 
 ### AG-018
 
@@ -730,7 +790,9 @@ and learn producers, consumers, and acknowledgements.
 
 **Implementation scope:** Add Redis/BullMQ, API and worker entry points in the same
 image, run-ID-only jobs, asynchronous workflow submissions, and separate generation
-and import jobs. Begin with one worker process and two concurrent runs.
+and import jobs. Begin with one worker process and one active run, using the same
+Ollama instance with one inference at a time. Increase run concurrency only after
+measuring queue wait, memory, and latency.
 
 **Acceptance criteria:**
 
@@ -804,7 +866,7 @@ synchronous endpoint after callers migrate.
 
 **Verification:** Run a failure-injection integration suite with fake LLM calls,
 then sibling UI/API tests for asynchronous responses, refresh/reopen, and failures.
-Keep external paid APIs disabled.
+Keep live model inference disabled.
 
 **Out of scope:** WebSocket notifications, multi-host load testing, and broader
 Teacher UI redesign.
@@ -841,6 +903,8 @@ maximum of eight decisions. Record action history and enforce existing budgets.
 **Verification:** Script action sequences for successful execution, invalid
 arguments, premature finish, repeated actions, budget exhaustion, and attempted
 approval bypass.
+Separately evaluate the local model on bounded action sequences before enabling
+real supervisor experiments; record unsupported or unreliable behavior explicitly.
 
 **Out of scope:** Autonomous production rollout, unrestricted planning, graph
 frameworks, and model-written executable code.
@@ -857,8 +921,8 @@ frameworks, and model-written executable code.
 metadata explain slow, failed, and expensive runs across asynchronous boundaries.
 
 **Implementation scope:** Extend existing metadata with OpenTelemetry spans and
-links, queue-wait and step metrics, a versioned model-price table, aggregate
-reporting, and explicit opt-in diagnostic capture. Apply documented retention
+links, queue-wait and step metrics, Ollama loading/generation timing, aggregate
+usage reporting, and explicit opt-in diagnostic capture. Apply documented retention
 and redaction to persisted artifacts and logs.
 
 **Acceptance criteria:**
@@ -867,12 +931,16 @@ and redaction to persisted artifacts and logs.
 - Human approval links separate executions rather than leaving a span open indefinitely.
 - Reported token categories are accounted for without double counting; absent usage
   or pricing stays unknown rather than zero.
-- Cost estimates retain price/model versions and identify incomplete accounting.
+- Local API calls have no per-token bill; unmeasured electricity/hardware cost
+  stays `estimatedCostUsd: null` and is labeled as unmeasured. Defer price tables
+  and billing reconciliation until a paid provider exists.
+- Reports retain model digest/quantization, Ollama version, runtime settings, and
+  hardware; cold/warm timing and duration units are explicit.
 - Sensitive payload capture is off by default; retention preserves pending reviews
   and minimal idempotency tombstones as specified.
 
-**Verification:** Use an in-memory trace exporter, known usage/price fixtures,
-missing-data cases, redaction probes, and retention tests with controlled time.
+**Verification:** Use an in-memory trace exporter, known token/duration fixtures,
+missing-data and null-cost cases, redaction probes, and controlled retention time.
 
 **Out of scope:** Logging hidden model reasoning, billing guarantees, indefinite
 raw-payload retention, and new monitoring microservices.
@@ -890,23 +958,29 @@ from deterministic program correctness.
 
 **Implementation scope:** Expand the synthetic corpus to 20 cases, define expected
 properties and a therapist rubric, retain a holdout subset, and build an explicit
-runner with three repetitions per case, call/spend limits, and versioned reports.
+runner with three repetitions per case, call/generated-token/elapsed-time limits,
+and versioned reports. Reserve call/token allowances before concurrent submissions
+and cap each request's output/timeout by the remaining budget;
+stop if missing usage prevents establishing the remaining token allowance.
 
 **Acceptance criteria:**
 
 - Reports include per-case schema/content outcomes, target coverage, duplicates,
   revisions, failures, latency, usage, and cost.
-- Comparisons use the same inputs and identify workflow, prompt, schema, and model versions.
+- Comparisons use the same inputs and identify workflow/prompt/schema versions,
+  model digest/quantization, Ollama version, hardware, context/output settings,
+  and inference concurrency.
 - Acceptable wording is assessed by properties/rubric rather than exact-string equality.
-- Paid execution is opt-in and separate from ordinary CI.
+- Live local execution is opt-in and separate from ordinary CI; paid-provider
+  support and a spend budget are deferred until a paid provider is introduced.
 - The runner stops before initiating work beyond its configured budget; incomplete
   runs remain visible in reports.
 
 **Verification:** Test report calculations and budget enforcement with deterministic
-fake runs. Perform real paid evaluation only through the documented explicit
+fake runs. Perform real local evaluation only through the documented explicit
 command and record actual results without inventing missing samples.
 
-**Out of scope:** Continuous paid CI, production patient data, automatic model
+**Out of scope:** Live inference in CI, production patient data, automatic model
 promotion, and an uncalibrated LLM judge as the sole quality authority.
 
 ### AG-028
@@ -935,7 +1009,7 @@ and follow-up recommendations.
 - Findings identify what should be retained, simplified, or deferred.
 
 **Verification:** Audit recorded versions and report arithmetic, reproduce a
-subset with the evaluation runner, and document actual human review. Paid runs
+subset with the evaluation runner, and document actual human review. Local model runs
 are explicit; an offline dry run does not satisfy the real-quality comparison.
 
 **Out of scope:** Automatic default changes, claims of clinical validation,
