@@ -1,21 +1,11 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.ts';
+import { generateContentDrafts } from './content/generate.ts';
+import { AppError } from './errors.ts';
 import type { Logger } from './logger.ts';
 
 const jsonLimitBytes = 16 * 1024;
-
-export class AppError extends Error {
-  readonly status: number;
-  readonly code: string;
-
-  constructor(status: number, code: string, message: string) {
-    super(message);
-    this.name = 'AppError';
-    this.status = status;
-    this.code = code;
-  }
-}
 
 export function requireServiceToken(expected: string) {
   return (req: Request, _res: Response, next: NextFunction) => {
@@ -43,6 +33,19 @@ export function createApp(options: { config: Config; logger: Logger; testRoutes?
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
+  app.post(
+    '/content-drafts',
+    requireServiceToken(options.config.serviceToken),
+    async (req, res) => {
+      const result = await generateContentDrafts({
+        config: options.config,
+        logger: res.locals.log as Logger,
+        requestId: res.locals.requestId as string,
+        body: req.body,
+      });
+      res.json(result);
+    },
+  );
   if (options.testRoutes) {
     const auth = requireServiceToken(options.config.serviceToken);
     let protectedHits = 0;
