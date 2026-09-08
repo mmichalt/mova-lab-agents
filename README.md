@@ -20,7 +20,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `PORT` | `3000` | Empty values use the default. `0` binds an ephemeral port. |
 | `LOG_LEVEL` | `info` | Pino level: `fatal` … `silent`. |
 | `SERVICE_TOKEN` | (required) | Shared inbound token; `Authorization: Bearer <token>`. |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin. Compose defaults to `http://ollama:11434`. Requests cannot choose a server, pull a model, or fall back to the cloud. |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin for host processes (`npm run dev`). The Compose `agents` service always uses `http://ollama:11434` and ignores this host value. Requests cannot choose a server, pull a model, or fall back to the cloud. |
 | `OLLAMA_MODEL` | `qwen3:4b-instruct` | Explicit local model tag. |
 | `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`. |
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
@@ -147,7 +147,8 @@ After a prompt, `ollama ps` should show `100% GPU`. Record CPU offload instead
 of assuming GPU acceleration. Models persist in the `ollama` volume at
 `/root/.ollama`. Generation smoke coverage belongs to later tickets. From the
 host, `OLLAMA_BASE_URL` defaults to `http://localhost:11434`; the Compose
-`agents` service uses `http://ollama:11434`.
+`agents` service always uses `http://ollama:11434`, even if `.env` sets the
+host URL.
 
 ### GPU prerequisites
 
