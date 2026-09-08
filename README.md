@@ -27,6 +27,27 @@ Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID and redact authorization
 fields.
 
+## Recording-proposal contracts
+
+Runtime Zod schemas in `src/content/schemas.ts` validate teacher requests and
+generated proposals. TypeScript types are inferred from those schemas; they do
+not validate HTTP bodies or model JSON by themselves.
+
+Requests accept only `easy` difficulty and target sounds **р** and **л**
+(case-normalized, duplicates removed). `exerciseCount` defaults to 6, max 12,
+and must be at least the number of requested sounds. Unknown fields are
+rejected so patient records cannot enter the contract. Parsed proposals are not
+saved Content Studio drafts: `localId` is assigned by application code, and the
+model output schema cannot supply application IDs or publication controls.
+
+Documented examples: `docs/examples/content-request.json`,
+`docs/examples/model-output.json`, `docs/examples/model-output.refused.json`,
+`docs/examples/generation-result.json`. Literal Cyrillic-letter presence in a
+phrase is a mechanical check later; it does not establish phonetic correctness,
+hard/soft realization, or therapeutic appropriateness.
+
+Schema cases run with `npm test` (no GPU, Ollama, or live inference).
+
 SIGTERM/SIGINT stop accepting connections, drain for **10 seconds**, then abort
 remaining in-flight work.
 

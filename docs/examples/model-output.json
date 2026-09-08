@@ -1,0 +1,23 @@
+{
+  "status": "generated",
+  "proposals": [
+    {
+      "type": "recording",
+      "title": "Риба в річці",
+      "phrase": "Риба пливе в річці",
+      "childHint": "Скажи фразу повільно",
+      "teacherNote": "Повільний темп, наголос на першому складі.",
+      "targetSound": "р",
+      "difficulty": "easy"
+    },
+    {
+      "type": "recording",
+      "title": "Лис і ліс",
+      "phrase": "Лис біжить до лісу",
+      "childHint": "Повтори за зразком",
+      "teacherNote": "Короткі слова; не поспішати.",
+      "targetSound": "л",
+      "difficulty": "easy"
+    }
+  ]
+}

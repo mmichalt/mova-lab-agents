@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001, AG-002, and AG-003 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-004 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -31,7 +31,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-001 — Bootstrap TypeScript and Express](#ag-001)
 - [x] [AG-002 — Configuration, authentication, logging, and lifecycle](#ag-002)
 - [x] [AG-003 — Docker support and CI](#ag-003)
-- [ ] [AG-004 — Recording-proposal contracts](#ag-004)
+- [x] [AG-004 — Recording-proposal contracts](#ag-004)
 - [ ] [AG-005 — One structured LLM generation operation](#ag-005)
 - [ ] [AG-006 — Provider tests and baseline examples](#ag-006)
 - [ ] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
@@ -189,7 +189,7 @@ to Mova-Lab deployment.
 **Stage:** 2  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-002](#ag-002)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn why TypeScript types cannot validate
 HTTP or model data and why generated proposals differ from saved application content.
@@ -209,6 +209,11 @@ application-assigned and application content IDs absent.
 
 **Verification:** Table-driven valid, missing, oversized, unknown-field, wrong-type,
 unsupported-sound, and count-boundary cases.
+
+Recorded: schema tests cover those cases plus model-output rejection of
+publication/application IDs; documented examples parse; `npm test`,
+`npm run typecheck`, and `npx biome ci .` pass without GPU, Ollama, or live
+inference.
 
 **Out of scope:** Live generation, new exercise types, phonetic transcription,
 application categories, and patient data.
