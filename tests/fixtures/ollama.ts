@@ -3,8 +3,12 @@ import { readFileSync } from 'node:fs';
 const examples = new URL('../../docs/examples/', import.meta.url);
 
 export const generatedContent = readFileSync(new URL('model-output.json', examples), 'utf8');
+export const vocabularyContent = readFileSync(new URL('vocabulary-output.json', examples), 'utf8');
 export const refusedContent = JSON.stringify(
   JSON.parse(readFileSync(new URL('model-output.refused.json', examples), 'utf8')),
+);
+export const refusedVocabularyContent = JSON.stringify(
+  JSON.parse(readFileSync(new URL('vocabulary-output.refused.json', examples), 'utf8')),
 );
 
 export function chatEnvelope(overrides: Record<string, unknown> = {}) {
@@ -26,13 +30,24 @@ export function chatEnvelope(overrides: Record<string, unknown> = {}) {
 
 export const chatFixtures = {
   generated: chatEnvelope(),
+  vocabulary: chatEnvelope({ message: { role: 'assistant', content: vocabularyContent } }),
   generatedMissingUsage: chatEnvelope({
     load_duration: undefined,
     prompt_eval_count: undefined,
     prompt_eval_cached_count: undefined,
     eval_count: undefined,
   }),
+  vocabularyMissingUsage: chatEnvelope({
+    message: { role: 'assistant', content: vocabularyContent },
+    load_duration: undefined,
+    prompt_eval_count: undefined,
+    prompt_eval_cached_count: undefined,
+    eval_count: undefined,
+  }),
   refused: chatEnvelope({ message: { role: 'assistant', content: refusedContent } }),
+  refusedVocabulary: chatEnvelope({
+    message: { role: 'assistant', content: refusedVocabularyContent },
+  }),
   freeText: chatEnvelope({ message: { role: 'assistant', content: 'I cannot help with that.' } }),
   invalidJson: chatEnvelope({ message: { role: 'assistant', content: '{not json' } }),
   wrongShape: chatEnvelope({

@@ -1,7 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.ts';
-import { GENERATION_TEMPERATURE, PROMPT_VERSION } from '../src/content/generate.ts';
+import {
+  EXERCISES_PROMPT_VERSION,
+  GENERATION_TEMPERATURE,
+  VOCABULARY_PROMPT_VERSION,
+} from '../src/content/generate.ts';
 import { type ContentRequest, contentRequestSchema } from '../src/content/schemas.ts';
 import { assessGeneration } from './properties.ts';
 
@@ -141,7 +145,8 @@ async function main() {
     (run) => run.value.code === 'PROVIDER_INCOMPLETE',
   );
   const report = {
-    promptVersion: PROMPT_VERSION,
+    vocabularyPromptVersion: VOCABULARY_PROMPT_VERSION,
+    exercisesPromptVersion: EXERCISES_PROMPT_VERSION,
     model: {
       tag: config.ollamaModel,
       digest,

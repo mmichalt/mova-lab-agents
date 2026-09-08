@@ -7,6 +7,8 @@ export const limits = {
   teacherNote: 1000,
   theme: 120,
   teacherInstructions: 1000,
+  vocabWord: 80,
+  vocabItemsMax: 24,
   ageMin: 1,
   ageMax: 18,
   exerciseCountDefault: 6,
@@ -47,6 +49,26 @@ const proposalFields = {
   targetSound: targetSoundSchema,
   difficulty: z.literal('easy'),
 };
+
+const vocabularyItemSchema = z.strictObject({
+  word: nonempty(limits.vocabWord),
+  targetSound: targetSoundSchema,
+});
+
+export const vocabularySchema = z.strictObject({
+  items: z.array(vocabularyItemSchema).min(1).max(limits.vocabItemsMax),
+});
+
+export const vocabularyOutputSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('selected'),
+    items: vocabularySchema.shape.items,
+  }),
+  z.strictObject({
+    status: z.literal('refused'),
+    reason: nonempty(limits.refusalReason),
+  }),
+]);
 
 export const generatedProposalSchema = z.strictObject(proposalFields);
 
@@ -105,6 +127,9 @@ export const generationResultSchema = z.strictObject({
 });
 
 export type ContentRequest = z.infer<typeof contentRequestSchema>;
+export type VocabularyItem = z.infer<typeof vocabularyItemSchema>;
+export type Vocabulary = z.infer<typeof vocabularySchema>;
+export type VocabularyOutput = z.infer<typeof vocabularyOutputSchema>;
 export type GeneratedProposal = z.infer<typeof generatedProposalSchema>;
 export type RecordingProposal = z.infer<typeof recordingProposalSchema>;
 export type ModelOutput = z.infer<typeof modelOutputSchema>;

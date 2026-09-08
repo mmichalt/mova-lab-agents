@@ -1,5 +1,6 @@
 {
-  "promptVersion": "content-drafts/v1",
+  "vocabularyPromptVersion": "vocabulary/v1",
+  "exercisesPromptVersion": "exercises/v1",
   "model": {
     "tag": "qwen3:4b-instruct",
     "quantization": "Q4_K_M",
@@ -26,6 +27,6 @@
     "recordedAt": "2026-09-08",
     "command": "npm run smoke:local",
     "report": "evals/smoke-report.json",
-    "note": "See evals/smoke-results.md. Wording is stochastic; do not expect identical phrases."
+    "note": "Last live smoke used content-drafts/v1 (AG-006). Re-run after the AG-007 prompt split. Wording is stochastic; do not expect identical phrases."
   }
 }

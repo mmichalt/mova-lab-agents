@@ -1,0 +1,9 @@
+{
+  "status": "selected",
+  "items": [
+    { "word": "риба", "targetSound": "р" },
+    { "word": "річка", "targetSound": "р" },
+    { "word": "лис", "targetSound": "л" },
+    { "word": "ліс", "targetSound": "л" }
+  ]
+}

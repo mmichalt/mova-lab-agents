@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { loadConfig } from '../src/config.ts';
-import { GENERATION_TEMPERATURE, PROMPT_VERSION } from '../src/content/generate.ts';
+import {
+  EXERCISES_PROMPT_VERSION,
+  GENERATION_TEMPERATURE,
+  VOCABULARY_PROMPT_VERSION,
+} from '../src/content/generate.ts';
 import { contentRequestSchema } from '../src/content/schemas.ts';
 import { assessGeneration } from './properties.ts';
 
@@ -39,7 +43,10 @@ test('corpus covers Р, Л, and both with property expectations', () => {
 });
 
 test('runtime metadata records prompt, model, and sampling without invented ids', () => {
-  assert.equal(runtime.promptVersion, PROMPT_VERSION);
+  assert.equal(corpus.vocabularyPromptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(corpus.exercisesPromptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal(runtime.vocabularyPromptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(runtime.exercisesPromptVersion, EXERCISES_PROMPT_VERSION);
   assert.equal(runtime.model.tag, defaults.ollamaModel);
   assert.equal(runtime.model.quantization, 'Q4_K_M');
   assert.equal(runtime.runtime.numCtx, defaults.ollamaNumCtx);
