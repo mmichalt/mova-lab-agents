@@ -5,7 +5,11 @@ const logLevels = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']
 const schema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535),
   LOG_LEVEL: z.enum(logLevels),
-  SERVICE_TOKEN: z.string().min(1),
+  SERVICE_TOKEN: z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^\S+$/),
 });
 
 export type Config = {

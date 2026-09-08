@@ -9,7 +9,7 @@ import { loadConfig } from '../src/config.ts';
 const root = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
-  const config = loadConfig({ SERVICE_TOKEN: 'token', PORT: '   ', LOG_LEVEL: '' });
+  const config = loadConfig({ SERVICE_TOKEN: '  token\n', PORT: '   ', LOG_LEVEL: '' });
   assert.equal(config.port, 3000);
   assert.equal(config.logLevel, 'info');
   assert.equal(config.serviceToken, 'token');
@@ -18,6 +18,12 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
 test('loadConfig rejects missing, empty, or invalid values', () => {
   assert.throws(() => loadConfig({}), /Invalid configuration/);
   assert.throws(() => loadConfig({ SERVICE_TOKEN: '' }), /Invalid configuration/);
+  assert.throws(() => loadConfig({ SERVICE_TOKEN: '   ' }), /Invalid configuration/);
+  assert.throws(() => loadConfig({ SERVICE_TOKEN: 'tok en' }), (err: Error) => {
+    assert.match(err.message, /Invalid configuration/);
+    assert.equal(err.message.includes('tok en'), false);
+    return true;
+  });
   assert.throws(() => loadConfig({ SERVICE_TOKEN: 'token', PORT: 'abc' }), /Invalid configuration/);
   assert.throws(() => loadConfig({ SERVICE_TOKEN: 'token', LOG_LEVEL: 'verbose' }), /Invalid configuration/);
 });
