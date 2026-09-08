@@ -441,7 +441,9 @@ Test maximum-size requests, schemas, review feedback, and later tool history
 against the context budget. Do not silently drop requirements or accept truncated
 output. If the 12-exercise case needs more room, measure an 8,192-token context
 and a larger output allowance, then record the tested settings in both documents.
-The defaults are provisional until the local smoke test passes.
+The AG-006 local smoke on this workstation completed the 12-exercise case with
+the initial 4096/2000 settings (max 1452 output tokens, no truncation). Keep
+those defaults until a later prompt or model measures a miss.
 
 **Messages actually sent:**
 
@@ -523,6 +525,7 @@ wrong shape, schema-valid refusal, free-text refusal, truncation, timeout, missi
 model, and unavailable server. An optional manual local smoke test verifies GPU
 use, schema compatibility, Ukrainian quality, maximum-size inputs, and cold/warm
 latency without cloud credentials. Offline tests cannot establish model quality.
+AG-006 recorded that smoke on 2026-09-08; see `evals/smoke-results.md`.
 
 **Learned:** Messages, sampling, structured output, runtime validation, provider
 errors, and usage metadata.

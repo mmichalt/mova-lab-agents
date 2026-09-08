@@ -1,0 +1,77 @@
+{
+  "promptVersion": "content-drafts/v1",
+  "cases": [
+    {
+      "id": "r-only-animals",
+      "request": {
+        "ageYears": 6,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "тварини",
+        "exerciseCount": 6,
+        "teacherInstructions": "Короткі слова."
+      },
+      "expect": {
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "тварини"
+      }
+    },
+    {
+      "id": "l-only-home",
+      "request": {
+        "ageYears": 8,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "дім",
+        "exerciseCount": 6,
+        "teacherInstructions": "Прості фрази про дім."
+      },
+      "expect": {
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "дім"
+      }
+    },
+    {
+      "id": "rl-mixed-animals",
+      "request": {
+        "ageYears": 7,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "тварини",
+        "exerciseCount": 6,
+        "teacherInstructions": "Короткі слова та прості фрази."
+      },
+      "expect": {
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "тварини"
+      }
+    },
+    {
+      "id": "rl-max-12",
+      "request": {
+        "ageYears": 7,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "тварини",
+        "exerciseCount": 12,
+        "teacherInstructions": "Дванадцять коротких фраз, по черзі для р і л."
+      },
+      "expect": {
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 12,
+        "language": "uk",
+        "theme": "тварини"
+      }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "promptVersion": "content-drafts/v1",
+  "model": {
+    "tag": "qwen3:4b-instruct",
+    "digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+    "quantization": "Q4_K_M",
+    "ollamaVersion": "0.33.3",
+    "numCtx": 4096,
+    "numPredict": 2000,
+    "temperature": 0.3
+  },
+  "hardware": "NVIDIA GeForce RTX 5060 Laptop GPU, 8151 MiB",
+  "gpu": {
+    "processor": null,
+    "size": 3178149969,
+    "sizeVram": 3178149969,
+    "gpuPercent": 100
+  },
+  "settingsSufficed": true,
+  "truncated": false,
+  "usageNote": "HTTP bodies do not include usage. Match requestId to llm attempt completed logs for load/tokens.",
+  "runs": {
+    "coldMixed": {
+      "id": "rl-mixed-animals",
+      "requestId": "cc599193-0b8c-4353-98d9-19d6b7146293",
+      "wallMs": 14307,
+      "status": 200,
+      "code": null
+    },
+    "warmMixed": {
+      "id": "rl-mixed-animals",
+      "requestId": "ac186928-222b-4a1d-9993-3689fac2dad9",
+      "wallMs": 12820,
+      "status": 200,
+      "code": null
+    },
+    "rOnly": {
+      "id": "r-only-animals",
+      "requestId": "f5b9f228-84e3-47d6-8d0d-b40070fd939d",
+      "wallMs": 10579,
+      "status": 200,
+      "code": null
+    },
+    "lOnly": {
+      "id": "l-only-home",
+      "requestId": "75de70dd-0edb-486d-8433-4e734d8c286c",
+      "wallMs": 10898,
+      "status": 200,
+      "code": null
+    },
+    "max12": {
+      "id": "rl-max-12",
+      "requestId": "3c1709e1-69d4-4b5a-831b-d15d4a88c2b9",
+      "wallMs": 21280,
+      "status": 200,
+      "code": null
+    }
+  },
+  "qualityFailures": {
+    "lOnly": ["literal-target-letter"]
+  }
+}

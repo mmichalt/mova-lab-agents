@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
@@ -9,12 +8,8 @@ import { loadConfig } from '../src/config.ts';
 import { GENERATION_TEMPERATURE, PROMPT_VERSION } from '../src/content/generate.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
+import { chatFixtures, errorBodies } from './fixtures/ollama.ts';
 
-const examples = new URL('../docs/examples/', import.meta.url);
-const generatedOutput = readFileSync(new URL('model-output.json', examples), 'utf8');
-const refusedOutput = JSON.stringify(
-  JSON.parse(readFileSync(new URL('model-output.refused.json', examples), 'utf8')),
-);
 const teacherRequest = {
   ageYears: 7,
   targetSounds: ['р', 'л'],
@@ -28,21 +23,6 @@ type OllamaReply =
   | { hang: true }
   | { hangBody: true }
   | { status: number; json?: unknown; raw?: string };
-
-function chatEnvelope(overrides: Record<string, unknown> = {}) {
-  return {
-    model: 'qwen3:4b-instruct',
-    created_at: '2026-01-01T00:00:00Z',
-    message: { role: 'assistant', content: generatedOutput },
-    done: true,
-    done_reason: 'stop',
-    load_duration: 12,
-    prompt_eval_count: 10,
-    prompt_eval_cached_count: 2,
-    eval_count: 20,
-    ...overrides,
-  };
-}
 
 async function listen(app: ReturnType<typeof createApp>) {
   const server = app.listen(0, '127.0.0.1');
@@ -128,22 +108,24 @@ function chatCalls(calls: OllamaCall[]) {
   return calls.filter((call) => call.method === 'POST' && call.url === '/api/chat');
 }
 
+function runtimeReply(json: unknown): (call: OllamaCall) => OllamaReply {
+  return (call) => {
+    if (call.method === 'GET' && call.url === '/api/version') {
+      return { status: 200, json: { version: '0.33.3' } };
+    }
+    if (call.method === 'GET' && call.url === '/api/tags') {
+      return {
+        status: 200,
+        json: { models: [{ name: 'qwen3:4b-instruct', digest: 'sha256:abc' }] },
+      };
+    }
+    return { status: 200, json };
+  };
+}
+
 test('POST /content-drafts maps a generated envelope to approved proposals', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
-    reply: (call) => {
-      if (call.method === 'GET' && call.url === '/api/version') {
-        return { status: 200, json: { version: '0.33.3' } };
-      }
-      if (call.method === 'GET' && call.url === '/api/tags') {
-        return {
-          status: 200,
-          json: {
-            models: [{ name: 'qwen3:4b-instruct', digest: 'sha256:abc' }],
-          },
-        };
-      }
-      return { status: 200, json: chatEnvelope() };
-    },
+    reply: runtimeReply(chatFixtures.generated),
   });
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -156,6 +138,7 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal('id' in body.proposals[0], false);
 
   const [chat] = chatCalls(ollama.calls);
+  assert.equal(chatCalls(ollama.calls).length, 1);
   assert.ok(chat);
   const payload = chat.body as Record<string, unknown>;
   assert.equal(payload.model, 'qwen3:4b-instruct');
@@ -187,12 +170,37 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(logged.modelDigest, 'sha256:abc');
   assert.equal(logged.ollamaVersion, '0.33.3');
   assert.equal(logged.loadDurationNs, 12);
-  assert.equal(logged.usage.estimatedCostUsd, null);
+  assert.equal('providerRequestId' in logged, false);
+  assert.equal('id' in logged, false);
   assert.deepEqual(logged.usage, {
     model: 'qwen3:4b-instruct',
     inputTokens: 10,
     cachedInputTokens: 2,
     outputTokens: 20,
+    estimatedCostUsd: null,
+  });
+});
+
+test('missing usage and runtime metadata stay null', async (t) => {
+  const { response, logs } = await postDrafts(t, {
+    reply: (call) => {
+      if (call.url === '/api/version' || call.url === '/api/tags') return { status: 500 };
+      return { status: 200, json: chatFixtures.generatedMissingUsage };
+    },
+  });
+  assert.equal(response.status, 200);
+  const logged = JSON.parse(
+    logs.split('\n').find((line) => line.includes('llm attempt completed')) ?? '{}',
+  );
+  assert.equal(logged.modelDigest, null);
+  assert.equal(logged.ollamaVersion, null);
+  assert.equal(logged.loadDurationNs, null);
+  assert.equal('providerRequestId' in logged, false);
+  assert.deepEqual(logged.usage, {
+    model: 'qwen3:4b-instruct',
+    inputTokens: null,
+    cachedInputTokens: null,
+    outputTokens: null,
     estimatedCostUsd: null,
   });
 });
@@ -219,96 +227,79 @@ const outcomeCases: Array<{
 }> = [
   {
     name: 'schema-valid refusal',
-    reply: {
-      status: 200,
-      json: chatEnvelope({ message: { role: 'assistant', content: refusedOutput } }),
-    },
+    reply: { status: 200, json: chatFixtures.refused },
     status: 422,
     code: 'MODEL_REFUSED',
   },
   {
     name: 'free-text refusal',
-    reply: {
-      status: 200,
-      json: chatEnvelope({ message: { role: 'assistant', content: 'I cannot help with that.' } }),
-    },
+    reply: { status: 200, json: chatFixtures.freeText },
     status: 502,
     code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
     name: 'invalid JSON content',
-    reply: {
-      status: 200,
-      json: chatEnvelope({ message: { role: 'assistant', content: '{not json' } }),
-    },
+    reply: { status: 200, json: chatFixtures.invalidJson },
     status: 502,
     code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
-    name: 'schema failure',
-    reply: {
-      status: 200,
-      json: chatEnvelope({
-        message: { role: 'assistant', content: '{"status":"generated","proposals":[]}' },
-      }),
-    },
+    name: 'wrong shape',
+    reply: { status: 200, json: chatFixtures.wrongShape },
     status: 502,
     code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
     name: 'malformed envelope',
-    reply: { status: 200, json: { ok: true } },
+    reply: { status: 200, json: chatFixtures.malformedEnvelope },
     status: 502,
     code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
     name: 'truncated output',
-    reply: { status: 200, json: chatEnvelope({ done: true, done_reason: 'length' }) },
+    reply: { status: 200, json: chatFixtures.truncated },
     status: 502,
     code: 'PROVIDER_INCOMPLETE',
   },
   {
     name: 'incomplete output',
-    reply: { status: 200, json: chatEnvelope({ done: false }) },
+    reply: { status: 200, json: chatFixtures.incomplete },
     status: 502,
     code: 'PROVIDER_INCOMPLETE',
   },
   {
     name: 'unexpected tool call',
-    reply: {
-      status: 200,
-      json: chatEnvelope({
-        message: {
-          role: 'assistant',
-          content: generatedOutput,
-          tool_calls: [{ function: { name: 'x' } }],
-        },
-      }),
-    },
+    reply: { status: 200, json: chatFixtures.toolCall },
     status: 502,
     code: 'PROVIDER_UNEXPECTED_TOOL_CALL',
   },
   {
     name: 'missing model',
-    reply: { status: 404, json: { error: 'model not found' } },
+    reply: { status: 404, json: errorBodies.missingModel },
     status: 503,
     code: 'MODEL_UNAVAILABLE',
   },
   {
     name: 'model load failure',
-    reply: { status: 500, json: { error: 'model requires more system memory' } },
+    reply: { status: 500, json: errorBodies.loadFailure },
+    status: 503,
+    code: 'MODEL_CAPACITY',
+  },
+  {
+    name: 'model OOM',
+    reply: { status: 500, json: errorBodies.oom },
     status: 503,
     code: 'MODEL_CAPACITY',
   },
   {
     name: 'unsupported settings',
-    reply: { status: 400, json: { error: 'invalid options' } },
+    reply: { status: 400, json: errorBodies.unsupportedSettings },
     status: 503,
     code: 'MODEL_CAPACITY',
   },
   {
     name: 'provider overload',
-    reply: { status: 503, json: { error: 'busy' } },
+    reply: { status: 503, json: errorBodies.overload },
     status: 503,
     code: 'PROVIDER_UNAVAILABLE',
   },
@@ -319,7 +310,7 @@ const outcomeCases: Array<{
     code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
-    name: 'queue wait timeout',
+    name: 'abort before headers',
     reply: { hang: true },
     status: 504,
     code: 'PROVIDER_TIMEOUT',
