@@ -96,17 +96,22 @@ export const validationIssueSchema = z.strictObject({
   message: z.string().min(1),
 });
 
+const checkNameSchema = z.enum(['content', 'age', 'language']);
+
 export const checkResultSchema = z.discriminatedUnion('status', [
   z.strictObject({
     status: z.literal('passed'),
+    name: checkNameSchema,
     issues: z.array(validationIssueSchema),
   }),
   z.strictObject({
     status: z.literal('failed'),
+    name: checkNameSchema,
     issues: z.array(validationIssueSchema).min(1),
   }),
   z.strictObject({
     status: z.literal('unavailable'),
+    name: checkNameSchema,
     errorCode: z.string().min(1),
   }),
 ]);
@@ -122,8 +127,8 @@ export const llmUsageSchema = z.strictObject({
 export const generationResultSchema = z.strictObject({
   requestId: z.string().min(1),
   proposals: z.array(recordingProposalSchema).min(1).max(limits.exerciseCountMax),
-  checks: z.array(checkResultSchema),
-  requiresHumanApproval: z.literal(true),
+  checks: z.array(checkResultSchema).min(1),
+  requiresHumanApproval: z.boolean(),
 });
 
 export type ContentRequest = z.infer<typeof contentRequestSchema>;

@@ -77,7 +77,7 @@ test('quality properties judge shape, not exact wording', () => {
   const ok = {
     requestId: '11111111-1111-4111-8111-111111111111',
     requiresHumanApproval: true,
-    checks: [],
+    checks: [{ status: 'passed', name: 'content', issues: [] }],
     proposals: Array.from({ length: 6 }, (_, i) => ({ ...proposal, localId: `proposal-${i + 1}` })),
   };
   assert.equal(

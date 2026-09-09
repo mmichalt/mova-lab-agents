@@ -76,9 +76,9 @@ export async function generateContentDrafts(options: {
       {
         requestId: options.requestId,
         step: 'validation',
-        codes: check.issues
-          .filter((issue) => issue.severity === 'error')
-          .map((issue) => issue.code),
+        issues: check.issues
+          .filter((item) => item.severity === 'error')
+          .map((item) => ({ code: item.code, path: item.path })),
       },
       'content validation failed',
     );
@@ -86,7 +86,7 @@ export async function generateContentDrafts(options: {
 
   return {
     requestId: options.requestId,
-    requiresHumanApproval: true,
+    requiresHumanApproval: check.status === 'passed',
     checks: [check],
     proposals: proposals.map((proposal, index) => ({
       ...proposal,

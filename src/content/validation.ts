@@ -18,9 +18,12 @@ export const LETTER_PRESENCE_ISSUE: ValidationIssue = Object.freeze({
 export function normalizePhrase(value: string) {
   return value
     .normalize('NFC')
+    .replace(/[\u2019\u02BC\u02B9]/gu, "'")
+    .replace(/\p{Cf}+/gu, '')
     .replace(/\p{White_Space}+/gu, ' ')
     .trim()
-    .toLocaleLowerCase('uk');
+    .toLocaleLowerCase('uk')
+    .normalize('NFC');
 }
 
 export function validateCandidate(
@@ -29,57 +32,67 @@ export function validateCandidate(
   proposals: readonly GeneratedProposal[],
 ): ContentCheck {
   const issues: ValidationIssue[] = [];
-  if (proposals.length !== request.exerciseCount) {
-    issues.push(error('WRONG_COUNT', 'proposals', 'Expected the requested number of proposals.'));
+  const countOk = proposals.length === request.exerciseCount;
+  if (!countOk) {
+    issues.push(issue('WRONG_COUNT', 'proposals', 'Expected the requested number of proposals.'));
   }
 
   const assigned = new Map<string, number>();
-  const seen = new Set<string>();
+  const firstIndex = new Map<string, number>();
   const vocab = vocabulary.items.map((item) => tokens(item.word));
 
   for (const [index, proposal] of proposals.entries()) {
     const path = `proposals[${index}]`;
     if (!request.targetSounds.includes(proposal.targetSound)) {
       issues.push(
-        error('UNREQUESTED_SOUND', `${path}.targetSound`, 'Sound is not in the request.'),
+        issue('UNREQUESTED_SOUND', `${path}.targetSound`, 'Sound is not in the request.'),
       );
     }
     assigned.set(proposal.targetSound, (assigned.get(proposal.targetSound) ?? 0) + 1);
 
-    const normalized = normalizePhrase(proposal.phrase);
-    if (seen.has(normalized)) {
+    const key = tokens(proposal.phrase).join(' ');
+    const duplicateOf = firstIndex.get(key);
+    if (duplicateOf !== undefined) {
       issues.push(
-        error('DUPLICATE_PHRASE', `${path}.phrase`, 'Phrase duplicates an earlier exercise.'),
+        issue(
+          'DUPLICATE_PHRASE',
+          `${path}.phrase`,
+          `Duplicate of proposals[${duplicateOf}].phrase.`,
+        ),
       );
     } else {
-      seen.add(normalized);
+      firstIndex.set(key, index);
     }
 
-    if (!normalized.includes(proposal.targetSound)) {
+    if (!normalizePhrase(proposal.phrase).includes(proposal.targetSound)) {
       issues.push(
-        error('MISSING_TARGET_LETTER', `${path}.phrase`, 'Assigned target letter is not present.'),
+        issue('MISSING_TARGET_LETTER', `${path}.phrase`, 'Assigned target letter is not present.'),
       );
     }
     if (!containsVocab(tokens(proposal.phrase), vocab)) {
       issues.push(
-        error('MISSING_VOCABULARY', `${path}.phrase`, 'Phrase does not use selected vocabulary.'),
+        issue('MISSING_VOCABULARY', `${path}.phrase`, 'Phrase does not use selected vocabulary.'),
       );
     }
   }
 
-  const expected = expectedCounts(request.targetSounds, request.exerciseCount);
-  if (![...expected].every(([sound, count]) => (assigned.get(sound) ?? 0) === count)) {
-    issues.push(
-      error(
-        'SOUND_DISTRIBUTION',
-        'proposals',
-        'Assigned sounds are not evenly distributed in request order.',
-      ),
-    );
+  if (countOk) {
+    const expected = expectedCounts(request.targetSounds, request.exerciseCount);
+    if (![...expected].every(([sound, count]) => (assigned.get(sound) ?? 0) === count)) {
+      issues.push(
+        issue(
+          'SOUND_DISTRIBUTION',
+          'proposals',
+          'Assigned sounds are not evenly distributed in request order.',
+        ),
+      );
+    }
   }
 
-  const all = [...issues, LETTER_PRESENCE_ISSUE];
-  return issues.length > 0 ? { status: 'failed', issues: all } : { status: 'passed', issues: all };
+  const all = [...issues, { ...LETTER_PRESENCE_ISSUE }];
+  return issues.length > 0
+    ? { status: 'failed', name: 'content', issues: all }
+    : { status: 'passed', name: 'content', issues: all };
 }
 
 function expectedCounts(sounds: readonly string[], total: number) {
@@ -90,8 +103,9 @@ function expectedCounts(sounds: readonly string[], total: number) {
 
 function tokens(value: string) {
   return normalizePhrase(value)
-    .split(' ')
-    .map((token) => token.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, ''))
+    .replace(/[^\p{L}\p{N}'-]+/gu, ' ')
+    .trim()
+    .split(/\s+/)
     .filter(Boolean);
 }
 
@@ -105,6 +119,6 @@ function containsVocab(phrase: string[], words: string[][]) {
   });
 }
 
-function error(code: string, path: string, message: string): ValidationIssue {
+function issue(code: string, path: string, message: string): ValidationIssue {
   return { source: 'content', code, path, severity: 'error', message };
 }

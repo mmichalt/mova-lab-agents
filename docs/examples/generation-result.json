@@ -4,6 +4,7 @@
   "checks": [
     {
       "status": "passed",
+      "name": "content",
       "issues": [
         {
           "source": "content",

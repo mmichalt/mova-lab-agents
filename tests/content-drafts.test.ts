@@ -10,11 +10,17 @@ import {
   GENERATION_TEMPERATURE,
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
-import { vocabularySchema } from '../src/content/schemas.ts';
+import { generationResultSchema, vocabularySchema } from '../src/content/schemas.ts';
 import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
-import { chatEnvelope, chatFixtures, errorBodies, vocabularyContent } from './fixtures/ollama.ts';
+import {
+  chatEnvelope,
+  chatFixtures,
+  errorBodies,
+  generatedContent,
+  vocabularyContent,
+} from './fixtures/ollama.ts';
 
 const teacherRequest = {
   ageYears: 7,
@@ -178,9 +184,11 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   });
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.requiresHumanApproval, true);
+  assert.equal(generationResultSchema.parse(body).requiresHumanApproval, true);
   assert.equal(body.requestId, response.headers.get('x-request-id'));
-  assert.deepEqual(body.checks, [{ status: 'passed', issues: [LETTER_PRESENCE_ISSUE] }]);
+  assert.deepEqual(body.checks, [
+    { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
+  ]);
   assert.equal(body.proposals[0].localId, 'proposal-1');
   assert.equal(body.proposals[1].localId, 'proposal-2');
   assert.equal(body.proposals[0].phrase, 'Риба пливе в річці');
@@ -366,26 +374,34 @@ test('generation receives the validated vocabulary, not the raw model string', a
 });
 
 test('invalid generated content is not a successful reviewable result', async (t) => {
+  const duplicated = JSON.parse(generatedContent) as {
+    status: string;
+    proposals: Array<Record<string, unknown>>;
+  };
+  duplicated.proposals[1] = { ...duplicated.proposals[1], phrase: duplicated.proposals[0]?.phrase };
   const { response, logs } = await postDrafts(t, {
-    body: { ...teacherRequest, exerciseCount: 6 },
-    reply: sequentialReply(),
+    reply: sequentialReply(
+      chatFixtures.vocabulary,
+      chatEnvelope({ message: { role: 'assistant', content: JSON.stringify(duplicated) } }),
+    ),
   });
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.requiresHumanApproval, true);
-  assert.equal(body.checks[0].status, 'failed');
+  const content = body.checks.find((check: { name: string }) => check.name === 'content');
+  assert.equal(body.requiresHumanApproval, false);
+  assert.equal(content.status, 'failed');
   assert.deepEqual(
-    body.checks[0].issues
-      .filter((issue: { severity: string }) => issue.severity === 'error')
-      .map((issue: { code: string }) => issue.code),
-    ['WRONG_COUNT', 'SOUND_DISTRIBUTION'],
+    content.issues
+      .filter((item: { severity: string }) => item.severity === 'error')
+      .map((item: { code: string }) => item.code),
+    ['DUPLICATE_PHRASE'],
   );
   assert.equal(body.proposals.length, 2);
   const logged = JSON.parse(
     logs.split('\n').find((line) => line.includes('content validation failed')) ?? '{}',
   );
   assert.equal(logged.step, 'validation');
-  assert.deepEqual(logged.codes, ['WRONG_COUNT', 'SOUND_DISTRIBUTION']);
+  assert.deepEqual(logged.issues, [{ code: 'DUPLICATE_PHRASE', path: 'proposals[1].phrase' }]);
   assert.equal(logs.includes('Риба пливе'), false);
 });
 

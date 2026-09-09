@@ -352,16 +352,25 @@ test('validation issues and check results', () => {
   };
   assert.deepEqual(validationIssueSchema.parse(issue), issue);
   assert.equal(validationIssueSchema.safeParse({ ...issue, extra: true }).success, false);
-  assert.deepEqual(checkResultSchema.parse({ status: 'passed', issues: [] }), {
+  assert.deepEqual(checkResultSchema.parse({ status: 'passed', name: 'content', issues: [] }), {
     status: 'passed',
+    name: 'content',
     issues: [],
   });
-  assert.deepEqual(checkResultSchema.parse({ status: 'failed', issues: [issue] }).status, 'failed');
+  assert.deepEqual(
+    checkResultSchema.parse({ status: 'failed', name: 'content', issues: [issue] }).status,
+    'failed',
+  );
   assert.equal(checkResultSchema.safeParse({ status: 'failed', issues: [] }).success, false);
   assert.deepEqual(
-    checkResultSchema.parse({ status: 'unavailable', errorCode: 'REVIEW_TIMEOUT' }),
+    checkResultSchema.parse({
+      status: 'unavailable',
+      name: 'language',
+      errorCode: 'REVIEW_TIMEOUT',
+    }),
     {
       status: 'unavailable',
+      name: 'language',
       errorCode: 'REVIEW_TIMEOUT',
     },
   );
@@ -387,12 +396,12 @@ test('usage metadata allows null unmeasured values and rejects negatives', () =>
   );
 });
 
-test('generation result requires human approval and local IDs', () => {
+test('generation result requires checks, local IDs, and an approval flag', () => {
   const result = generationResultSchema.parse(loadExample('generation-result.json'));
   assert.equal(result.requiresHumanApproval, true);
   assert.equal(
     generationResultSchema.safeParse({ ...result, requiresHumanApproval: false }).success,
-    false,
+    true,
   );
   assert.equal(
     generationResultSchema.safeParse({

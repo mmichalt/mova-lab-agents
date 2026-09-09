@@ -40,16 +40,16 @@ return `503` `MODEL_UNAVAILABLE`; load/OOM and rejected settings return `503
 MODEL_CAPACITY`; unreachable or overloaded Ollama returns `503
 PROVIDER_UNAVAILABLE`; attempt timeouts return `504`. Generated content that
 fails deterministic checks still returns `200` with proposals so issue paths are
-visible, but the content check is `failed` and is not a successful reviewable
-result. `LLM_ATTEMPT_TIMEOUT_MS` applies to each attempt; a request can take
+visible, but `requiresHumanApproval` is `false` and the named `content` check is
+`failed`. That is not a successful reviewable result. `LLM_ATTEMPT_TIMEOUT_MS` applies to each attempt; a request can take
 about two attempts plus metadata fetches. A workflow deadline is a later ticket.
 JSON bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID, step (`vocabulary`,
 `generation`, or `validation`), and prompt version on attempt completion, failure,
 invalid output, and refusal, and they redact authorization fields. Refusal logs
-may include a clipped model reason. Failed content checks log issue codes without
-phrases. Logs do not include vocabulary items or phrases.
+may include a clipped model reason. Failed content checks log issue codes and
+paths without phrases. Logs do not include vocabulary items or phrases.
 
 ## Recording-proposal contracts
 
@@ -69,15 +69,17 @@ Recording type and field lengths are already enforced by the model-output
 schema (`502` on violation). `validateCandidate` then checks requested count,
 target-sound assignment, even distribution (remainder in request order),
 duplicates, assigned-letter presence, and vocabulary use. Phrases are compared
-with Unicode NFC, Ukrainian case folding (`toLocaleLowerCase('uk')`), and
-collapsed Unicode whitespace. Vocabulary matching uses the same normalization
-on whitespace-delimited tokens, with surrounding punctuation stripped.
-Equivalent normalized phrases are duplicates. Each phrase must contain its
-assigned target letter and at least one selected vocabulary item as a whole
-token; a longer word that merely contains a vocabulary stem does not count.
-Other requested letters may occur incidentally. Passed checks include a
-`LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter presence is not
-phonetic, hard/soft, or therapeutic validation.
+with Unicode NFC, Ukrainian case folding (`toLocaleLowerCase('uk')`), collapsed
+Unicode whitespace, stripped format characters, and apostrophe folding (`'` /
+U+2019 / U+02BC / U+02B9). Vocabulary matching tokenizes that normalized string
+after turning other punctuation into separators, then looks for the vocabulary
+item as a contiguous whole-token sequence. Any selected item counts, even if its
+associated sound differs from the exercise. Equivalent normalized token sequences
+are duplicates. Each phrase must contain its assigned target letter; a longer
+word that merely contains a vocabulary stem does not count. Other requested
+letters may occur incidentally and do not satisfy assigned-sound coverage.
+Passed checks include a `LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter
+presence is not phonetic, hard/soft, or therapeutic validation.
 
 Documented examples: `docs/examples/content-request.json`,
 `docs/examples/vocabulary-output.json`, `docs/examples/vocabulary-output.refused.json`,
@@ -90,7 +92,8 @@ HTTP server plus synthetic Ollama chat fixtures in `tests/fixtures/ollama.ts`.
 They script vocabulary and exercise step results, assert call order and that
 generation receives the validated vocabulary, and verify that a failed
 vocabulary step does not call generation. Invalid generated content returns
-`200` with a failed content check, not a passed reviewable result. They inspect
+`200` with a failed named `content` check and `requiresHumanApproval: false`.
+They inspect
 `/api/chat` path, messages, `format`/`options`, completion, refusal, errors,
 aborts, and present or missing usage. Application attempt IDs are logged with step and prompt version; provider
 request IDs are not fabricated. Do not treat those fixtures as quality evidence.
