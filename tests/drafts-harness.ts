@@ -3,6 +3,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
+import type { Clock } from '../src/llm/execution.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
 import { chatFixtures } from './fixtures/ollama.ts';
@@ -12,7 +13,7 @@ export type OllamaCall = { method: string; url: string; body: unknown };
 export type OllamaReply =
   | { hang: true }
   | { hangBody: true }
-  | { status: number; json?: unknown; raw?: string };
+  | { status: number; json?: unknown; raw?: string; headers?: Record<string, string> };
 
 export const teacherRequest = {
   ageYears: 7,
@@ -52,7 +53,10 @@ export async function fakeOllama(t: After, reply: (call: OllamaCall) => OllamaRe
         res.write('{');
         return;
       }
-      res.writeHead(result.status, { 'content-type': 'application/json' });
+      res.writeHead(result.status, {
+        'content-type': 'application/json',
+        ...result.headers,
+      });
       res.end(result.raw ?? JSON.stringify(result.json ?? {}));
     })();
   });
@@ -63,6 +67,15 @@ export async function fakeOllama(t: After, reply: (call: OllamaCall) => OllamaRe
   return { calls, url: `http://127.0.0.1:${address.port}` };
 }
 
+export function instantClock(overrides: Partial<Clock> = {}): Clock {
+  return {
+    now: () => Date.now(),
+    sleep: async () => {},
+    random: () => 0,
+    ...overrides,
+  };
+}
+
 export async function postDrafts(
   t: After,
   options: {
@@ -70,6 +83,9 @@ export async function postDrafts(
     body?: unknown;
     token?: string | null;
     timeoutMs?: string;
+    workflowTimeoutMs?: string;
+    clock?: Clock;
+    maxProviderRequests?: number;
     log?: ReturnType<typeof createLogger>;
   } = {},
 ) {
@@ -89,8 +105,16 @@ export async function postDrafts(
     SERVICE_TOKEN: 'test-token',
     OLLAMA_BASE_URL: ollama.url,
     LLM_ATTEMPT_TIMEOUT_MS: options.timeoutMs ?? '2000',
+    WORKFLOW_TIMEOUT_MS: options.workflowTimeoutMs ?? '600000',
   });
-  const { server, url } = await listen(createApp({ config, logger }));
+  const { server, url } = await listen(
+    createApp({
+      config,
+      logger,
+      clock: options.clock ?? instantClock(),
+      maxProviderRequests: options.maxProviderRequests,
+    }),
+  );
   t.after(() => shutDown(server, 50));
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (options.token !== null) headers.authorization = `Bearer ${options.token ?? 'test-token'}`;

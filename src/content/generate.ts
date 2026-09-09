@@ -1,7 +1,6 @@
 import { z } from 'zod';
-import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { clip, completeStructured, GENERATION_TEMPERATURE } from '../llm/complete.ts';
+import { clip, completeStructured, GENERATION_TEMPERATURE, type LlmCall } from '../llm/complete.ts';
 import type { Logger } from '../logger.ts';
 import {
   type ContentRequest,
@@ -48,16 +47,11 @@ const REVISION_SYSTEM = [
 const vocabularyFormat = z.toJSONSchema(vocabularyOutputSchema);
 const exercisesFormat = z.toJSONSchema(modelOutputSchema);
 
-export async function selectVocabulary(options: {
-  config: Config;
-  logger: Logger;
-  requestId: string;
-  request: ContentRequest;
-}): Promise<Vocabulary> {
+export async function selectVocabulary(
+  options: LlmCall & { request: ContentRequest },
+): Promise<Vocabulary> {
   const output = await completeStructured(vocabularyOutputSchema, {
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
+    ...options,
     step: 'vocabulary',
     promptVersion: VOCABULARY_PROMPT_VERSION,
     system: VOCABULARY_SYSTEM,
@@ -87,10 +81,7 @@ export async function selectVocabulary(options: {
   return { items: output.items };
 }
 
-type ExerciseCall = {
-  config: Config;
-  logger: Logger;
-  requestId: string;
+type ExerciseCall = LlmCall & {
   request: ContentRequest;
   vocabulary: Vocabulary;
 };
@@ -134,9 +125,7 @@ async function produceExercises(
   },
 ): Promise<GeneratedProposal[]> {
   const output = await completeStructured(modelOutputSchema, {
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
+    ...options,
     step: options.step,
     promptVersion: options.promptVersion,
     system: options.system,

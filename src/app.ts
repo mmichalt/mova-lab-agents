@@ -3,6 +3,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { Config } from './config.ts';
 import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
+import type { Clock } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
 
 const jsonLimitBytes = 16 * 1024;
@@ -19,7 +20,13 @@ export function requireServiceToken(expected: string) {
   };
 }
 
-export function createApp(options: { config: Config; logger: Logger; testRoutes?: boolean }) {
+export function createApp(options: {
+  config: Config;
+  logger: Logger;
+  testRoutes?: boolean;
+  clock?: Clock;
+  maxProviderRequests?: number;
+}) {
   const app = express();
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
@@ -42,6 +49,8 @@ export function createApp(options: { config: Config; logger: Logger; testRoutes?
         logger: res.locals.log as Logger,
         requestId: res.locals.requestId as string,
         body: req.body,
+        clock: options.clock,
+        maxProviderRequests: options.maxProviderRequests,
       });
       res.json(result);
     },

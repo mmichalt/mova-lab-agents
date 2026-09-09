@@ -18,12 +18,14 @@ import {
   chatKind,
   chatOf,
   completedAttempts,
+  instantClock,
   listen,
   type OllamaCall,
   type OllamaReply,
   postDrafts,
   reviewReply,
   runtimeReply,
+  scriptedChats,
   sequentialReply,
   teacherRequest,
   userJson,
@@ -378,9 +380,15 @@ test('unavailable age review keeps language feedback and cannot pass', async (t)
 
 test('both unavailable reviews block success', async (t) => {
   const { response, ollama } = await postDrafts(t, {
-    reply: reviewReply({
-      age: { status: 503, json: errorBodies.overload },
-      language: { status: 200, json: chatFixtures.invalidJson },
+    reply: scriptedChats({
+      age: [
+        { status: 503, json: errorBodies.overload },
+        { status: 503, json: errorBodies.overload },
+      ],
+      language: [
+        { status: 200, json: chatFixtures.invalidJson },
+        { status: 200, json: chatFixtures.invalidJson },
+      ],
     }),
   });
   assert.equal(response.status, 200);
@@ -422,7 +430,7 @@ test('generation-step provider failure still maps after successful vocabulary', 
   });
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, 'PROVIDER_UNAVAILABLE');
-  assert.equal(chatCalls(ollama.calls).length, 2);
+  assert.equal(chatCalls(ollama.calls).length, 3);
   const failed = JSON.parse(
     logs.split('\n').find((line) => line.includes('llm attempt failed')) ?? '{}',
   );
@@ -592,7 +600,9 @@ test('unreachable Ollama is unavailable', async (t) => {
     OLLAMA_BASE_URL: 'http://127.0.0.1:9',
     LLM_ATTEMPT_TIMEOUT_MS: '200',
   });
-  const { server, url } = await listen(createApp({ config, logger: createLogger('silent') }));
+  const { server, url } = await listen(
+    createApp({ config, logger: createLogger('silent'), clock: instantClock() }),
+  );
   t.after(() => shutDown(server, 50));
   const response = await fetch(`${url}/content-drafts`, {
     method: 'POST',

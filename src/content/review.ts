@@ -1,8 +1,6 @@
 import { z } from 'zod';
-import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { completeStructured, GENERATION_TEMPERATURE } from '../llm/complete.ts';
-import type { Logger } from '../logger.ts';
+import { completeStructured, GENERATION_TEMPERATURE, type LlmCall } from '../llm/complete.ts';
 import {
   type CheckResult,
   type ContentRequest,
@@ -34,10 +32,13 @@ const LANGUAGE_SYSTEM = [
 
 const reviewFormat = z.toJSONSchema(reviewOutputSchema);
 
-export type ReviewOptions = {
-  config: Config;
-  logger: Logger;
-  requestId: string;
+const malformedCodes = new Set([
+  'PROVIDER_INVALID_OUTPUT',
+  'PROVIDER_INCOMPLETE',
+  'PROVIDER_UNEXPECTED_TOOL_CALL',
+]);
+
+export type ReviewOptions = LlmCall & {
   request: ContentRequest;
   proposals: readonly GeneratedProposal[];
 };
@@ -64,10 +65,30 @@ async function runReview(
   system: string,
   options: ReviewOptions,
 ): Promise<CheckResult> {
+  try {
+    return await reviewOnce(name, promptVersion, system, options);
+  } catch (err) {
+    if (!(err instanceof AppError) || !malformedCodes.has(err.code)) throw err;
+    options.logger.warn(
+      {
+        requestId: options.requestId,
+        step: name,
+        promptVersion,
+      },
+      'review re-ask',
+    );
+    return reviewOnce(name, promptVersion, system, options);
+  }
+}
+
+async function reviewOnce(
+  name: 'age' | 'language',
+  promptVersion: string,
+  system: string,
+  options: ReviewOptions,
+): Promise<CheckResult> {
   const output = await completeStructured(reviewOutputSchema, {
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
+    ...options,
     step: name,
     promptVersion,
     system,
