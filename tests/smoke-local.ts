@@ -6,6 +6,7 @@ import {
   GENERATION_TEMPERATURE,
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
+import { AGE_PROMPT_VERSION, LANGUAGE_PROMPT_VERSION } from '../src/content/review.ts';
 import { type ContentRequest, contentRequestSchema } from '../src/content/schemas.ts';
 import { assessGeneration } from './properties.ts';
 
@@ -147,6 +148,8 @@ async function main() {
   const report = {
     vocabularyPromptVersion: VOCABULARY_PROMPT_VERSION,
     exercisesPromptVersion: EXERCISES_PROMPT_VERSION,
+    agePromptVersion: AGE_PROMPT_VERSION,
+    languagePromptVersion: LANGUAGE_PROMPT_VERSION,
     model: {
       tag: config.ollamaModel,
       digest,

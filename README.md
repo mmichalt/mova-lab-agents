@@ -27,29 +27,42 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-`POST /content-drafts` requires the service token, then runs two sequential
-structured chat requests: `selectVocabulary` followed by `generateExercises`,
-then ordinary `validateCandidate`. Application code chooses the next step and
-passes the validated vocabulary and original request into generation. The chat
-steps are LLM operations, not agents: neither function observes results to
-choose a different action, and there is no shared chat memory. Invalid teacher
-input is rejected before any provider call. Invalid or failed vocabulary
-selection prevents generation. Schema-valid model refusals return `422`;
-malformed, truncated, or unexpected model output returns `502`; missing models
-return `503` `MODEL_UNAVAILABLE`; load/OOM and rejected settings return `503
-MODEL_CAPACITY`; unreachable or overloaded Ollama returns `503
-PROVIDER_UNAVAILABLE`; attempt timeouts return `504`. Generated content that
-fails deterministic checks still returns `200` with proposals so issue paths are
-visible, but `requiresHumanApproval` is `false` and the named `content` check is
-`failed`. That is not a successful reviewable result. `LLM_ATTEMPT_TIMEOUT_MS` applies to each attempt; a request can take
-about two attempts plus metadata fetches. A workflow deadline is a later ticket.
+`POST /content-drafts` requires the service token, then runs `selectVocabulary`
+followed by `generateExercises`, then ordinary `validateCandidate`. Application
+code chooses the next step. The chat steps are LLM operations, not agents:
+neither function observes results to choose a different action, and there is no
+shared chat memory. Invalid teacher input is rejected before any provider call.
+Invalid or failed vocabulary selection prevents generation. Failed deterministic
+checks skip semantic review. When content checks pass, `reviewAge` and
+`reviewLanguage` start independently with the same immutable request and
+candidate; neither sees the other verdict. `Promise.allSettled` keeps a
+successful review when the other fails. Concurrent promises do not guarantee GPU
+speedup: this stack keeps `OLLAMA_NUM_PARALLEL=1`, so the two reviews may queue
+and queue wait still consumes each attempt's `LLM_ATTEMPT_TIMEOUT_MS`. Increase
+inference concurrency only after measurement. Schema-valid generation refusals
+return `422`. A schema-valid reviewer refusal is a failed named check
+(`REVIEW_REFUSED`), not HTTP `422`, and cannot become a pass. Malformed,
+truncated, or unexpected model output returns `502` during vocabulary or
+generation; the same failures during review become `unavailable` checks with the
+provider error code. Missing models return `503 MODEL_UNAVAILABLE`; load/OOM and
+rejected settings return `503 MODEL_CAPACITY`; unreachable or overloaded Ollama
+returns `503 PROVIDER_UNAVAILABLE`; vocabulary/generation timeouts return `504`.
+Generated content that fails deterministic or semantic checks still returns `200`
+with proposals so issue paths are visible, but `requiresHumanApproval` is `false`.
+An unavailable required review also blocks approval and is not treated as content
+feedback or changed into a pass. `LLM_ATTEMPT_TIMEOUT_MS` applies to each
+attempt; a successful request can take four attempts plus metadata fetches. A
+workflow deadline is a later ticket.
 JSON bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID, step (`vocabulary`,
-`generation`, or `validation`), and prompt version on attempt completion, failure,
-invalid output, and refusal, and they redact authorization fields. Refusal logs
-may include a clipped model reason. Failed content checks log issue codes and
-paths without phrases. Logs do not include vocabulary items or phrases.
+`generation`, `validation`, `age`, or `language`), and prompt version on attempt
+completion, failure, invalid output, and refusal, and they redact authorization
+fields. Refusal logs for vocabulary and generation may include a clipped model
+reason. Reviewer refusal logs omit the reason so candidate phrases are not
+echoed. Failed content checks
+log issue codes and paths without phrases. Logs do not include vocabulary items
+or phrases.
 
 ## Recording-proposal contracts
 
@@ -79,11 +92,15 @@ are duplicates. Each phrase must contain its assigned target letter; a longer
 word that merely contains a vocabulary stem does not count. Other requested
 letters may occur incidentally and do not satisfy assigned-sound coverage.
 Passed checks include a `LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter
-presence is not phonetic, hard/soft, or therapeutic validation.
+presence is not phonetic, hard/soft, or therapeutic validation. Age and language
+reviews are model judgments of complexity/clarity and wording/theme; they are
+not therapeutic validation either.
 
 Documented examples: `docs/examples/content-request.json`,
 `docs/examples/vocabulary-output.json`, `docs/examples/vocabulary-output.refused.json`,
 `docs/examples/model-output.json`, `docs/examples/model-output.refused.json`,
+`docs/examples/review-output.json`, `docs/examples/review-output.failed.json`,
+`docs/examples/review-output.refused.json`,
 `docs/examples/generation-result.json`.
 
 Schema cases, content-validation, and provider-boundary tests run with
@@ -92,8 +109,11 @@ HTTP server plus synthetic Ollama chat fixtures in `tests/fixtures/ollama.ts`.
 They script vocabulary and exercise step results, assert call order and that
 generation receives the validated vocabulary, and verify that a failed
 vocabulary step does not call generation. Invalid generated content returns
-`200` with a failed named `content` check and `requiresHumanApproval: false`.
-They inspect
+`200` with a failed named `content` check and `requiresHumanApproval: false`,
+and it does not start semantic review. Passed content starts both reviews
+before either settles; a negative or refused verdict stays failed; an
+operational review failure becomes `unavailable` and leaves the other review's
+result in place. They inspect
 `/api/chat` path, messages, `format`/`options`, completion, refusal, errors,
 aborts, and present or missing usage. Application attempt IDs are logged with step and prompt version; provider
 request IDs are not fabricated. Do not treat those fixtures as quality evidence.
@@ -216,8 +236,9 @@ and `step` to `llm attempt completed` logs. Record digest, quantization, Ollama
 version, wall times, GPU percent, measured `nvidia-smi` hardware, and whether
 4096 context / 2000 output sufficed in `evals/smoke-results.md`,
 `evals/smoke-report.json`, and `evals/runtime.json`. Each HTTP request now makes
-two model calls, so wall time is not comparable to the AG-006 `content-drafts/v1`
-baseline without noting the split. If more capacity is needed,
+four model calls when content checks pass (vocabulary, exercises, age, language),
+so wall time is not comparable to earlier baselines without noting the extra
+reviews and `OLLAMA_NUM_PARALLEL=1` queueing. If more capacity is needed,
 measure 8192 context and a larger `num_predict`, then update this README and
 the architecture plan. Wording is stochastic; do not expect identical phrases.
 

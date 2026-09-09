@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-008 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-009 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -36,7 +36,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-006 — Provider tests and baseline examples](#ag-006)
 - [x] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
 - [x] [AG-008 — Deterministic content validation](#ag-008)
-- [ ] [AG-009 — Concurrent semantic reviews](#ag-009)
+- [x] [AG-009 — Concurrent semantic reviews](#ag-009)
 - [ ] [AG-010 — Workflow state and bounded content revision](#ag-010)
 - [ ] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
 
@@ -406,7 +406,7 @@ reviewable result. Passed checks include `LETTER_PRESENCE_ONLY`. `npm test` (118
 **Stage:** 4  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-008](#ag-008)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn independent I/O concurrency, fan-out/fan-in,
 and the difference between negative feedback and operational failure.
@@ -433,6 +433,17 @@ cannot become a pass or trigger candidate revision.
 thresholds; cover one rejection, both rejections, negative verdicts, and aborts.
 
 **Out of scope:** Worker threads, queues, reviewer voting, and model-based schema validation.
+
+Recorded: After a passed `content` check, `reviewAge` and `reviewLanguage` start
+with the same request and candidate and neither user payload includes the other
+verdict. `settleReviews` uses `Promise.allSettled`. Failed content skips both
+reviews. A negative or schema-valid refused review is a failed named check
+(`REVIEW_REFUSED` cannot become a pass). Operational review failures become
+`unavailable` with the provider error code and keep the other review. README
+documents that `OLLAMA_NUM_PARALLEL=1` means concurrent promises do not imply
+GPU speedup and that queue wait consumes attempt timeouts. `npm test` (132),
+`npm run typecheck`, `npx biome ci .`, `npm run build`, and
+`docker compose config` pass without GPU, Ollama, or live inference.
 
 ### AG-010
 
