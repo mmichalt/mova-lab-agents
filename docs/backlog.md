@@ -22,7 +22,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, create branch from main (name should include the ticket tag), commit the work and then run `codex --model "gpt-5.6-sol" -c model_reasoning_effort=high review`, then fix the issues with the starting model (latest grok on High) and open a PR.
+- After ticket is implemented, ask GPT-5.6-Sol high to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
 
 ## Ticket index
 
@@ -395,9 +395,9 @@ Ukrainian case folding, and collapsed Unicode whitespace; vocabulary matching
 is whole-token after stripping surrounding punctuation. Mixed requests require
 even assigned-sound distribution with remainder in request order; incidental
 letters do not count. Equivalent normalized phrases are `DUPLICATE_PHRASE`.
-Failed checks return `200` with a named `content` check `status: "failed"` and
-`requiresHumanApproval: false`. Passed checks include `LETTER_PRESENCE_ONLY`.
-`npm test` (121), `npm run typecheck`, `npx biome ci .`, `npm run build`, and
+Failed checks return `200` with `status: "failed"` and are not a passed
+reviewable result. Passed checks include `LETTER_PRESENCE_ONLY`. `npm test` (118),
+`npm run typecheck`, `npx biome ci .`, `npm run build`, and
 `docker compose config` pass without GPU, Ollama, or live inference.
 
 ### AG-009
