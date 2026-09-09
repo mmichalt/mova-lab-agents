@@ -11,6 +11,7 @@ import {
   llmUsageSchema,
   modelOutputSchema,
   recordingProposalSchema,
+  reviewOutputSchema,
   validationIssueSchema,
   vocabularyOutputSchema,
   vocabularySchema,
@@ -334,6 +335,65 @@ test('vocabulary JSON Schema forbids extra properties and pins word limits', () 
   assert.deepEqual(Object.keys(schemaObject(item.properties)), ['word', 'targetSound']);
   assert.equal(schemaProp(item, 'word').maxLength, limits.vocabWord);
   assert.equal(schemaProp(selected, 'items').maxItems, limits.vocabItemsMax);
+});
+
+test('review output requires a passed, failed, or refused branch', () => {
+  assert.deepEqual(reviewOutputSchema.parse(loadExample('review-output.json')), {
+    status: 'passed',
+    issues: [],
+  });
+  assert.equal(reviewOutputSchema.parse(loadExample('review-output.failed.json')).status, 'failed');
+  assert.equal(
+    reviewOutputSchema.parse(loadExample('review-output.refused.json')).status,
+    'refused',
+  );
+  assert.equal(reviewOutputSchema.safeParse({ status: 'failed', issues: [] }).success, false);
+  assert.equal(
+    reviewOutputSchema.safeParse({ status: 'unavailable', errorCode: 'PROVIDER_TIMEOUT' }).success,
+    false,
+  );
+  assert.equal(
+    reviewOutputSchema.safeParse({ status: 'passed', issues: [], extra: true }).success,
+    false,
+  );
+  assert.equal(
+    reviewOutputSchema.safeParse({
+      status: 'passed',
+      issues: [{ code: 'TOO_COMPLEX', severity: 'error', message: 'too hard' }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    reviewOutputSchema.safeParse({
+      status: 'failed',
+      issues: [{ code: 'x', severity: 'error', message: 'no', source: 'age' }],
+    }).success,
+    false,
+  );
+});
+
+test('review JSON Schema forbids extra properties and pins finding limits', () => {
+  const schema = schemaObject(z.toJSONSchema(reviewOutputSchema));
+  assert.ok(Array.isArray(schema.oneOf) && schema.oneOf.length === 3);
+  const passed = schemaObject(schema.oneOf[0]);
+  const failed = schemaObject(schema.oneOf[1]);
+  const refused = schemaObject(schema.oneOf[2]);
+  assert.equal(passed.additionalProperties, false);
+  assert.equal(failed.additionalProperties, false);
+  assert.equal(refused.additionalProperties, false);
+  const finding = schemaObject(schemaProp(passed, 'issues').items);
+  assert.equal(finding.additionalProperties, false);
+  assert.deepEqual(Object.keys(schemaObject(finding.properties)), [
+    'code',
+    'path',
+    'severity',
+    'message',
+  ]);
+  assert.equal(schemaProp(finding, 'code').maxLength, limits.findingCode);
+  assert.equal(schemaProp(finding, 'message').maxLength, limits.findingMessage);
+  assert.equal(schemaProp(finding, 'path').maxLength, limits.findingPath);
+  assert.equal(schemaProp(passed, 'issues').maxItems, limits.findingsMax);
+  assert.equal(schemaProp(refused, 'reason').maxLength, limits.refusalReason);
 });
 
 test('domain proposal requires application-assigned localId', () => {

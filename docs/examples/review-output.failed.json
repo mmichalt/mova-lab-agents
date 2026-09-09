@@ -1,0 +1,11 @@
+{
+  "status": "failed",
+  "issues": [
+    {
+      "code": "TOO_COMPLEX",
+      "path": "proposals[0].phrase",
+      "severity": "error",
+      "message": "The phrase is too long and dense for age 7."
+    }
+  ]
+}

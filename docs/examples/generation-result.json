@@ -13,6 +13,16 @@
           "message": "Cyrillic letter presence is not phonetic, hard/soft, or therapeutic validation."
         }
       ]
+    },
+    {
+      "status": "passed",
+      "name": "age",
+      "issues": []
+    },
+    {
+      "status": "passed",
+      "name": "language",
+      "issues": []
     }
   ],
   "proposals": [

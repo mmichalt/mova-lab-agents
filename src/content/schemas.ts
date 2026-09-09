@@ -14,6 +14,10 @@ export const limits = {
   exerciseCountDefault: 6,
   exerciseCountMax: 12,
   refusalReason: 1000,
+  findingCode: 64,
+  findingPath: 160,
+  findingMessage: 500,
+  findingsMax: 24,
 } as const;
 
 export const targetSounds = ['р', 'л'] as const;
@@ -88,6 +92,32 @@ export const modelOutputSchema = z.discriminatedUnion('status', [
   }),
 ]);
 
+const reviewFinding = <T extends 'error' | 'warning'>(severity: z.ZodType<T>) =>
+  z.strictObject({
+    code: nonempty(limits.findingCode),
+    path: nonempty(limits.findingPath).optional(),
+    severity,
+    message: nonempty(limits.findingMessage),
+  });
+
+export const reviewOutputSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('passed'),
+    issues: z.array(reviewFinding(z.literal('warning'))).max(limits.findingsMax),
+  }),
+  z.strictObject({
+    status: z.literal('failed'),
+    issues: z
+      .array(reviewFinding(z.enum(['error', 'warning'])))
+      .min(1)
+      .max(limits.findingsMax),
+  }),
+  z.strictObject({
+    status: z.literal('refused'),
+    reason: nonempty(limits.refusalReason),
+  }),
+]);
+
 export const validationIssueSchema = z.strictObject({
   source: z.enum(['schema', 'content', 'age', 'language', 'application']),
   code: z.string().min(1),
@@ -138,6 +168,7 @@ export type VocabularyOutput = z.infer<typeof vocabularyOutputSchema>;
 export type GeneratedProposal = z.infer<typeof generatedProposalSchema>;
 export type RecordingProposal = z.infer<typeof recordingProposalSchema>;
 export type ModelOutput = z.infer<typeof modelOutputSchema>;
+export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
 export type ValidationIssue = z.infer<typeof validationIssueSchema>;
 export type CheckResult = z.infer<typeof checkResultSchema>;
 export type LlmUsage = z.infer<typeof llmUsageSchema>;

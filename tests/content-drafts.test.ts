@@ -10,6 +10,7 @@ import {
   GENERATION_TEMPERATURE,
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
+import { AGE_PROMPT_VERSION, LANGUAGE_PROMPT_VERSION } from '../src/content/review.ts';
 import { generationResultSchema, vocabularySchema } from '../src/content/schemas.ts';
 import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
 import { createLogger } from '../src/logger.ts';
@@ -21,6 +22,8 @@ import {
   generatedContent,
   vocabularyContent,
 } from './fixtures/ollama.ts';
+
+type ChatKind = 'vocabulary' | 'generation' | 'age' | 'language';
 
 const teacherRequest = {
   ageYears: 7,
@@ -126,6 +129,19 @@ function userJson(call: OllamaCall) {
   return JSON.parse(payload.messages[1]?.content ?? '{}') as unknown;
 }
 
+function chatKind(call: OllamaCall): ChatKind | 'unknown' {
+  const system = (call.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '';
+  if (system.includes('Select Ukrainian vocabulary')) return 'vocabulary';
+  if (system.includes('Produce Ukrainian recording-exercise')) return 'generation';
+  if (system.includes('requested child age')) return 'age';
+  if (system.includes('Ukrainian wording and theme')) return 'language';
+  return 'unknown';
+}
+
+function chatOf(calls: OllamaCall[], kind: ChatKind) {
+  return chatCalls(calls).find((call) => chatKind(call) === kind);
+}
+
 function completedAttempts(logs: string) {
   return logs
     .split('\n')
@@ -151,15 +167,33 @@ function runtimeReply(json: unknown): (call: OllamaCall) => OllamaReply {
 function sequentialReply(
   vocabulary: unknown = chatFixtures.vocabulary,
   generated: unknown = chatFixtures.generated,
+  review: unknown = chatFixtures.reviewPassed,
 ): (call: OllamaCall) => OllamaReply {
-  let chats = 0;
   const meta = runtimeReply(generated);
   return (call) => {
     if (call.method === 'POST' && call.url === '/api/chat') {
-      chats += 1;
-      return { status: 200, json: chats === 1 ? vocabulary : generated };
+      const kind = chatKind(call);
+      if (kind === 'vocabulary') return { status: 200, json: vocabulary };
+      if (kind === 'generation') return { status: 200, json: generated };
+      return { status: 200, json: review };
     }
     return meta(call);
+  };
+}
+
+function reviewReply(replies: {
+  age?: OllamaReply | ((call: OllamaCall) => OllamaReply);
+  language?: OllamaReply | ((call: OllamaCall) => OllamaReply);
+}): (call: OllamaCall) => OllamaReply {
+  const after = afterVocabulary({ status: 200, json: chatFixtures.generated });
+  return (call) => {
+    if (call.method === 'POST' && call.url === '/api/chat') {
+      const kind = chatKind(call);
+      const reply =
+        kind === 'age' ? replies.age : kind === 'language' ? replies.language : undefined;
+      if (reply) return typeof reply === 'function' ? reply(call) : reply;
+    }
+    return after(call);
   };
 }
 
@@ -188,6 +222,8 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(body.requestId, response.headers.get('x-request-id'));
   assert.deepEqual(body.checks, [
     { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
+    { status: 'passed', name: 'age', issues: [] },
+    { status: 'passed', name: 'language', issues: [] },
   ]);
   assert.equal(body.proposals[0].localId, 'proposal-1');
   assert.equal(body.proposals[1].localId, 'proposal-2');
@@ -195,23 +231,44 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal('id' in body.proposals[0], false);
 
   const chats = chatCalls(ollama.calls);
-  assert.equal(chats.length, 2);
+  assert.equal(chats.length, 4);
+  const vocabChat = chatOf(ollama.calls, 'vocabulary');
+  const exerciseChat = chatOf(ollama.calls, 'generation');
+  const ageChat = chatOf(ollama.calls, 'age');
+  const languageChat = chatOf(ollama.calls, 'language');
+  assert.ok(vocabChat);
+  assert.ok(exerciseChat);
+  assert.ok(ageChat);
+  assert.ok(languageChat);
   const selected = JSON.parse(vocabularyContent) as { items: unknown };
   const vocabulary = vocabularySchema.parse({ items: selected.items });
-  assert.deepEqual(userJson(chats[0]), teacherRequest);
-  assert.deepEqual(userJson(chats[1]), { request: teacherRequest, vocabulary });
+  const generated = JSON.parse(generatedContent) as { proposals: unknown };
+  assert.deepEqual(userJson(vocabChat), teacherRequest);
+  assert.deepEqual(userJson(exerciseChat), { request: teacherRequest, vocabulary });
+  assert.deepEqual(userJson(ageChat), { request: teacherRequest, proposals: generated.proposals });
+  assert.deepEqual(userJson(languageChat), {
+    request: teacherRequest,
+    proposals: generated.proposals,
+  });
+  assert.equal('checks' in (userJson(ageChat) as object), false);
+  assert.equal('verdict' in (userJson(languageChat) as object), false);
   assert.match(
-    (chats[0].body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    (vocabChat.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
     /Select Ukrainian vocabulary/,
   );
   assert.match(
-    (chats[1].body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    (exerciseChat.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
     /Use the supplied vocabulary in its given form/,
   );
+  assert.match(
+    (ageChat.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    /requested child age/,
+  );
+  assert.match(
+    (languageChat.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
+    /Ukrainian wording and theme/,
+  );
 
-  const [vocabChat, exerciseChat] = chats;
-  assert.ok(vocabChat);
-  assert.ok(exerciseChat);
   for (const chat of chats) {
     const payload = chat.body as Record<string, unknown>;
     assert.equal(payload.model, 'qwen3:4b-instruct');
@@ -219,7 +276,10 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
     assert.equal('id' in payload, false);
     assert.equal('request_id' in payload, false);
     const format = payload.format as { oneOf: unknown[] };
-    assert.equal(format.oneOf.length, 2);
+    assert.equal(
+      format.oneOf.length,
+      chatKind(chat) === 'age' || chatKind(chat) === 'language' ? 3 : 2,
+    );
     assert.deepEqual(payload.options, {
       temperature: GENERATION_TEMPERATURE,
       num_ctx: 4096,
@@ -234,13 +294,29 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
     exerciseChat.body as { format: { oneOf: Array<{ properties: Record<string, unknown> }> } }
   ).format;
   assert.ok('proposals' in exerciseFormat.oneOf[0].properties);
+  const ageFormat = (
+    ageChat.body as { format: { oneOf: Array<{ properties: Record<string, unknown> }> } }
+  ).format;
+  assert.ok('issues' in ageFormat.oneOf[0].properties);
 
   const completed = completedAttempts(logs);
-  assert.equal(completed.length, 2);
+  assert.equal(completed.length, 4);
   assert.equal(completed[0].step, 'vocabulary');
   assert.equal(completed[0].promptVersion, VOCABULARY_PROMPT_VERSION);
   assert.equal(completed[1].step, 'generation');
   assert.equal(completed[1].promptVersion, EXERCISES_PROMPT_VERSION);
+  const reviewLogs = completed.filter(
+    (logged) => logged.step === 'age' || logged.step === 'language',
+  );
+  assert.equal(reviewLogs.length, 2);
+  assert.equal(
+    reviewLogs.find((logged) => logged.step === 'age')?.promptVersion,
+    AGE_PROMPT_VERSION,
+  );
+  assert.equal(
+    reviewLogs.find((logged) => logged.step === 'language')?.promptVersion,
+    LANGUAGE_PROMPT_VERSION,
+  );
   for (const logged of completed) {
     assert.match(String(logged.attemptId), /^[\da-f-]{36}$/i);
     assert.equal(logged.model, 'qwen3:4b-instruct');
@@ -265,24 +341,25 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
 });
 
 test('missing usage and runtime metadata stay null', async (t) => {
-  let chats = 0;
   const { response, logs } = await postDrafts(t, {
     reply: (call) => {
       if (call.url === '/api/version' || call.url === '/api/tags') return { status: 500 };
       if (call.url === '/api/chat') {
-        chats += 1;
-        return {
-          status: 200,
-          json:
-            chats === 1 ? chatFixtures.vocabularyMissingUsage : chatFixtures.generatedMissingUsage,
-        };
+        const kind = chatKind(call);
+        const json =
+          kind === 'vocabulary'
+            ? chatFixtures.vocabularyMissingUsage
+            : kind === 'generation'
+              ? chatFixtures.generatedMissingUsage
+              : chatFixtures.reviewMissingUsage;
+        return { status: 200, json };
       }
       return { status: 500, json: { error: 'unused' } };
     },
   });
   assert.equal(response.status, 200);
   const completed = completedAttempts(logs);
-  assert.equal(completed.length, 2);
+  assert.equal(completed.length, 4);
   for (const logged of completed) {
     assert.equal(logged.modelDigest, null);
     assert.equal(logged.ollamaVersion, null);
@@ -361,8 +438,8 @@ test('generation receives the validated vocabulary, not the raw model string', a
   });
   assert.equal(response.status, 200);
   const chats = chatCalls(ollama.calls);
-  assert.equal(chats.length, 2);
-  assert.deepEqual(userJson(chats[1]), {
+  assert.equal(chats.length, 4);
+  assert.deepEqual(userJson(chatOf(ollama.calls, 'generation') as OllamaCall), {
     request: teacherRequest,
     vocabulary: {
       items: [
@@ -379,7 +456,7 @@ test('invalid generated content is not a successful reviewable result', async (t
     proposals: Array<Record<string, unknown>>;
   };
   duplicated.proposals[1] = { ...duplicated.proposals[1], phrase: duplicated.proposals[0]?.phrase };
-  const { response, logs } = await postDrafts(t, {
+  const { response, ollama, logs } = await postDrafts(t, {
     reply: sequentialReply(
       chatFixtures.vocabulary,
       chatEnvelope({ message: { role: 'assistant', content: JSON.stringify(duplicated) } }),
@@ -390,6 +467,7 @@ test('invalid generated content is not a successful reviewable result', async (t
   const content = body.checks.find((check: { name: string }) => check.name === 'content');
   assert.equal(body.requiresHumanApproval, false);
   assert.equal(content.status, 'failed');
+  assert.equal(body.checks.length, 1);
   assert.deepEqual(
     content.issues
       .filter((item: { severity: string }) => item.severity === 'error')
@@ -397,12 +475,110 @@ test('invalid generated content is not a successful reviewable result', async (t
     ['DUPLICATE_PHRASE'],
   );
   assert.equal(body.proposals.length, 2);
+  assert.equal(chatCalls(ollama.calls).length, 2);
+  assert.equal(
+    chatCalls(ollama.calls).some((call) => chatKind(call) === 'age'),
+    false,
+  );
+  assert.equal(
+    chatCalls(ollama.calls).some((call) => chatKind(call) === 'language'),
+    false,
+  );
   const logged = JSON.parse(
     logs.split('\n').find((line) => line.includes('content validation failed')) ?? '{}',
   );
   assert.equal(logged.step, 'validation');
   assert.deepEqual(logged.issues, [{ code: 'DUPLICATE_PHRASE', path: 'proposals[1].phrase' }]);
   assert.equal(logs.includes('Риба пливе'), false);
+});
+
+test('negative age verdict keeps language feedback and blocks approval', async (t) => {
+  const { response, ollama } = await postDrafts(t, {
+    reply: reviewReply({
+      age: { status: 200, json: chatFixtures.reviewFailed },
+      language: { status: 200, json: chatFixtures.reviewPassed },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.requiresHumanApproval, false);
+  const age = body.checks.find((check: { name: string }) => check.name === 'age');
+  const language = body.checks.find((check: { name: string }) => check.name === 'language');
+  assert.equal(age.status, 'failed');
+  assert.equal(age.issues[0].code, 'TOO_COMPLEX');
+  assert.equal(age.issues[0].source, 'age');
+  assert.equal(language.status, 'passed');
+  assert.equal(chatCalls(ollama.calls).length, 4);
+});
+
+test('refused review is failed, not a pass, and the other review is kept', async (t) => {
+  const echoed = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({
+        status: 'refused',
+        reason: 'Cannot judge «Риба пливе в річці».',
+      }),
+    },
+  });
+  const { response, logs } = await postDrafts(t, {
+    reply: reviewReply({
+      age: { status: 200, json: echoed },
+      language: { status: 200, json: chatFixtures.reviewPassed },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.requiresHumanApproval, false);
+  const age = body.checks.find((check: { name: string }) => check.name === 'age');
+  const language = body.checks.find((check: { name: string }) => check.name === 'language');
+  assert.equal(age.status, 'failed');
+  assert.equal(age.issues[0].code, 'REVIEW_REFUSED');
+  assert.equal(language.status, 'passed');
+  const refused = JSON.parse(
+    logs.split('\n').find((line) => line.includes('model refused') && line.includes('"age"')) ??
+      '{}',
+  );
+  assert.equal(refused.step, 'age');
+  assert.equal(refused.promptVersion, AGE_PROMPT_VERSION);
+  assert.equal('reason' in refused, false);
+  assert.equal(logs.includes('Риба пливе'), false);
+});
+
+test('unavailable age review keeps language feedback and cannot pass', async (t) => {
+  const { response } = await postDrafts(t, {
+    reply: reviewReply({
+      age: { hang: true },
+      language: { status: 200, json: chatFixtures.reviewPassed },
+    }),
+    timeoutMs: '80',
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.requiresHumanApproval, false);
+  const age = body.checks.find((check: { name: string }) => check.name === 'age');
+  const language = body.checks.find((check: { name: string }) => check.name === 'language');
+  assert.deepEqual(age, { status: 'unavailable', name: 'age', errorCode: 'PROVIDER_TIMEOUT' });
+  assert.equal(language.status, 'passed');
+});
+
+test('both unavailable reviews block success', async (t) => {
+  const { response } = await postDrafts(t, {
+    reply: reviewReply({
+      age: { status: 503, json: errorBodies.overload },
+      language: { status: 200, json: chatFixtures.invalidJson },
+    }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.requiresHumanApproval, false);
+  assert.deepEqual(
+    body.checks.filter((check: { name: string }) => check.name !== 'content'),
+    [
+      { status: 'unavailable', name: 'age', errorCode: 'PROVIDER_UNAVAILABLE' },
+      { status: 'unavailable', name: 'language', errorCode: 'PROVIDER_INVALID_OUTPUT' },
+    ],
+  );
 });
 
 test('generation-step refusal still maps after successful vocabulary', async (t) => {
