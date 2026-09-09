@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.ts';
-import { generateContentDrafts } from './content/generate.ts';
+import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
 import type { Logger } from './logger.ts';
 

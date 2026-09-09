@@ -456,16 +456,30 @@ test('usage metadata allows null unmeasured values and rejects negatives', () =>
   );
 });
 
-test('generation result requires checks, local IDs, and an approval flag', () => {
+test('generation result requires checks, local IDs, workflow status, and an approval flag', () => {
   const result = generationResultSchema.parse(loadExample('generation-result.json'));
   assert.equal(result.requiresHumanApproval, true);
+  assert.equal(result.status, 'READY_FOR_REVIEW');
+  assert.equal(result.candidateVersion, 1);
+  assert.equal(result.revisionCount, 0);
+  assert.equal(
+    generationResultSchema.safeParse({
+      ...result,
+      status: 'FAILED',
+      requiresHumanApproval: false,
+    }).success,
+    true,
+  );
   assert.equal(
     generationResultSchema.safeParse({ ...result, requiresHumanApproval: false }).success,
-    true,
+    false,
   );
   assert.equal(
     generationResultSchema.safeParse({
       requestId: 'r1',
+      status: 'READY_FOR_REVIEW',
+      candidateVersion: 1,
+      revisionCount: 0,
       requiresHumanApproval: true,
       checks: [],
       proposals: [validProposal],

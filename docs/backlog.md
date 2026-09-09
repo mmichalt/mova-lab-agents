@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-009 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-010 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -37,7 +37,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
 - [x] [AG-008 — Deterministic content validation](#ag-008)
 - [x] [AG-009 — Concurrent semantic reviews](#ag-009)
-- [ ] [AG-010 — Workflow state and bounded content revision](#ag-010)
+- [x] [AG-010 — Workflow state and bounded content revision](#ag-010)
 - [ ] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
 
 ### Milestone 2 — Tools and durable human approval
@@ -451,7 +451,7 @@ GPU speedup and that queue wait consumes attempt timeouts. `npm test` (132),
 **Stage:** 5  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-009](#ag-009)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand explicit state, conditional
 branches, and a finite correction loop.
@@ -475,6 +475,16 @@ assert version and attempt counts.
 
 **Out of scope:** Persistence, queues, publication, unlimited repair, and
 transport backoff beyond the existing timeout behavior.
+
+Recorded: `runContentWorkflow` owns a serializable `GenerationState`. One initial
+candidate plus at most two `revision/v1` calls. Fresh `validateCandidate` and
+reviews run on each changed candidate; the original request is passed through
+unchanged. Schema-valid refusals and unavailable reviews do not revise. Repeated
+identical invalid candidates return `422 IDENTICAL_INVALID_CANDIDATE`; exhausted
+revisions return `422 CONTENT_VALIDATION_EXHAUSTED`. `READY_FOR_REVIEW` is `200`
+with `requiresHumanApproval: true` and is not durable approval. `npm test` (139),
+`npm run typecheck`, `npx biome ci .`, `npm run build`, and
+`docker compose config` pass without GPU, Ollama, or live inference.
 
 ### AG-011
 

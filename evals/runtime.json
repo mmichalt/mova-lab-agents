@@ -1,6 +1,7 @@
 {
   "vocabularyPromptVersion": "vocabulary/v1",
   "exercisesPromptVersion": "exercises/v1",
+  "revisionPromptVersion": "revision/v1",
   "model": {
     "tag": "qwen3:4b-instruct",
     "quantization": "Q4_K_M",
