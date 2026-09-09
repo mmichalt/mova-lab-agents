@@ -4,11 +4,11 @@
   "checks": [
     {
       "status": "passed",
+      "name": "content",
       "issues": [
         {
           "source": "content",
           "code": "LETTER_PRESENCE_ONLY",
-          "path": "proposals[0].phrase",
           "severity": "warning",
           "message": "Cyrillic letter presence is not phonetic, hard/soft, or therapeutic validation."
         }

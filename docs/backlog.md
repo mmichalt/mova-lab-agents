@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-007 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-008 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -22,7 +22,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, ask Opus 5 high to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
+- After ticket is implemented, ask GPT-5.6-Sol high to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
 
 ## Ticket index
 
@@ -35,7 +35,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-005 — One structured LLM generation operation](#ag-005)
 - [x] [AG-006 — Provider tests and baseline examples](#ag-006)
 - [x] [AG-007 — Sequential vocabulary and exercise generation](#ag-007)
-- [ ] [AG-008 — Deterministic content validation](#ag-008)
+- [x] [AG-008 — Deterministic content validation](#ag-008)
 - [ ] [AG-009 — Concurrent semantic reviews](#ag-009)
 - [ ] [AG-010 — Workflow state and bounded content revision](#ag-010)
 - [ ] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
@@ -366,7 +366,7 @@ and phrases. Transport lives in `src/llm/ollama.ts`. `npm test` (104),
 **Stage:** 3  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-007](#ag-007)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Separate exact application rules from
 probabilistic model judgments.
@@ -389,6 +389,16 @@ occurrence versus assigned target coverage.
 
 **Out of scope:** LLM reviewers, linguistic inflection engines, embeddings,
 clinical suitability claims, and automatic correction.
+
+Recorded: `validateCandidate` runs after `generateExercises`. Phrases use NFC,
+Ukrainian case folding, and collapsed Unicode whitespace; vocabulary matching
+is whole-token after stripping surrounding punctuation. Mixed requests require
+even assigned-sound distribution with remainder in request order; incidental
+letters do not count. Equivalent normalized phrases are `DUPLICATE_PHRASE`.
+Failed checks return `200` with `status: "failed"` and are not a passed
+reviewable result. Passed checks include `LETTER_PRESENCE_ONLY`. `npm test` (118),
+`npm run typecheck`, `npx biome ci .`, `npm run build`, and
+`docker compose config` pass without GPU, Ollama, or live inference.
 
 ### AG-009
 

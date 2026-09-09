@@ -10,16 +10,24 @@ import {
   GENERATION_TEMPERATURE,
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
-import { vocabularySchema } from '../src/content/schemas.ts';
+import { generationResultSchema, vocabularySchema } from '../src/content/schemas.ts';
+import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
-import { chatEnvelope, chatFixtures, errorBodies, vocabularyContent } from './fixtures/ollama.ts';
+import {
+  chatEnvelope,
+  chatFixtures,
+  errorBodies,
+  generatedContent,
+  vocabularyContent,
+} from './fixtures/ollama.ts';
 
 const teacherRequest = {
   ageYears: 7,
   targetSounds: ['р', 'л'],
   difficulty: 'easy',
   theme: 'тварини',
+  exerciseCount: 2,
   teacherInstructions: 'Короткі слова та прості фрази.',
 };
 
@@ -176,9 +184,11 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   });
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.requiresHumanApproval, true);
+  assert.equal(generationResultSchema.parse(body).requiresHumanApproval, true);
   assert.equal(body.requestId, response.headers.get('x-request-id'));
-  assert.deepEqual(body.checks, []);
+  assert.deepEqual(body.checks, [
+    { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
+  ]);
   assert.equal(body.proposals[0].localId, 'proposal-1');
   assert.equal(body.proposals[1].localId, 'proposal-2');
   assert.equal(body.proposals[0].phrase, 'Риба пливе в річці');
@@ -188,9 +198,8 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(chats.length, 2);
   const selected = JSON.parse(vocabularyContent) as { items: unknown };
   const vocabulary = vocabularySchema.parse({ items: selected.items });
-  const request = { ...teacherRequest, exerciseCount: 6 };
-  assert.deepEqual(userJson(chats[0]), request);
-  assert.deepEqual(userJson(chats[1]), { request, vocabulary });
+  assert.deepEqual(userJson(chats[0]), teacherRequest);
+  assert.deepEqual(userJson(chats[1]), { request: teacherRequest, vocabulary });
   assert.match(
     (chats[0].body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '',
     /Select Ukrainian vocabulary/,
@@ -354,7 +363,7 @@ test('generation receives the validated vocabulary, not the raw model string', a
   const chats = chatCalls(ollama.calls);
   assert.equal(chats.length, 2);
   assert.deepEqual(userJson(chats[1]), {
-    request: { ...teacherRequest, exerciseCount: 6 },
+    request: teacherRequest,
     vocabulary: {
       items: [
         { word: 'риба', targetSound: 'р' },
@@ -362,6 +371,38 @@ test('generation receives the validated vocabulary, not the raw model string', a
       ],
     },
   });
+});
+
+test('invalid generated content is not a successful reviewable result', async (t) => {
+  const duplicated = JSON.parse(generatedContent) as {
+    status: string;
+    proposals: Array<Record<string, unknown>>;
+  };
+  duplicated.proposals[1] = { ...duplicated.proposals[1], phrase: duplicated.proposals[0]?.phrase };
+  const { response, logs } = await postDrafts(t, {
+    reply: sequentialReply(
+      chatFixtures.vocabulary,
+      chatEnvelope({ message: { role: 'assistant', content: JSON.stringify(duplicated) } }),
+    ),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  const content = body.checks.find((check: { name: string }) => check.name === 'content');
+  assert.equal(body.requiresHumanApproval, false);
+  assert.equal(content.status, 'failed');
+  assert.deepEqual(
+    content.issues
+      .filter((item: { severity: string }) => item.severity === 'error')
+      .map((item: { code: string }) => item.code),
+    ['DUPLICATE_PHRASE'],
+  );
+  assert.equal(body.proposals.length, 2);
+  const logged = JSON.parse(
+    logs.split('\n').find((line) => line.includes('content validation failed')) ?? '{}',
+  );
+  assert.equal(logged.step, 'validation');
+  assert.deepEqual(logged.issues, [{ code: 'DUPLICATE_PHRASE', path: 'proposals[1].phrase' }]);
+  assert.equal(logs.includes('Риба пливе'), false);
 });
 
 test('generation-step refusal still maps after successful vocabulary', async (t) => {

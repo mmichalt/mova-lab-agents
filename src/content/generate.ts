@@ -15,6 +15,7 @@ import {
   type VocabularyOutput,
   vocabularyOutputSchema,
 } from './schemas.ts';
+import { validateCandidate } from './validation.ts';
 
 export const VOCABULARY_PROMPT_VERSION = 'vocabulary/v1';
 export const EXERCISES_PROMPT_VERSION = 'exercises/v1';
@@ -69,11 +70,24 @@ export async function generateContentDrafts(options: {
     request: parsed.data,
     vocabulary,
   });
+  const check = validateCandidate(parsed.data, vocabulary, proposals);
+  if (check.status === 'failed') {
+    options.logger.warn(
+      {
+        requestId: options.requestId,
+        step: 'validation',
+        issues: check.issues
+          .filter((item) => item.severity === 'error')
+          .map((item) => ({ code: item.code, path: item.path })),
+      },
+      'content validation failed',
+    );
+  }
 
   return {
     requestId: options.requestId,
-    requiresHumanApproval: true,
-    checks: [],
+    requiresHumanApproval: check.status === 'passed',
+    checks: [check],
     proposals: proposals.map((proposal, index) => ({
       ...proposal,
       localId: `proposal-${index + 1}`,

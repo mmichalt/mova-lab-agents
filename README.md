@@ -28,24 +28,28 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
 `POST /content-drafts` requires the service token, then runs two sequential
-structured chat requests: `selectVocabulary` followed by `generateExercises`.
-Application code chooses the next step and passes the validated vocabulary and
-original request into generation. These are LLM operations, not agents: neither
-function observes results to choose a different action, and there is no shared
-chat memory. Invalid teacher input is rejected before any provider call. Invalid
-or failed vocabulary selection prevents generation. Schema-valid model refusals
-return `422`; malformed, truncated, or unexpected model output returns `502`;
-missing models return `503` `MODEL_UNAVAILABLE`; load/OOM and rejected settings
-return `503 MODEL_CAPACITY`; unreachable or overloaded Ollama returns `503
-PROVIDER_UNAVAILABLE`; attempt timeouts return `504`. `LLM_ATTEMPT_TIMEOUT_MS`
-applies to each attempt; a request can take about two attempts plus metadata
-fetches. A workflow deadline is a later ticket. Content checks are empty until
-a later ticket. JSON bodies are limited to 16 KiB.
+structured chat requests: `selectVocabulary` followed by `generateExercises`,
+then ordinary `validateCandidate`. Application code chooses the next step and
+passes the validated vocabulary and original request into generation. The chat
+steps are LLM operations, not agents: neither function observes results to
+choose a different action, and there is no shared chat memory. Invalid teacher
+input is rejected before any provider call. Invalid or failed vocabulary
+selection prevents generation. Schema-valid model refusals return `422`;
+malformed, truncated, or unexpected model output returns `502`; missing models
+return `503` `MODEL_UNAVAILABLE`; load/OOM and rejected settings return `503
+MODEL_CAPACITY`; unreachable or overloaded Ollama returns `503
+PROVIDER_UNAVAILABLE`; attempt timeouts return `504`. Generated content that
+fails deterministic checks still returns `200` with proposals so issue paths are
+visible, but `requiresHumanApproval` is `false` and the named `content` check is
+`failed`. That is not a successful reviewable result. `LLM_ATTEMPT_TIMEOUT_MS` applies to each attempt; a request can take
+about two attempts plus metadata fetches. A workflow deadline is a later ticket.
+JSON bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
-authorization values. Logs include the request ID, step (`vocabulary` or
-`generation`), and prompt version on attempt completion, failure, invalid output,
-and refusal, and they redact authorization fields. Refusal logs may include a
-clipped model reason. Logs do not include vocabulary items or phrases.
+authorization values. Logs include the request ID, step (`vocabulary`,
+`generation`, or `validation`), and prompt version on attempt completion, failure,
+invalid output, and refusal, and they redact authorization fields. Refusal logs
+may include a clipped model reason. Failed content checks log issue codes and
+paths without phrases. Logs do not include vocabulary items or phrases.
 
 ## Recording-proposal contracts
 
@@ -60,22 +64,39 @@ rejected so patient records cannot enter the contract. Parsed proposals are not
 saved Content Studio drafts: `localId` is assigned by application code, and the
 model output schema cannot supply application IDs or publication controls.
 
+Deterministic checks in `src/content/validation.ts` run after generation.
+Recording type and field lengths are already enforced by the model-output
+schema (`502` on violation). `validateCandidate` then checks requested count,
+target-sound assignment, even distribution (remainder in request order),
+duplicates, assigned-letter presence, and vocabulary use. Phrases are compared
+with Unicode NFC, Ukrainian case folding (`toLocaleLowerCase('uk')`), collapsed
+Unicode whitespace, stripped format characters, and apostrophe folding (`'` /
+U+2019 / U+02BC / U+02B9). Vocabulary matching tokenizes that normalized string
+after turning other punctuation into separators, then looks for the vocabulary
+item as a contiguous whole-token sequence. Any selected item counts, even if its
+associated sound differs from the exercise. Equivalent normalized token sequences
+are duplicates. Each phrase must contain its assigned target letter; a longer
+word that merely contains a vocabulary stem does not count. Other requested
+letters may occur incidentally and do not satisfy assigned-sound coverage.
+Passed checks include a `LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter
+presence is not phonetic, hard/soft, or therapeutic validation.
+
 Documented examples: `docs/examples/content-request.json`,
 `docs/examples/vocabulary-output.json`, `docs/examples/vocabulary-output.refused.json`,
 `docs/examples/model-output.json`, `docs/examples/model-output.refused.json`,
-`docs/examples/generation-result.json`. Literal Cyrillic-letter presence in a
-phrase is a mechanical check later; it does not establish phonetic correctness,
-hard/soft realization, or therapeutic appropriateness.
+`docs/examples/generation-result.json`.
 
-Schema cases and provider-boundary tests run with `npm test` (no GPU, Ollama, or
-live inference). Provider tests use a local fake HTTP server plus synthetic
-Ollama chat fixtures in `tests/fixtures/ollama.ts`. They script vocabulary and
-exercise step results, assert call order and that generation receives the validated
-vocabulary, and verify that a failed vocabulary step does not call generation.
-They inspect `/api/chat` path, messages, `format`/`options`, completion, refusal,
-errors, aborts, and present or missing usage. Application attempt IDs are logged
-with step and prompt version; provider request IDs are not fabricated. Do not
-treat those fixtures as quality evidence.
+Schema cases, content-validation, and provider-boundary tests run with
+`npm test` (no GPU, Ollama, or live inference). Provider tests use a local fake
+HTTP server plus synthetic Ollama chat fixtures in `tests/fixtures/ollama.ts`.
+They script vocabulary and exercise step results, assert call order and that
+generation receives the validated vocabulary, and verify that a failed
+vocabulary step does not call generation. Invalid generated content returns
+`200` with a failed named `content` check and `requiresHumanApproval: false`.
+They inspect
+`/api/chat` path, messages, `format`/`options`, completion, refusal, errors,
+aborts, and present or missing usage. Application attempt IDs are logged with step and prompt version; provider
+request IDs are not fabricated. Do not treat those fixtures as quality evidence.
 
 Seeded request cases live in `evals/corpus.json` (Р, Л, both, and a 12-exercise
 maximum). Expected qualities are properties (`ukrainian-script`, literal target
