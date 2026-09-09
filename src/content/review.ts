@@ -98,7 +98,7 @@ function toCheck(
       name,
       issues: [
         {
-          source: name,
+          source: 'application',
           code: 'REVIEW_REFUSED',
           severity: 'error',
           message: output.reason,

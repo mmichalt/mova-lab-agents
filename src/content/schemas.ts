@@ -154,12 +154,20 @@ export const llmUsageSchema = z.strictObject({
   estimatedCostUsd: z.number().nonnegative().nullable(),
 });
 
-export const generationResultSchema = z.strictObject({
-  requestId: z.string().min(1),
-  proposals: z.array(recordingProposalSchema).min(1).max(limits.exerciseCountMax),
-  checks: z.array(checkResultSchema).min(1),
-  requiresHumanApproval: z.boolean(),
-});
+export const generationResultSchema = z
+  .strictObject({
+    requestId: z.string().min(1),
+    status: z.enum(['READY_FOR_REVIEW', 'FAILED']),
+    candidateVersion: z.int().positive(),
+    revisionCount: z.int().nonnegative().max(2),
+    proposals: z.array(recordingProposalSchema).min(1).max(limits.exerciseCountMax),
+    checks: z.array(checkResultSchema).min(1),
+    requiresHumanApproval: z.boolean(),
+  })
+  .refine((result) => result.requiresHumanApproval === (result.status === 'READY_FOR_REVIEW'), {
+    path: ['requiresHumanApproval'],
+    error: 'Must match READY_FOR_REVIEW',
+  });
 
 export type ContentRequest = z.infer<typeof contentRequestSchema>;
 export type VocabularyItem = z.infer<typeof vocabularyItemSchema>;

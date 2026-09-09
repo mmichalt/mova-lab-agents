@@ -1,6 +1,7 @@
 {
   "vocabularyPromptVersion": "vocabulary/v1",
   "exercisesPromptVersion": "exercises/v1",
+  "revisionPromptVersion": "revision/v1",
   "cases": [
     {
       "id": "r-only-animals",

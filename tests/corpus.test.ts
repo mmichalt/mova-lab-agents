@@ -5,6 +5,7 @@ import { loadConfig } from '../src/config.ts';
 import {
   EXERCISES_PROMPT_VERSION,
   GENERATION_TEMPERATURE,
+  REVISION_PROMPT_VERSION,
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
 import { contentRequestSchema } from '../src/content/schemas.ts';
@@ -45,8 +46,10 @@ test('corpus covers Р, Л, and both with property expectations', () => {
 test('runtime metadata records prompt, model, and sampling without invented ids', () => {
   assert.equal(corpus.vocabularyPromptVersion, VOCABULARY_PROMPT_VERSION);
   assert.equal(corpus.exercisesPromptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal(corpus.revisionPromptVersion, REVISION_PROMPT_VERSION);
   assert.equal(runtime.vocabularyPromptVersion, VOCABULARY_PROMPT_VERSION);
   assert.equal(runtime.exercisesPromptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal(runtime.revisionPromptVersion, REVISION_PROMPT_VERSION);
   assert.equal(runtime.model.tag, defaults.ollamaModel);
   assert.equal(runtime.model.quantization, 'Q4_K_M');
   assert.equal(runtime.runtime.numCtx, defaults.ollamaNumCtx);
@@ -76,6 +79,9 @@ test('quality properties judge shape, not exact wording', () => {
   };
   const ok = {
     requestId: '11111111-1111-4111-8111-111111111111',
+    status: 'READY_FOR_REVIEW',
+    candidateVersion: 1,
+    revisionCount: 0,
     requiresHumanApproval: true,
     checks: [{ status: 'passed', name: 'content', issues: [] }],
     proposals: Array.from({ length: 6 }, (_, i) => ({ ...proposal, localId: `proposal-${i + 1}` })),

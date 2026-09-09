@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
@@ -16,201 +13,28 @@ import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
 import {
+  afterVocabulary,
+  chatCalls,
+  chatKind,
+  chatOf,
+  completedAttempts,
+  listen,
+  type OllamaCall,
+  type OllamaReply,
+  postDrafts,
+  reviewReply,
+  runtimeReply,
+  sequentialReply,
+  teacherRequest,
+  userJson,
+} from './drafts-harness.ts';
+import {
   chatEnvelope,
   chatFixtures,
   errorBodies,
   generatedContent,
   vocabularyContent,
 } from './fixtures/ollama.ts';
-
-type ChatKind = 'vocabulary' | 'generation' | 'age' | 'language';
-
-const teacherRequest = {
-  ageYears: 7,
-  targetSounds: ['р', 'л'],
-  difficulty: 'easy',
-  theme: 'тварини',
-  exerciseCount: 2,
-  teacherInstructions: 'Короткі слова та прості фрази.',
-};
-
-type OllamaCall = { method: string; url: string; body: unknown };
-type OllamaReply =
-  | { hang: true }
-  | { hangBody: true }
-  | { status: number; json?: unknown; raw?: string };
-
-async function listen(app: ReturnType<typeof createApp>) {
-  const server = app.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const address = server.address() as AddressInfo;
-  return { server, url: `http://127.0.0.1:${address.port}` };
-}
-
-async function fakeOllama(
-  t: { after: (fn: () => Promise<void> | void) => void },
-  reply: (call: OllamaCall) => OllamaReply,
-) {
-  const calls: OllamaCall[] = [];
-  const server = http.createServer((req, res) => {
-    void (async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(chunk as Buffer);
-      const raw = Buffer.concat(chunks).toString('utf8');
-      const call: OllamaCall = {
-        method: req.method ?? '',
-        url: req.url ?? '',
-        body: raw ? JSON.parse(raw) : undefined,
-      };
-      calls.push(call);
-      const result = reply(call);
-      if ('hang' in result) return;
-      if ('hangBody' in result) {
-        res.writeHead(200, { 'content-type': 'application/json' });
-        res.write('{');
-        return;
-      }
-      res.writeHead(result.status, { 'content-type': 'application/json' });
-      res.end(result.raw ?? JSON.stringify(result.json ?? {}));
-    })();
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  t.after(() => shutDown(server, 50));
-  const address = server.address() as AddressInfo;
-  return { calls, url: `http://127.0.0.1:${address.port}` };
-}
-
-async function postDrafts(
-  t: { after: (fn: () => Promise<void> | void) => void },
-  options: {
-    reply?: (call: OllamaCall) => OllamaReply;
-    body?: unknown;
-    token?: string | null;
-    timeoutMs?: string;
-    log?: ReturnType<typeof createLogger>;
-  },
-) {
-  const ollama = await fakeOllama(
-    t,
-    options.reply ?? (() => ({ status: 500, json: { error: 'unused' } })),
-  );
-  const chunks: string[] = [];
-  const logger =
-    options.log ??
-    createLogger('info', {
-      write(msg) {
-        chunks.push(msg);
-      },
-    });
-  const config = loadConfig({
-    SERVICE_TOKEN: 'test-token',
-    OLLAMA_BASE_URL: ollama.url,
-    LLM_ATTEMPT_TIMEOUT_MS: options.timeoutMs ?? '2000',
-  });
-  const { server, url } = await listen(createApp({ config, logger }));
-  t.after(() => shutDown(server, 50));
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
-  if (options.token !== null) headers.authorization = `Bearer ${options.token ?? 'test-token'}`;
-  const response = await fetch(`${url}/content-drafts`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(options.body ?? teacherRequest),
-  });
-  return { response, ollama, logs: chunks.join('\n') };
-}
-
-function chatCalls(calls: OllamaCall[]) {
-  return calls.filter((call) => call.method === 'POST' && call.url === '/api/chat');
-}
-
-function userJson(call: OllamaCall) {
-  const payload = call.body as { messages: Array<{ content: string }> };
-  return JSON.parse(payload.messages[1]?.content ?? '{}') as unknown;
-}
-
-function chatKind(call: OllamaCall): ChatKind | 'unknown' {
-  const system = (call.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '';
-  if (system.includes('Select Ukrainian vocabulary')) return 'vocabulary';
-  if (system.includes('Produce Ukrainian recording-exercise')) return 'generation';
-  if (system.includes('requested child age')) return 'age';
-  if (system.includes('Ukrainian wording and theme')) return 'language';
-  return 'unknown';
-}
-
-function chatOf(calls: OllamaCall[], kind: ChatKind) {
-  return chatCalls(calls).find((call) => chatKind(call) === kind);
-}
-
-function completedAttempts(logs: string) {
-  return logs
-    .split('\n')
-    .filter((line) => line.includes('llm attempt completed'))
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
-function runtimeReply(json: unknown): (call: OllamaCall) => OllamaReply {
-  return (call) => {
-    if (call.method === 'GET' && call.url === '/api/version') {
-      return { status: 200, json: { version: '0.33.3' } };
-    }
-    if (call.method === 'GET' && call.url === '/api/tags') {
-      return {
-        status: 200,
-        json: { models: [{ name: 'qwen3:4b-instruct', digest: 'sha256:abc' }] },
-      };
-    }
-    return { status: 200, json };
-  };
-}
-
-function sequentialReply(
-  vocabulary: unknown = chatFixtures.vocabulary,
-  generated: unknown = chatFixtures.generated,
-  review: unknown = chatFixtures.reviewPassed,
-): (call: OllamaCall) => OllamaReply {
-  const meta = runtimeReply(generated);
-  return (call) => {
-    if (call.method === 'POST' && call.url === '/api/chat') {
-      const kind = chatKind(call);
-      if (kind === 'vocabulary') return { status: 200, json: vocabulary };
-      if (kind === 'generation') return { status: 200, json: generated };
-      return { status: 200, json: review };
-    }
-    return meta(call);
-  };
-}
-
-function reviewReply(replies: {
-  age?: OllamaReply | ((call: OllamaCall) => OllamaReply);
-  language?: OllamaReply | ((call: OllamaCall) => OllamaReply);
-}): (call: OllamaCall) => OllamaReply {
-  const after = afterVocabulary({ status: 200, json: chatFixtures.generated });
-  return (call) => {
-    if (call.method === 'POST' && call.url === '/api/chat') {
-      const kind = chatKind(call);
-      const reply =
-        kind === 'age' ? replies.age : kind === 'language' ? replies.language : undefined;
-      if (reply) return typeof reply === 'function' ? reply(call) : reply;
-    }
-    return after(call);
-  };
-}
-
-function afterVocabulary(
-  reply: OllamaReply | ((call: OllamaCall) => OllamaReply),
-): (call: OllamaCall) => OllamaReply {
-  let chats = 0;
-  const meta = runtimeReply(chatFixtures.vocabulary);
-  return (call) => {
-    if (call.method === 'POST' && call.url === '/api/chat') {
-      chats += 1;
-      if (chats === 1) return { status: 200, json: chatFixtures.vocabulary };
-      return typeof reply === 'function' ? reply(call) : reply;
-    }
-    return meta(call);
-  };
-}
 
 test('POST /content-drafts maps a generated envelope to approved proposals', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
@@ -219,6 +43,9 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(generationResultSchema.parse(body).requiresHumanApproval, true);
+  assert.equal(body.status, 'READY_FOR_REVIEW');
+  assert.equal(body.candidateVersion, 1);
+  assert.equal(body.revisionCount, 0);
   assert.equal(body.requestId, response.headers.get('x-request-id'));
   assert.deepEqual(body.checks, [
     { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
@@ -450,32 +277,23 @@ test('generation receives the validated vocabulary, not the raw model string', a
   });
 });
 
-test('invalid generated content is not a successful reviewable result', async (t) => {
+test('invalid generated content skips semantic review and stops on a repeated candidate', async (t) => {
   const duplicated = JSON.parse(generatedContent) as {
     status: string;
     proposals: Array<Record<string, unknown>>;
   };
   duplicated.proposals[1] = { ...duplicated.proposals[1], phrase: duplicated.proposals[0]?.phrase };
-  const { response, ollama, logs } = await postDrafts(t, {
-    reply: sequentialReply(
-      chatFixtures.vocabulary,
-      chatEnvelope({ message: { role: 'assistant', content: JSON.stringify(duplicated) } }),
-    ),
+  const invalid = chatEnvelope({
+    message: { role: 'assistant', content: JSON.stringify(duplicated) },
   });
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  const content = body.checks.find((check: { name: string }) => check.name === 'content');
-  assert.equal(body.requiresHumanApproval, false);
-  assert.equal(content.status, 'failed');
-  assert.equal(body.checks.length, 1);
-  assert.deepEqual(
-    content.issues
-      .filter((item: { severity: string }) => item.severity === 'error')
-      .map((item: { code: string }) => item.code),
-    ['DUPLICATE_PHRASE'],
-  );
-  assert.equal(body.proposals.length, 2);
-  assert.equal(chatCalls(ollama.calls).length, 2);
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: sequentialReply(chatFixtures.vocabulary, invalid),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'IDENTICAL_INVALID_CANDIDATE');
+  assert.equal(chatCalls(ollama.calls).length, 3);
+  assert.equal(chatKind(chatCalls(ollama.calls)[1] as OllamaCall), 'generation');
+  assert.equal(chatKind(chatCalls(ollama.calls)[2] as OllamaCall), 'revision');
   assert.equal(
     chatCalls(ollama.calls).some((call) => chatKind(call) === 'age'),
     false,
@@ -492,25 +310,6 @@ test('invalid generated content is not a successful reviewable result', async (t
   assert.equal(logs.includes('Риба пливе'), false);
 });
 
-test('negative age verdict keeps language feedback and blocks approval', async (t) => {
-  const { response, ollama } = await postDrafts(t, {
-    reply: reviewReply({
-      age: { status: 200, json: chatFixtures.reviewFailed },
-      language: { status: 200, json: chatFixtures.reviewPassed },
-    }),
-  });
-  assert.equal(response.status, 200);
-  const body = await response.json();
-  assert.equal(body.requiresHumanApproval, false);
-  const age = body.checks.find((check: { name: string }) => check.name === 'age');
-  const language = body.checks.find((check: { name: string }) => check.name === 'language');
-  assert.equal(age.status, 'failed');
-  assert.equal(age.issues[0].code, 'TOO_COMPLEX');
-  assert.equal(age.issues[0].source, 'age');
-  assert.equal(language.status, 'passed');
-  assert.equal(chatCalls(ollama.calls).length, 4);
-});
-
 test('refused review is failed, not a pass, and the other review is kept', async (t) => {
   const echoed = chatEnvelope({
     message: {
@@ -521,7 +320,7 @@ test('refused review is failed, not a pass, and the other review is kept', async
       }),
     },
   });
-  const { response, logs } = await postDrafts(t, {
+  const { response, ollama, logs } = await postDrafts(t, {
     reply: reviewReply({
       age: { status: 200, json: echoed },
       language: { status: 200, json: chatFixtures.reviewPassed },
@@ -529,12 +328,20 @@ test('refused review is failed, not a pass, and the other review is kept', async
   });
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.candidateVersion, 1);
+  assert.equal(body.revisionCount, 0);
   assert.equal(body.requiresHumanApproval, false);
   const age = body.checks.find((check: { name: string }) => check.name === 'age');
   const language = body.checks.find((check: { name: string }) => check.name === 'language');
   assert.equal(age.status, 'failed');
   assert.equal(age.issues[0].code, 'REVIEW_REFUSED');
+  assert.equal(age.issues[0].source, 'application');
   assert.equal(language.status, 'passed');
+  assert.equal(
+    chatCalls(ollama.calls).some((call) => chatKind(call) === 'revision'),
+    false,
+  );
   const refused = JSON.parse(
     logs.split('\n').find((line) => line.includes('model refused') && line.includes('"age"')) ??
       '{}',
@@ -546,7 +353,7 @@ test('refused review is failed, not a pass, and the other review is kept', async
 });
 
 test('unavailable age review keeps language feedback and cannot pass', async (t) => {
-  const { response } = await postDrafts(t, {
+  const { response, ollama } = await postDrafts(t, {
     reply: reviewReply({
       age: { hang: true },
       language: { status: 200, json: chatFixtures.reviewPassed },
@@ -555,15 +362,22 @@ test('unavailable age review keeps language feedback and cannot pass', async (t)
   });
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.candidateVersion, 1);
+  assert.equal(body.revisionCount, 0);
   assert.equal(body.requiresHumanApproval, false);
   const age = body.checks.find((check: { name: string }) => check.name === 'age');
   const language = body.checks.find((check: { name: string }) => check.name === 'language');
   assert.deepEqual(age, { status: 'unavailable', name: 'age', errorCode: 'PROVIDER_TIMEOUT' });
   assert.equal(language.status, 'passed');
+  assert.equal(
+    chatCalls(ollama.calls).some((call) => chatKind(call) === 'revision'),
+    false,
+  );
 });
 
 test('both unavailable reviews block success', async (t) => {
-  const { response } = await postDrafts(t, {
+  const { response, ollama } = await postDrafts(t, {
     reply: reviewReply({
       age: { status: 503, json: errorBodies.overload },
       language: { status: 200, json: chatFixtures.invalidJson },
@@ -571,7 +385,12 @@ test('both unavailable reviews block success', async (t) => {
   });
   assert.equal(response.status, 200);
   const body = await response.json();
+  assert.equal(body.status, 'FAILED');
   assert.equal(body.requiresHumanApproval, false);
+  assert.equal(
+    chatCalls(ollama.calls).some((call) => chatKind(call) === 'revision'),
+    false,
+  );
   assert.deepEqual(
     body.checks.filter((check: { name: string }) => check.name !== 'content'),
     [
