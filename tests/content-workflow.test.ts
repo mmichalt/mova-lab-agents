@@ -245,6 +245,27 @@ test('identical semantic failure keeps the original blocking checks', async (t) 
   assert.deepEqual(finished.issueCodes, ['TOO_COMPLEX']);
 });
 
+test('repeating the first invalid candidate restores its checks', async (t) => {
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: scriptedChats({
+      generation: { status: 200, json: duplicateGenerated },
+      revision: [
+        { status: 200, json: missingLetterGenerated },
+        { status: 200, json: duplicateGenerated },
+      ],
+    }),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'IDENTICAL_INVALID_CANDIDATE');
+  assert.equal(chatsOf(ollama.calls, 'generation').length, 1);
+  assert.equal(chatsOf(ollama.calls, 'revision').length, 2);
+  const finished = workflowLog(logs);
+  assert.equal(finished.candidateVersion, 3);
+  assert.equal(finished.revisionCount, 2);
+  assert.equal(finished.attempts, 3);
+  assert.deepEqual(finished.issueCodes, ['DUPLICATE_PHRASE']);
+});
+
 test('generation refusal does not start a revision', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
     reply: sequentialReply(chatFixtures.vocabulary, chatFixtures.refused),

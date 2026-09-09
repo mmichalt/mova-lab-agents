@@ -99,7 +99,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
   state.vocabulary = vocabulary;
 
   let feedback: readonly ValidationIssue[] | undefined;
-  const invalid = new Set<string>();
+  const invalid = new Map<string, CheckResult[]>();
   while (state.status === 'RUNNING') {
     const produced = await nextCandidate(state, options, vocabulary, feedback);
     if (produced.status === 'refused') {
@@ -118,8 +118,10 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     state.candidate = produced.proposals;
     state.candidateVersion += 1;
     const mark = fingerprint(produced.proposals);
-    if (invalid.has(mark)) {
+    const previousChecks = invalid.get(mark);
+    if (previousChecks) {
       state.phase = 'checks';
+      state.checks = previousChecks;
       record(state, 'identical', issueCodes(state.checks));
       fail(state, 'IDENTICAL_INVALID_CANDIDATE', 'The model repeated an invalid candidate.');
       break;
@@ -146,7 +148,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     }
 
     record(state, 'failed', issueCodes(state.checks));
-    invalid.add(mark);
+    invalid.set(mark, state.checks);
     const issues = blockingIssues(state.checks);
     if (!tryRevise(state, options, issues)) break;
     feedback = issues;
