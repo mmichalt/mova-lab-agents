@@ -26,6 +26,7 @@ const schema = z.object({
   OLLAMA_NUM_CTX: positiveInt,
   OLLAMA_NUM_PREDICT: positiveInt,
   LLM_ATTEMPT_TIMEOUT_MS: positiveInt,
+  WORKFLOW_TIMEOUT_MS: positiveInt,
 });
 
 export type Config = {
@@ -37,6 +38,7 @@ export type Config = {
   ollamaNumCtx: number;
   ollamaNumPredict: number;
   llmAttemptTimeoutMs: number;
+  workflowTimeoutMs: number;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -49,6 +51,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     OLLAMA_NUM_CTX: env.OLLAMA_NUM_CTX?.trim() || '4096',
     OLLAMA_NUM_PREDICT: env.OLLAMA_NUM_PREDICT?.trim() || '2000',
     LLM_ATTEMPT_TIMEOUT_MS: env.LLM_ATTEMPT_TIMEOUT_MS?.trim() || '120000',
+    WORKFLOW_TIMEOUT_MS: env.WORKFLOW_TIMEOUT_MS?.trim() || '600000',
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${z.prettifyError(parsed.error)}`);
@@ -62,5 +65,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ollamaNumCtx: parsed.data.OLLAMA_NUM_CTX,
     ollamaNumPredict: parsed.data.OLLAMA_NUM_PREDICT,
     llmAttemptTimeoutMs: parsed.data.LLM_ATTEMPT_TIMEOUT_MS,
+    workflowTimeoutMs: parsed.data.WORKFLOW_TIMEOUT_MS,
   };
 }

@@ -448,6 +448,7 @@ Stage-2 service configuration (parse with Zod):
 | `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`; shared input/output context capacity. |
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`; maximum generated tokens. |
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | Configurable attempt deadline, including queue wait, loading, and body reading. |
+| `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline. Each attempt is bounded by the remaining workflow time. |
 
 Test maximum-size requests, schemas, review feedback, and later tool history
 against the context budget. Do not silently drop requirements or accept truncated

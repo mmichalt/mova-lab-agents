@@ -25,6 +25,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`. |
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. |
+| `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
 `POST /content-drafts` requires the service token, then runs a bounded workflow:
@@ -47,22 +48,33 @@ check (`REVIEW_REFUSED`), not HTTP `422`; it cannot become a pass or trigger
 revision. Malformed, truncated, or unexpected output during vocabulary still
 returns `502`. The same failures during an exercise or revision call consume a
 candidate version and, if revisions remain, regenerate with schema errors;
-exhausted or repeated identical invalid candidates return `422`. Operational
-review failures become `unavailable` checks, block approval, and do not trigger
-revision. Missing models return `503 MODEL_UNAVAILABLE`; load/OOM and rejected
-settings return `503 MODEL_CAPACITY`; unreachable or overloaded Ollama returns
-`503 PROVIDER_UNAVAILABLE`; vocabulary/generation timeouts return `504` unless
-they occur on a review (unavailable check). A candidate that fails deterministic
-or semantic checks is revised at most twice, with the original teacher request
-held fixed and fresh checks on every changed candidate. `READY_FOR_REVIEW`
-returns `200` with `requiresHumanApproval: true`; that flag is a checkpoint, not
-durable approval. A required unavailable or refused review returns `200` with
-`status: "FAILED"` and `requiresHumanApproval: false`. Exhausted revisions return
-`422 CONTENT_VALIDATION_EXHAUSTED`; an unchanged invalid candidate returns `422
-IDENTICAL_INVALID_CANDIDATE`. `LLM_ATTEMPT_TIMEOUT_MS` applies to each attempt;
-a successful first-pass request makes four model calls plus metadata fetches,
-and a revision adds another generation call plus any fresh reviews. A workflow
-deadline is a later ticket.
+exhausted or repeated identical invalid candidates return `422`. A malformed
+reviewer response is re-asked once, then becomes an `unavailable` check.
+Operational review failures become `unavailable` checks, block approval, and do
+not trigger revision. Missing models return `503 MODEL_UNAVAILABLE`; load/OOM
+and rejected settings return `503 MODEL_CAPACITY`; unreachable or overloaded
+Ollama returns `503 PROVIDER_UNAVAILABLE`; exhausted provider-call budget
+returns `503 PROVIDER_BUDGET_EXHAUSTED`. Vocabulary/generation timeouts return
+`504 PROVIDER_TIMEOUT` unless they occur on a review (unavailable check). The
+workflow deadline returns `504 WORKFLOW_TIMEOUT` and aborts further attempts;
+cancellation cannot guarantee that Ollama immediately stops GPU work. Temporary
+network errors, HTTP 429, and 503 overload may retry once with jittered backoff
+(honoring `Retry-After` only within remaining time). Missing models, invalid
+settings, load/OOM, schema-valid refusals, and other 5xx responses do not retry;
+there is no auto-pull or cloud fallback. At most two transport attempts occur
+per operation, and every attempt counts toward a shared 20-provider-request
+budget. Transport retries never consume a candidate version or reset the two
+revision slots. A candidate that fails deterministic or semantic checks is
+revised at most twice, with the original teacher request held fixed and fresh
+checks on every changed candidate. `READY_FOR_REVIEW` returns `200` with
+`requiresHumanApproval: true`; that flag is a checkpoint, not durable approval.
+A required unavailable or refused review returns `200` with `status: "FAILED"`
+and `requiresHumanApproval: false`. Exhausted revisions return `422
+CONTENT_VALIDATION_EXHAUSTED`; an unchanged invalid candidate returns `422
+IDENTICAL_INVALID_CANDIDATE`. A successful first-pass request makes four model
+calls plus metadata fetches; a transport retry or reviewer re-ask adds another
+provider attempt without changing revision limits.
+
 JSON bodies are limited to 16 KiB.
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID, step (`vocabulary`,
@@ -123,7 +135,10 @@ identical invalid candidate stops without a second revision. Passed content
 starts both reviews before either settles; a blocking review finding revises
 the candidate; a refused review stays failed and does not revise; an
 operational review failure becomes `unavailable`, leaves the other review's
-result in place, and does not revise. They inspect
+result in place, and does not revise. Controllable clocks and fake operations
+cover jittered backoff, remaining-deadline checks, aborted calls, retry
+exhaustion, and the shared provider-call budget; a 503 or 429 transport retry
+does not consume a candidate version. They inspect
 `/api/chat` path, messages, `format`/`options`, completion, refusal, errors,
 aborts, and present or missing usage. Application attempt IDs are logged with step and prompt version; provider
 request IDs are not fabricated. Do not treat those fixtures as quality evidence.

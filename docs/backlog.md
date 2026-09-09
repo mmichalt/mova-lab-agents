@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-010 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-011 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -38,7 +38,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-008 — Deterministic content validation](#ag-008)
 - [x] [AG-009 — Concurrent semantic reviews](#ag-009)
 - [x] [AG-010 — Workflow state and bounded content revision](#ag-010)
-- [ ] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
+- [x] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
 
 ### Milestone 2 — Tools and durable human approval
 
@@ -492,7 +492,7 @@ with `requiresHumanApproval: true` and is not durable approval. `npm test` (139)
 **Stage:** 5  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-010](#ag-010)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn why transport retries, content revision,
 and cancellation are separate mechanisms with separate limits.
@@ -519,6 +519,15 @@ remaining-deadline checks, aborted calls, retry exhaustion, and cumulative budge
 
 **Out of scope:** Distributed rate limiting, queues, durable resumption, and
 claims that cancellation immediately stops all GPU computation.
+
+Recorded: Transport retries (network/429/503, at most two attempts) are separate
+from content revision and from one reviewer re-ask on malformed output. Chosen
+`WORKFLOW_TIMEOUT_MS` (default 600000) and the 20-provider-request budget are
+stored on the run; each attempt uses remaining workflow time together with
+`LLM_ATTEMPT_TIMEOUT_MS`. Missing models, capacity/OOM, and schema-valid refusals
+do not retry. Fake clocks cover backoff, deadline, abort, retry exhaustion, and
+budget. `npm test` (156), `npm run typecheck`, `npx biome ci .`, `npm run build`,
+and `docker compose config` pass without GPU, Ollama, or live inference.
 
 ## Milestone 2: tools and durable human approval
 

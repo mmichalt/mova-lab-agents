@@ -90,4 +90,5 @@ export const errorBodies = {
   loadFailure: { error: 'model requires more system memory' },
   oom: { error: 'CUDA out of memory' },
   unsupportedSettings: { error: 'invalid options' },
+  tooManyRequests: { error: 'too many requests' },
 };

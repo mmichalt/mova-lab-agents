@@ -1,5 +1,7 @@
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
+import type { LlmCall } from '../llm/complete.ts';
+import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '../llm/execution.ts';
 import type { Logger } from '../logger.ts';
 import { generateExercises, reviseExercises, selectVocabulary } from './generate.ts';
 import { reviewAge, reviewLanguage, settleReviews } from './review.ts';
@@ -48,6 +50,10 @@ export type GenerationState = {
   status: 'RUNNING' | 'READY_FOR_REVIEW' | 'FAILED';
   candidateVersion: number;
   revisionCount: number;
+  deadlineAt: number;
+  attemptTimeoutMs: number;
+  maxProviderRequests: number;
+  providerRequests: number;
   vocabulary?: Vocabulary;
   candidate?: GeneratedProposal[];
   checks: CheckResult[];
@@ -61,6 +67,8 @@ type RunOptions = {
   logger: Logger;
   requestId: string;
   request: ContentRequest;
+  clock?: Clock;
+  maxProviderRequests?: number;
 };
 
 export async function generateContentDrafts(options: {
@@ -68,6 +76,8 @@ export async function generateContentDrafts(options: {
   logger: Logger;
   requestId: string;
   body: unknown;
+  clock?: Clock;
+  maxProviderRequests?: number;
 }): Promise<GenerationResult> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -80,78 +90,105 @@ export async function generateContentDrafts(options: {
       logger: options.logger,
       requestId: options.requestId,
       request: parsed.data,
+      clock: options.clock,
+      maxProviderRequests: options.maxProviderRequests,
     }),
   );
 }
 
 export async function runContentWorkflow(options: RunOptions): Promise<GenerationState> {
+  const clock = options.clock ?? systemClock;
+  const limits = createLimits(
+    options.config,
+    clock.now(),
+    options.maxProviderRequests ?? MAX_PROVIDER_REQUESTS,
+  );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.config.workflowTimeoutMs);
   const state: GenerationState = {
     request: options.request,
     phase: 'vocabulary',
     status: 'RUNNING',
     candidateVersion: 0,
     revisionCount: 0,
+    deadlineAt: limits.deadlineAt,
+    attemptTimeoutMs: limits.attemptTimeoutMs,
+    maxProviderRequests: limits.maxProviderRequests,
+    providerRequests: 0,
     checks: [],
     history: [],
     usage: [],
   };
-  const vocabulary = await selectVocabulary(options);
-  state.vocabulary = vocabulary;
+  const llm = {
+    config: options.config,
+    logger: options.logger,
+    requestId: options.requestId,
+    limits,
+    signal: controller.signal,
+    clock,
+  };
+  try {
+    const vocabulary = await selectVocabulary({ ...llm, request: options.request });
+    state.vocabulary = vocabulary;
 
-  let feedback: readonly ValidationIssue[] | undefined;
-  const invalid = new Map<string, CheckResult[]>();
-  while (state.status === 'RUNNING') {
-    const produced = await nextCandidate(state, options, vocabulary, feedback);
-    if (produced.status === 'refused') {
-      record(state, 'refused', []);
-      fail(state, 'MODEL_REFUSED', 'The model refused to generate proposals.');
-      break;
-    }
-    if (produced.status === 'malformed') {
+    let feedback: readonly ValidationIssue[] | undefined;
+    const invalid = new Map<string, CheckResult[]>();
+    while (state.status === 'RUNNING') {
+      const produced = await nextCandidate(state, llm, vocabulary, feedback);
+      if (produced.status === 'refused') {
+        record(state, 'refused', []);
+        fail(state, 'MODEL_REFUSED', 'The model refused to generate proposals.');
+        break;
+      }
+      if (produced.status === 'malformed') {
+        state.candidateVersion += 1;
+        record(state, 'malformed', [schemaIssue.code]);
+        if (!tryRevise(state, options, [schemaIssue])) break;
+        feedback = [schemaIssue];
+        continue;
+      }
+
+      state.candidate = produced.proposals;
       state.candidateVersion += 1;
-      record(state, 'malformed', [schemaIssue.code]);
-      if (!tryRevise(state, options, [schemaIssue])) break;
-      feedback = [schemaIssue];
-      continue;
-    }
+      const mark = fingerprint(produced.proposals);
+      const previousChecks = invalid.get(mark);
+      if (previousChecks) {
+        state.phase = 'checks';
+        state.checks = previousChecks;
+        record(state, 'identical', issueCodes(state.checks));
+        fail(state, 'IDENTICAL_INVALID_CANDIDATE', 'The model repeated an invalid candidate.');
+        break;
+      }
 
-    state.candidate = produced.proposals;
-    state.candidateVersion += 1;
-    const mark = fingerprint(produced.proposals);
-    const previousChecks = invalid.get(mark);
-    if (previousChecks) {
       state.phase = 'checks';
-      state.checks = previousChecks;
-      record(state, 'identical', issueCodes(state.checks));
-      fail(state, 'IDENTICAL_INVALID_CANDIDATE', 'The model repeated an invalid candidate.');
-      break;
-    }
+      state.checks = await runChecks(state, llm, vocabulary, produced.proposals);
+      const decision = decide(state.checks);
+      if (decision === 'pass') {
+        record(state, 'passed', []);
+        state.status = 'READY_FOR_REVIEW';
+        state.phase = 'finished';
+        break;
+      }
+      if (decision === 'unavailable') {
+        record(state, 'failed', issueCodes(state.checks));
+        fail(state, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.');
+        break;
+      }
+      if (decision === 'refused') {
+        record(state, 'failed', issueCodes(state.checks));
+        fail(state, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.');
+        break;
+      }
 
-    state.phase = 'checks';
-    state.checks = await runChecks(state, options, vocabulary, produced.proposals);
-    const decision = decide(state.checks);
-    if (decision === 'pass') {
-      record(state, 'passed', []);
-      state.status = 'READY_FOR_REVIEW';
-      state.phase = 'finished';
-      break;
-    }
-    if (decision === 'unavailable') {
       record(state, 'failed', issueCodes(state.checks));
-      fail(state, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.');
-      break;
+      invalid.set(mark, state.checks);
+      const issues = blockingIssues(state.checks);
+      if (!tryRevise(state, options, issues)) break;
+      feedback = issues;
     }
-    if (decision === 'refused') {
-      record(state, 'failed', issueCodes(state.checks));
-      fail(state, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.');
-      break;
-    }
-
-    record(state, 'failed', issueCodes(state.checks));
-    invalid.set(mark, state.checks);
-    const issues = blockingIssues(state.checks);
-    if (!tryRevise(state, options, issues)) break;
-    feedback = issues;
+  } finally {
+    clearTimeout(timer);
+    state.providerRequests = limits.providerRequests;
   }
 
   options.logger.info(
@@ -161,6 +198,8 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       candidateVersion: state.candidateVersion,
       revisionCount: state.revisionCount,
       attempts: state.history.length,
+      providerRequests: state.providerRequests,
+      deadlineAt: state.deadlineAt,
       errorCode: state.error?.code,
       issueCodes: issueCodes(state.checks),
     },
@@ -171,7 +210,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
 
 async function nextCandidate(
   state: GenerationState,
-  options: RunOptions,
+  llm: LlmCall,
   vocabulary: Vocabulary,
   feedback: readonly ValidationIssue[] | undefined,
 ): Promise<
@@ -180,9 +219,7 @@ async function nextCandidate(
   | { status: 'refused' }
 > {
   const call = {
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
+    ...llm,
     request: state.request,
     vocabulary,
   };
@@ -209,15 +246,15 @@ async function nextCandidate(
 
 async function runChecks(
   state: GenerationState,
-  options: RunOptions,
+  llm: LlmCall,
   vocabulary: Vocabulary,
   proposals: GeneratedProposal[],
 ): Promise<CheckResult[]> {
   const content = validateCandidate(state.request, vocabulary, proposals);
   if (content.status === 'failed') {
-    options.logger.warn(
+    llm.logger.warn(
       {
-        requestId: options.requestId,
+        requestId: llm.requestId,
         step: 'validation',
         candidateVersion: state.candidateVersion,
         issues: content.issues
@@ -229,9 +266,7 @@ async function runChecks(
     return [content];
   }
   const review = {
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
+    ...llm,
     request: state.request,
     proposals,
   };

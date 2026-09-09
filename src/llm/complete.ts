@@ -3,18 +3,30 @@ import type { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import type { Logger } from '../logger.ts';
+import {
+  attemptSignal,
+  type Clock,
+  type ExecutionLimits,
+  withTransportRetry,
+} from './execution.ts';
 import { type ChatAttempt, ollamaChat } from './ollama.ts';
 
 export const GENERATION_TEMPERATURE = 0.3;
 
 const maxLogChars = 200;
 
+export type LlmCall = {
+  config: Config;
+  logger: Logger;
+  requestId: string;
+  limits: ExecutionLimits;
+  signal: AbortSignal;
+  clock: Clock;
+};
+
 export async function completeStructured<T>(
   schema: z.ZodType<T>,
-  options: {
-    config: Config;
-    logger: Logger;
-    requestId: string;
+  options: LlmCall & {
     step: string;
     promptVersion: string;
     system: string;
@@ -24,18 +36,32 @@ export async function completeStructured<T>(
   },
 ): Promise<T> {
   const attemptId = randomUUID();
-  const started = Date.now();
+  const started = options.clock.now();
   let attempt: ChatAttempt;
   try {
-    attempt = await ollamaChat({
-      config: options.config,
-      messages: [
-        { role: 'system', content: options.system },
-        { role: 'user', content: JSON.stringify(options.user) },
-      ],
-      format: options.format,
-      temperature: options.temperature,
-    });
+    attempt = await withTransportRetry(
+      {
+        limits: options.limits,
+        clock: options.clock,
+        signal: options.signal,
+        logger: options.logger,
+        requestId: options.requestId,
+        step: options.step,
+      },
+      () =>
+        ollamaChat({
+          config: options.config,
+          messages: [
+            { role: 'system', content: options.system },
+            { role: 'user', content: JSON.stringify(options.user) },
+          ],
+          format: options.format,
+          temperature: options.temperature,
+          signal: attemptSignal(options.limits, options.signal, options.clock.now()),
+          workflowSignal: options.signal,
+          now: options.clock.now(),
+        }),
+    );
     options.logger.info(
       {
         attemptId,
@@ -45,7 +71,7 @@ export async function completeStructured<T>(
         model: clip(attempt.model),
         modelDigest: clip(attempt.modelDigest),
         ollamaVersion: clip(attempt.ollamaVersion),
-        wallMs: Date.now() - started,
+        wallMs: options.clock.now() - started,
         loadDurationNs: attempt.loadDurationNs,
         usage: attempt.usage,
       },
@@ -58,7 +84,7 @@ export async function completeStructured<T>(
         requestId: options.requestId,
         step: options.step,
         promptVersion: options.promptVersion,
-        wallMs: Date.now() - started,
+        wallMs: options.clock.now() - started,
         err,
       },
       'llm attempt failed',

@@ -18,6 +18,7 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
   assert.equal(config.ollamaNumCtx, 4096);
   assert.equal(config.ollamaNumPredict, 2000);
   assert.equal(config.llmAttemptTimeoutMs, 120000);
+  assert.equal(config.workflowTimeoutMs, 600000);
 });
 
 test('loadConfig rejects missing, empty, or invalid values', () => {
@@ -48,6 +49,10 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
   );
   assert.throws(
     () => loadConfig({ SERVICE_TOKEN: 'token', LLM_ATTEMPT_TIMEOUT_MS: '0' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', WORKFLOW_TIMEOUT_MS: '0' }),
     /Invalid configuration/,
   );
   assert.throws(
