@@ -240,6 +240,23 @@ test('failed vocabulary selection does not generate exercises', async (t) => {
       status: 502,
       code: 'PROVIDER_INVALID_OUTPUT',
     },
+    {
+      name: 'unusable tokens',
+      reply: chatEnvelope({
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            status: 'selected',
+            items: [
+              { word: '!!!', targetSound: 'р' },
+              { word: '...', targetSound: 'л' },
+            ],
+          }),
+        },
+      }),
+      status: 502,
+      code: 'PROVIDER_INVALID_OUTPUT',
+    },
   ];
   for (const { reply, status, code } of cases) {
     const { response, ollama } = await postDrafts(t, { reply: runtimeReply(reply) });
@@ -420,6 +437,7 @@ test('generation-step refusal still maps after successful vocabulary', async (t)
   );
   assert.equal(refused.step, 'generation');
   assert.equal(refused.promptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal('reason' in refused, false);
   assert.equal('items' in refused, false);
   assert.equal('proposals' in refused, false);
 });

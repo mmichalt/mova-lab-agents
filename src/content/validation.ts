@@ -39,7 +39,7 @@ export function validateCandidate(
 
   const assigned = new Map<string, number>();
   const firstIndex = new Map<string, number>();
-  const vocab = vocabulary.items.map((item) => tokens(item.word));
+  const vocab = vocabulary.items.map((item) => phraseTokens(item.word));
 
   for (const [index, proposal] of proposals.entries()) {
     const path = `proposals[${index}]`;
@@ -50,7 +50,7 @@ export function validateCandidate(
     }
     assigned.set(proposal.targetSound, (assigned.get(proposal.targetSound) ?? 0) + 1);
 
-    const key = tokens(proposal.phrase).join(' ');
+    const key = phraseTokens(proposal.phrase).join(' ');
     const duplicateOf = firstIndex.get(key);
     if (duplicateOf !== undefined) {
       issues.push(
@@ -69,7 +69,7 @@ export function validateCandidate(
         issue('MISSING_TARGET_LETTER', `${path}.phrase`, 'Assigned target letter is not present.'),
       );
     }
-    if (!containsVocab(tokens(proposal.phrase), vocab)) {
+    if (!containsVocab(phraseTokens(proposal.phrase), vocab)) {
       issues.push(
         issue('MISSING_VOCABULARY', `${path}.phrase`, 'Phrase does not use selected vocabulary.'),
       );
@@ -101,7 +101,7 @@ function expectedCounts(sounds: readonly string[], total: number) {
   return new Map(sounds.map((sound, index) => [sound, base + (index < remainder ? 1 : 0)]));
 }
 
-function tokens(value: string) {
+export function phraseTokens(value: string) {
   return normalizePhrase(value)
     .replace(/[^\p{L}\p{N}'-]+/gu, ' ')
     .trim()

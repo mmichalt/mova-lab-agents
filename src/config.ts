@@ -16,6 +16,9 @@ const httpOrigin = z.url({ protocol: /^https?$/ }).transform((value, ctx) => {
 });
 
 const positiveInt = z.coerce.number().int().positive();
+/** Node `setTimeout` / `AbortSignal.timeout` treat values above this as 1 ms. */
+export const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+const timeoutMs = positiveInt.max(MAX_NODE_TIMEOUT_MS);
 
 const schema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535),
@@ -25,8 +28,8 @@ const schema = z.object({
   OLLAMA_MODEL: z.string().trim().min(1).regex(/^\S+$/),
   OLLAMA_NUM_CTX: positiveInt,
   OLLAMA_NUM_PREDICT: positiveInt,
-  LLM_ATTEMPT_TIMEOUT_MS: positiveInt,
-  WORKFLOW_TIMEOUT_MS: positiveInt,
+  LLM_ATTEMPT_TIMEOUT_MS: timeoutMs,
+  WORKFLOW_TIMEOUT_MS: timeoutMs,
 });
 
 export type Config = {

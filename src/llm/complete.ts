@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import type { Config } from '../config.ts';
+import type { LlmUsage } from '../content/schemas.ts';
 import { AppError } from '../errors.ts';
 import type { Logger } from '../logger.ts';
 import {
@@ -22,6 +23,7 @@ export type LlmCall = {
   limits: ExecutionLimits;
   signal: AbortSignal;
   clock: Clock;
+  usage: LlmUsage[];
 };
 
 export async function completeStructured<T>(
@@ -35,33 +37,57 @@ export async function completeStructured<T>(
     temperature: number;
   },
 ): Promise<T> {
+  const attempt = await withTransportRetry(
+    {
+      limits: options.limits,
+      clock: options.clock,
+      signal: options.signal,
+      logger: options.logger,
+      requestId: options.requestId,
+      step: options.step,
+    },
+    () => chatOnce(options),
+  );
+
+  let outputJson: unknown;
+  try {
+    outputJson = JSON.parse(attempt.content);
+  } catch {
+    throw invalidOutput(options, 'The model returned invalid JSON.');
+  }
+  const output = schema.safeParse(outputJson);
+  if (!output.success) {
+    throw invalidOutput(options, 'The model returned invalid output.');
+  }
+  return output.data;
+}
+
+async function chatOnce(
+  options: LlmCall & {
+    step: string;
+    promptVersion: string;
+    format: unknown;
+    temperature: number;
+    system: string;
+    user: unknown;
+  },
+): Promise<ChatAttempt> {
   const attemptId = randomUUID();
   const started = options.clock.now();
-  let attempt: ChatAttempt;
   try {
-    attempt = await withTransportRetry(
-      {
-        limits: options.limits,
-        clock: options.clock,
-        signal: options.signal,
-        logger: options.logger,
-        requestId: options.requestId,
-        step: options.step,
-      },
-      () =>
-        ollamaChat({
-          config: options.config,
-          messages: [
-            { role: 'system', content: options.system },
-            { role: 'user', content: JSON.stringify(options.user) },
-          ],
-          format: options.format,
-          temperature: options.temperature,
-          signal: attemptSignal(options.limits, options.signal, options.clock.now()),
-          workflowSignal: options.signal,
-          now: options.clock.now(),
-        }),
-    );
+    const attempt = await ollamaChat({
+      config: options.config,
+      messages: [
+        { role: 'system', content: options.system },
+        { role: 'user', content: JSON.stringify(options.user) },
+      ],
+      format: options.format,
+      temperature: options.temperature,
+      signal: attemptSignal(options.limits, options.signal, options.clock.now()),
+      workflowSignal: options.signal,
+      now: options.clock.now(),
+      usage: options.usage,
+    });
     options.logger.info(
       {
         attemptId,
@@ -77,6 +103,7 @@ export async function completeStructured<T>(
       },
       'llm attempt completed',
     );
+    return attempt;
   } catch (err) {
     options.logger.warn(
       {
@@ -91,18 +118,6 @@ export async function completeStructured<T>(
     );
     throw err;
   }
-
-  let outputJson: unknown;
-  try {
-    outputJson = JSON.parse(attempt.content);
-  } catch {
-    throw invalidOutput(options, attemptId, 'The model returned invalid JSON.');
-  }
-  const output = schema.safeParse(outputJson);
-  if (!output.success) {
-    throw invalidOutput(options, attemptId, 'The model returned invalid output.');
-  }
-  return output.data;
 }
 
 export function clip(value: string | null, max = maxLogChars) {
@@ -112,12 +127,10 @@ export function clip(value: string | null, max = maxLogChars) {
 
 function invalidOutput(
   options: { logger: Logger; requestId: string; step: string; promptVersion: string },
-  attemptId: string,
   message: string,
 ): AppError {
   options.logger.warn(
     {
-      attemptId,
       requestId: options.requestId,
       step: options.step,
       promptVersion: options.promptVersion,

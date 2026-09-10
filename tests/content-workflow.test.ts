@@ -55,6 +55,7 @@ test('first-pass success stays version 1 with no revisions', async (t) => {
   assert.equal(chatCalls(ollama.calls).length, 4);
   assert.equal(chatsOf(ollama.calls, 'revision').length, 0);
   assert.equal(workflowLog(logs).attempts, 1);
+  assert.equal(workflowLog(logs).usageCount, 4);
 });
 
 test('content failure revises once and can become ready for review', async (t) => {
@@ -141,7 +142,7 @@ test('blocking age review revises with structured feedback and original requirem
   );
 });
 
-test('malformed generation consumes a candidate and revises with schema feedback', async (t) => {
+test('malformed generation revises without versioning a candidate', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
     reply: scriptedChats({
       generation: { status: 200, json: chatFixtures.invalidJson },
@@ -150,7 +151,7 @@ test('malformed generation consumes a candidate and revises with schema feedback
   assert.equal(response.status, 200);
   const body = generationResultSchema.parse(await response.json());
   assert.equal(body.status, 'READY_FOR_REVIEW');
-  assert.equal(body.candidateVersion, 2);
+  assert.equal(body.candidateVersion, 1);
   assert.equal(body.revisionCount, 1);
   assert.equal(chatsOf(ollama.calls, 'generation').length, 1);
   assert.equal(chatsOf(ollama.calls, 'revision').length, 1);
@@ -242,7 +243,9 @@ test('identical semantic failure keeps the original blocking checks', async (t) 
   const finished = workflowLog(logs);
   assert.equal(finished.candidateVersion, 2);
   assert.equal(finished.revisionCount, 1);
-  assert.deepEqual(finished.issueCodes, ['TOO_COMPLEX']);
+  assert.equal(finished.issueCount, 1);
+  assert.deepEqual(finished.issueCodes, []);
+  assert.equal(logs.includes('TOO_COMPLEX'), false);
 });
 
 test('repeating the first invalid candidate restores its checks', async (t) => {

@@ -102,6 +102,16 @@ test('quality properties judge shape, not exact wording', () => {
   assert.equal(findings['literal-target-letter'], false);
   assert.equal(findings['schema-valid'], true);
 
+  const failed = {
+    ...ok,
+    status: 'FAILED',
+    requiresHumanApproval: false,
+  };
+  assert.equal(
+    assessGeneration(request, failed).every((f) => f.passed === false),
+    true,
+  );
+
   const mixed = contentRequestSchema.parse(cases.find((c) => c.id === 'rl-mixed-animals')?.request);
   const onlyR = {
     ...ok,

@@ -21,7 +21,7 @@ const cyrillic = /\p{Script=Cyrillic}/u;
 
 export function assessGeneration(request: ContentRequest, result: unknown): QualityFinding[] {
   const parsed = generationResultSchema.safeParse(result);
-  if (!parsed.success) {
+  if (!parsed.success || parsed.data.status !== 'READY_FOR_REVIEW') {
     return qualityIds.map((id) => ({ id, passed: false }));
   }
   const proposals = parsed.data.proposals;

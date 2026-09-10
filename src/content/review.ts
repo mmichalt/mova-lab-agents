@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '../errors.ts';
 import { completeStructured, GENERATION_TEMPERATURE, type LlmCall } from '../llm/complete.ts';
+import { isCancellation } from '../llm/execution.ts';
 import {
   type CheckResult,
   type ContentRequest,
@@ -136,6 +137,7 @@ function toCheck(
 
 function settle(name: 'age' | 'language', result: PromiseSettledResult<CheckResult>): CheckResult {
   if (result.status === 'fulfilled') return result.value;
+  if (isCancellation(result.reason)) throw result.reason;
   return {
     status: 'unavailable',
     name,

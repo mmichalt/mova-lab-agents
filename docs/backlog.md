@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-011 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-011 and AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -39,6 +39,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-009 — Concurrent semantic reviews](#ag-009)
 - [x] [AG-010 — Workflow state and bounded content revision](#ag-010)
 - [x] [AG-011 — Retries, deadlines, and execution budgets](#ag-011)
+- [x] [AG-029 — Milestone 1 review follow-up: security, failures, and verification](#ag-029)
 
 ### Milestone 2 — Tools and durable human approval
 
@@ -528,6 +529,201 @@ stored on the run; each attempt uses remaining workflow time together with
 do not retry. Fake clocks cover backoff, deadline, abort, retry exhaustion, and
 budget. `npm test` (156), `npm run typecheck`, `npx biome ci .`, `npm run build`,
 and `docker compose config` pass without GPU, Ollama, or live inference.
+
+### AG-029
+
+**Title:** Milestone 1 review follow-up: security, failures, and verification
+
+**Stage:** 5, Milestone 1 follow-up
+
+**Repository:** `mova-lab-agents`
+
+**Dependencies:** [AG-011](#ag-011)
+
+**Status:** Complete
+
+**Priority:** High; address P1 findings before relying on the milestone's guarantees.
+
+**Problem and learning objective:** The happy path and existing tests pass, but
+several failure paths violate deadline, logging, state, and evaluation guarantees.
+Repair the existing boundaries and add focused regression coverage before building
+durable execution on top of them. AG-029 preserves the existing ticket numbers.
+
+**Review findings:** P1 means high priority, P2 normal priority, and P3 low priority.
+Paths below are relative to the repository root; line numbers refer to the reviewed
+implementation, before remediation.
+
+1. **P1 — Provider error bodies bypass the response-size limit.**
+   `src/llm/ollama.ts:200` uses `response.text()` before slicing to 4096 characters.
+   Non-2xx responses therefore bypass the 1 MiB streaming limit used for successful
+   responses. A fake provider streamed a complete 2 MiB error body and the adapter
+   consumed it all, returning `MODEL_CAPACITY`. A large or continuously streaming
+   failure can exhaust service memory before its timeout. Use bounded reading on
+   error responses too, cancel the stream at the limit, and consume or cancel
+   ignored non-2xx metadata bodies in `readRuntime`.
+
+2. **P1 — An expired workflow can still become ready for review.**
+   `src/llm/ollama.ts:135–155` swallows cancellation during optional metadata reads;
+   `src/content/workflow.ts:163–170` accepts passed checks without checking the
+   deadline again. With successful chat responses and stalled metadata during the
+   final reviews, a 180 ms workflow returned `READY_FOR_REVIEW` after `deadlineAt`.
+   Separately, a deadline during a review chat becomes an unavailable check and
+   HTTP `200 FAILED`, through `settleReviews` and `present`, despite the documented
+   `504 WORKFLOW_TIMEOUT` contract. Optional metadata failure may remain nonfatal,
+   but overall cancellation must win over success and retain its public error code.
+
+3. **P2 — Error-body cancellation loses its cause.**
+   `src/llm/ollama.ts:200–210` catches every body-read error and returns an empty
+   hint. A stalled `503` body exceeding its attempt deadline becomes retryable
+   `PROVIDER_UNAVAILABLE`, instead of `PROVIDER_TIMEOUT`; a stalled `500` can be
+   mislabeled `MODEL_CAPACITY`. Preserve timeout, workflow cancellation, and body
+   transport errors instead of reclassifying them from the original HTTP status.
+
+4. **P2 — Disconnected synchronous requests continue spending provider capacity.**
+   `src/app.ts:46–55` does not propagate client disconnects to the workflow's
+   private controller (`src/content/workflow.ts:106`). Disconnecting during
+   vocabulary selection still allowed all four chat calls to run. Since this
+   milestone has no durable acceptance or retrieval, the result is lost while
+   queued work continues for up to ten minutes. Abort unfinished synchronous work
+   on disconnect and propagate cancellation through backoff and provider reads;
+   cover forced shutdown as well. This must prevent subsequent calls, without
+   claiming immediate cancellation of computation already running on the GPU.
+
+5. **P2 — Raw model content reaches ordinary logs.**
+   `src/content/generate.ts:156–165` logs a clipped refusal reason. A schema-valid
+   refusal containing a synthetic private teacher-text marker copied that marker
+   into the default info log. Clipping is not redaction. Model-provided review
+   codes also flow into `issueCodes` logs without an application allowlist
+   (`src/content/review.ts:133`, `src/content/workflow.ts:204`). Remove raw refusal
+   text from ordinary logs and treat arbitrary reviewer codes as untrusted text;
+   log safe application classifications and counts. Test markers in both fields.
+
+6. **P2 — Authentication runs after JSON parsing.**
+   `src/app.ts:39–45` installs the JSON parser globally before service-token
+   authentication. An unauthenticated malformed request to `/content-drafts`
+   returns `400 MALFORMED_JSON`, showing it reached the parser. Unauthorized
+   callers can occupy body-reading and decompression resources before rejection;
+   the decoded-size limit does not eliminate that work. Put authentication before
+   protected-route parsing, retain the 16 KiB limit, and keep health independent
+   of request-body parsing. This is a resource-boundary issue, not a demonstrated
+   bypass of the token check or access to generation.
+
+7. **P2 — Transient HTTP failures are not classified consistently.**
+   `src/llm/ollama.ts:176–189` makes plain `502` and `504` responses nonretryable
+   and labels every `500` without an overload keyword as `MODEL_CAPACITY`.
+   Fake responses with `temporary upstream failure` made one attempt for each
+   status; the `500` incorrectly claimed a capacity problem. Retry recognized
+   transient gateway/server failures within existing limits; keep explicit
+   missing-model, invalid-setting, load, and OOM failures terminal. Do not require
+   an English overload keyword to recognize an HTTP gateway failure.
+
+8. **P2 — Operational failures bypass terminal workflow state and logging.**
+   `src/content/workflow.ts:130–208` has a `finally` but no failure transition for
+   exceptions from vocabulary, generation, or revision. A missing model throws
+   out of `runContentWorkflow` and never emits `workflow finished`; accumulated
+   history and counters are inaccessible to its caller. Vocabulary refusal also
+   follows this path, unlike generation refusal. Record a sanitized terminal
+   failure and final counters for all exits, preserving the intended HTTP status
+   and distinguishing provider failure from content feedback.
+
+9. **P2 — Candidate versions can refer to stale content and checks.**
+   `src/content/workflow.ts:143–148` increments `candidateVersion` on malformed
+   output while retaining the previous candidate and checks. One invalid initial
+   candidate followed by two malformed revisions left version 3 paired with
+   version 1's phrases and duplicate findings. Keep attempted-output history
+   separate from the version of an actual candidate, or explicitly version the
+   retained candidate/checks. Final state must identify which output was checked,
+   including malformed revisions and terminal refusals.
+
+10. **P2 — Usage and transport-attempt records are incomplete.**
+    `src/content/workflow.ts:120` initializes `usage` but never populates it;
+    `completeStructured` returns only parsed content. A successful four-call run
+    with reported tokens returned `usage: []`. Also, `src/llm/complete.ts:38–79`
+    allocates its attempt ID and start time outside the transport retry loop.
+    A generation retry produced five provider calls but only four completed
+    records, with no separate ID/timing for the failed transport attempt. Record
+    each actual attempt and retain available usage in workflow state, including
+    unsuccessful outputs; leave unavailable measurements null and avoid counting
+    retries or cached tokens twice.
+
+11. **P2 — Unusable vocabulary passes the upstream validation gate.**
+    `src/content/generate.ts:147–152` checks only sound labels and coverage;
+    `src/content/schemas.ts:66–69` accepts any nonempty word. Vocabulary containing
+    `!!!` for р and `...` for л passed selection and reached generation/revision,
+    but `src/content/validation.ts` tokenizes both items to empty arrays, so no
+    candidate can satisfy vocabulary use. The reproduction wasted three calls
+    before `IDENTICAL_INVALID_CANDIDATE`. Reject vocabulary unusable by the shared
+    token matcher before generation. Exercise revisions cannot repair a fixed,
+    invalid vocabulary selection.
+
+12. **P2 — Smoke results can falsely report successful settings and no truncation.**
+    `tests/smoke-local.ts:142–147,195–213` derives success from HTTP `response.ok`.
+    A required review failure returns HTTP 200, and
+    `tests/properties.ts:27–51` can mark every quality property passed for that
+    `FAILED` result. The smoke command can therefore exit successfully without a
+    ready candidate. Truncation detection also checks only the top-level error:
+    truncation handled by a revision, or retained in an unavailable review, is
+    missed. Validate result shape, workflow status, and required checks; distinguish
+    eventual success from first-attempt capacity sufficiency, and retain observed
+    truncations. Never report an unobserved truncation history as definitely false.
+
+13. **P2 — Smoke-test I/O has no explicit deadline.**
+    `tests/smoke-local.ts:43–46,74–93,195–200` calls `fetch` without an abort signal.
+    The 15-second unload polling deadline is checked only between awaited requests,
+    so a stalled fetch/body read defeats that bound. Bound health, metadata,
+    unloading, and draft requests, including body reads, and report which stage
+    timed out. Keep the longer generation allowance separate from metadata waits.
+
+14. **P3 — Configuration accepts timeout values that overflow Node timers.**
+    `src/config.ts:18–29` validates positive integers without timer bounds.
+    `WORKFLOW_TIMEOUT_MS=2147483648` was accepted, but Node warned that the value
+    overflowed and set the timer to 1 ms; a hanging provider immediately failed.
+    Validate both timeout settings against the supported timer range at startup
+    and test boundary values. A configured long timeout must not silently become
+    an almost-immediate deadline.
+
+**Implementation scope:** Resolve these findings in the existing HTTP, provider,
+workflow, configuration, and smoke-test modules. Update README contracts where
+needed and add regression cases to the existing offline harness. Keep this as one
+follow-up ticket; do not introduce another workflow framework or persistence.
+
+**Acceptance criteria:**
+
+- Every finding above has a focused regression check and a fix, or an explicitly
+  documented resolution supported by evidence.
+- Expired/cancelled work cannot become ready or start another provider call;
+  timeout codes remain accurate across metadata, error bodies, and semantic review.
+- Provider bodies are bounded and cleaned up, authentication precedes protected
+  body processing, and synthetic private-content markers never enter normal logs.
+- Terminal state, candidate/check versions, attempt records, and reported usage
+  remain consistent on successful and failed runs.
+- Smoke reports distinguish HTTP success, workflow success, quality findings,
+  revision-assisted recovery, and known versus unknown truncation history; all
+  external waits have finite deadlines.
+- Existing offline checks pass. Recheck the current workflow's maximum-size and
+  revision prompts through the explicitly invoked local smoke procedure when
+  hardware is available; retain historical single-call results as historical.
+
+**Verification recorded during review (2026-09-09):** All 156 existing tests,
+`npm run typecheck`, `npx --no-install biome ci .`, and `npm run build` passed.
+Fourteen additional temporary checks against local fake HTTP servers reproduced
+the deadline, oversized/stalled error-body, disconnect, refusal-log, retry,
+state/accounting, invalid-vocabulary, smoke-classification, authentication-order,
+and timer-overflow behaviors described above. These assert the current defects;
+remediation must add permanent regression tests asserting corrected behavior.
+`npm audit --json` reported zero known vulnerabilities across production and
+development dependencies. No live inference, new GPU measurements, container
+rebuild, or container-image vulnerability scan was performed in this review.
+
+Recorded after remediation (2026-09-10): `npm test` (169), `npm run typecheck`,
+`npx biome ci .`, and `npm run build` pass without GPU, Ollama, or live inference.
+Docker CLI was unavailable in this WSL session, so `docker compose config` was
+not re-run; `compose.yaml` is unchanged. Local smoke was not re-run; historical
+single-call results in `evals/` remain historical.
+
+**Out of scope:** Implementing Milestone 2, distributed rate limiting, publication,
+clinical validation, automatic live inference, and treating a clean dependency
+audit as proof that the service has no security issues.
 
 ## Milestone 2: tools and durable human approval
 

@@ -12,7 +12,7 @@ export type ChatKind = 'vocabulary' | 'generation' | 'revision' | 'age' | 'langu
 export type OllamaCall = { method: string; url: string; body: unknown };
 export type OllamaReply =
   | { hang: true }
-  | { hangBody: true }
+  | { hangBody: true; status?: number }
   | { status: number; json?: unknown; raw?: string; headers?: Record<string, string> };
 
 export const teacherRequest = {
@@ -49,7 +49,7 @@ export async function fakeOllama(t: After, reply: (call: OllamaCall) => OllamaRe
       const result = reply(call);
       if ('hang' in result) return;
       if ('hangBody' in result) {
-        res.writeHead(200, { 'content-type': 'application/json' });
+        res.writeHead(result.status ?? 200, { 'content-type': 'application/json' });
         res.write('{');
         return;
       }
@@ -157,6 +157,13 @@ export function completedAttempts(logs: string) {
   return logs
     .split('\n')
     .filter((line) => line.includes('llm attempt completed'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+export function failedAttempts(logs: string) {
+  return logs
+    .split('\n')
+    .filter((line) => line.includes('llm attempt failed'))
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 

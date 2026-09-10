@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Config } from '../config.ts';
 import type { LlmUsage } from '../content/schemas.ts';
 import { AppError } from '../errors.ts';
-import { parseRetryAfterMs, workflowTimeout } from './execution.ts';
+import { abortError, parseRetryAfterMs } from './execution.ts';
 
 const maxProviderBodyBytes = 1024 * 1024;
 
@@ -39,6 +39,7 @@ export async function ollamaChat(options: {
   signal: AbortSignal;
   workflowSignal: AbortSignal;
   now?: number;
+  usage?: LlmUsage[];
 }): Promise<ChatAttempt> {
   const { config, signal, workflowSignal } = options;
   const payload = {
@@ -69,10 +70,17 @@ export async function ollamaChat(options: {
       response.headers.get('retry-after'),
       options.now ?? Date.now(),
     );
-    throw mapStatus(response.status, await errorHint(response), retryAfterMs);
+    throw mapStatus(
+      response.status,
+      await errorHint(response, signal, workflowSignal),
+      retryAfterMs,
+    );
   }
 
   const envelope = parseEnvelope(await readBody(response, signal, workflowSignal));
+  const model = envelope.model ?? config.ollamaModel;
+  const usage = usageOf(model, envelope);
+  options.usage?.push(usage);
   if (envelope.message.tool_calls && envelope.message.tool_calls.length > 0) {
     throw new AppError(
       502,
@@ -87,7 +95,6 @@ export async function ollamaChat(options: {
     throw new AppError(502, 'PROVIDER_INVALID_OUTPUT', 'The model returned invalid output.');
   }
 
-  const model = envelope.model ?? config.ollamaModel;
   const runtime = await readRuntime(config, model, signal, workflowSignal);
   return {
     content: envelope.message.content,
@@ -95,7 +102,7 @@ export async function ollamaChat(options: {
     modelDigest: runtime.digest,
     ollamaVersion: runtime.version,
     loadDurationNs: envelope.load_duration ?? null,
-    usage: usageOf(model, envelope),
+    usage,
   };
 }
 
@@ -133,27 +140,56 @@ async function readRuntime(
   signal: AbortSignal,
   workflowSignal: AbortSignal,
 ) {
-  const empty = { version: null as string | null, digest: null as string | null };
-  if (signal.aborted) return empty;
+  throwIfCancelled(signal, workflowSignal);
   const meta = AbortSignal.any([signal, AbortSignal.timeout(2000)]);
   const [versionRes, tagsRes] = await Promise.all([
     tryFetch(ollamaUrl(config.ollamaBaseUrl, 'api/version'), meta),
     tryFetch(ollamaUrl(config.ollamaBaseUrl, 'api/tags'), meta),
   ]);
-  return {
-    version: versionRes?.ok
-      ? stringField(await readJson(versionRes, meta, workflowSignal), 'version')
-      : null,
-    digest: tagsRes?.ok ? modelDigest(await readJson(tagsRes, meta, workflowSignal), model) : null,
-  };
+  if (signal.aborted || workflowSignal.aborted) {
+    cancelBody(versionRes);
+    cancelBody(tagsRes);
+    throwIfCancelled(signal, workflowSignal);
+  }
+  if (!versionRes?.ok) cancelBody(versionRes);
+  if (!tagsRes?.ok) cancelBody(tagsRes);
+  const version = versionRes?.ok
+    ? stringField(await readMetaJson(versionRes, meta, signal, workflowSignal), 'version')
+    : null;
+  const digest = tagsRes?.ok
+    ? modelDigest(await readMetaJson(tagsRes, meta, signal, workflowSignal), model)
+    : null;
+  throwIfCancelled(signal, workflowSignal);
+  return { version, digest };
 }
 
-async function readJson(response: Response, signal: AbortSignal, workflowSignal: AbortSignal) {
+async function readMetaJson(
+  response: Response,
+  readSignal: AbortSignal,
+  attemptSignal: AbortSignal,
+  workflowSignal: AbortSignal,
+) {
   try {
-    return JSON.parse(await readBody(response, signal, workflowSignal)) as unknown;
-  } catch {
+    return JSON.parse(await readBody(response, readSignal, workflowSignal)) as unknown;
+  } catch (err) {
+    throwIfCancelled(attemptSignal, workflowSignal);
+    if (
+      err instanceof AppError &&
+      (err.code === 'WORKFLOW_TIMEOUT' || err.code === 'CLIENT_DISCONNECTED')
+    ) {
+      throw err;
+    }
     return undefined;
   }
+}
+
+function cancelBody(response: Response | undefined) {
+  if (response && !response.bodyUsed) void response.body?.cancel().catch(() => {});
+}
+
+function throwIfCancelled(signal: AbortSignal, workflowSignal: AbortSignal): void {
+  if (workflowSignal.aborted) throw abortError(workflowSignal);
+  if (signal.aborted) throw mapFetchError(signal.reason, workflowSignal);
 }
 
 function stringField(value: unknown, key: string) {
@@ -177,10 +213,10 @@ function mapStatus(status: number, hint: string, retryAfterMs?: number) {
   if (status === 404) {
     return new AppError(503, 'MODEL_UNAVAILABLE', 'The configured model is not available.');
   }
-  if (status === 400 || isCapacity(hint) || (status === 500 && !isOverload(hint))) {
+  if (status === 400 || isCapacity(hint)) {
     return new AppError(503, 'MODEL_CAPACITY', 'The model cannot complete the request.');
   }
-  if (status === 429 || status === 503 || isOverload(hint)) {
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
     return new AppError(503, 'PROVIDER_UNAVAILABLE', 'The model server is unavailable.', {
       retryable: true,
       retryAfterMs,
@@ -193,21 +229,18 @@ function isCapacity(hint: string) {
   return /out of memory|\booms?\b|more system memory|invalid options|unsupported/.test(hint);
 }
 
-function isOverload(hint: string) {
-  return /busy|overload|too many requests|queue/.test(hint);
-}
-
-async function errorHint(response: Response) {
+async function errorHint(response: Response, signal: AbortSignal, workflowSignal: AbortSignal) {
   try {
-    const raw = (await response.text()).slice(0, 4096);
+    const raw = (await readBody(response, signal, workflowSignal)).slice(0, 4096);
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
       const error = (parsed as { error: unknown }).error;
       if (typeof error === 'string') return error.toLowerCase();
     }
     return raw.toLowerCase();
-  } catch {
-    return '';
+  } catch (err) {
+    if (err instanceof AppError && err.code === 'PROVIDER_INVALID_OUTPUT') return '';
+    throw err instanceof AppError ? err : mapFetchError(err, workflowSignal);
   }
 }
 
@@ -270,8 +303,9 @@ function aborted(signal: AbortSignal) {
 }
 
 function mapFetchError(err: unknown, workflowSignal: AbortSignal) {
+  if (workflowSignal.aborted) return abortError(workflowSignal);
+  if (err instanceof AppError) return err;
   if (isAbort(err)) {
-    if (workflowSignal.aborted) return workflowTimeout();
     return new AppError(504, 'PROVIDER_TIMEOUT', 'The model request timed out.');
   }
   return new AppError(503, 'PROVIDER_UNAVAILABLE', 'The model server is unavailable.', {
