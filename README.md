@@ -116,11 +116,13 @@ Unicode whitespace, stripped format characters, and apostrophe folding (`'` /
 U+2019 / U+02BC / U+02B9). Vocabulary matching tokenizes that normalized string
 after turning other punctuation into separators, then looks for the vocabulary
 item as a contiguous whole-token sequence. Vocabulary items that tokenize to
-no usable tokens (for example `!!!`) fail selection before generation. Any selected item counts, even if its
-associated sound differs from the exercise. Equivalent normalized token sequences
-are duplicates. Each phrase must contain its assigned target letter; a longer
-word that merely contains a vocabulary stem does not count. Other requested
-letters may occur incidentally and do not satisfy assigned-sound coverage.
+no usable tokens (for example `!!!` or `---`) fail selection before generation.
+A token is usable only if it contains a Unicode letter or digit. Any selected
+item counts, even if its associated sound differs from the exercise. Equivalent
+normalized token sequences are duplicates. Each phrase must contain its assigned
+target letter; a longer word that merely contains a vocabulary stem does not
+count. Other requested letters may occur incidentally and do not satisfy
+assigned-sound coverage.
 Passed checks include a `LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter
 presence is not phonetic, hard/soft, or therapeutic validation. Age and language
 reviews are model judgments of complexity/clarity and wording/theme; they are
@@ -266,9 +268,12 @@ non-zero when a run is not `READY_FOR_REVIEW`, when truncation is observed, or
 when `size_vram` is not exactly equal to `size` (partial CPU offload, including
 values that would round to 100%). HTTP `200` with `status: "FAILED"` is not a
 ready candidate: the report records workflow status, first-attempt readiness,
-revision-assisted recovery, and quality properties separately. Truncation is
-`true` when `PROVIDER_INCOMPLETE` is observed and `null` when truncation history is
-unobserved. Do not report unobserved history as `false`. Property failures
+revision-assisted recovery, and quality properties separately. First-attempt
+readiness requires passed checks, no content revision, and exactly four provider
+calls; a reviewer re-ask is extra provider work even when `revisionCount` stays
+0. Truncation is `true` when `PROVIDER_INCOMPLETE` is observed and `null` when
+truncation history is unobserved. Do not report unobserved history as `false`.
+Property failures
 (for example missing target letters) are recorded and do not fail the process.
 Health, metadata, unload, and draft requests have finite timeouts, including
 body reads; a timeout names the stage. HTTP bodies omit usage; match `requestId`

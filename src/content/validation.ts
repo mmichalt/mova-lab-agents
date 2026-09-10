@@ -106,7 +106,11 @@ export function phraseTokens(value: string) {
     .replace(/[^\p{L}\p{N}'-]+/gu, ' ')
     .trim()
     .split(/\s+/)
-    .filter(Boolean);
+    .filter((token) => /\p{L}|\p{N}/u.test(token));
+}
+
+export function hasUsableTokens(value: string) {
+  return phraseTokens(value).length > 0;
 }
 
 function containsVocab(phrase: string[], words: string[][]) {

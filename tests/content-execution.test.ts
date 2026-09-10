@@ -76,10 +76,10 @@ test('malformed reviewer output is re-asked once', async (t) => {
     }),
   });
   assert.equal(recovered.response.status, 200);
-  assert.equal(
-    generationResultSchema.parse(await recovered.response.json()).status,
-    'READY_FOR_REVIEW',
-  );
+  const recoveredBody = generationResultSchema.parse(await recovered.response.json());
+  assert.equal(recoveredBody.status, 'READY_FOR_REVIEW');
+  assert.equal(recoveredBody.revisionCount, 0);
+  assert.equal(recoveredBody.providerRequests, 5);
   assert.equal(chatsOf(recovered.ollama.calls, 'age').length, 2);
   assert.equal(chatsOf(recovered.ollama.calls, 'revision').length, 0);
   assert.match(recovered.logs, /review re-ask/);

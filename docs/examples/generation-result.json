@@ -3,6 +3,7 @@
   "status": "READY_FOR_REVIEW",
   "candidateVersion": 1,
   "revisionCount": 0,
+  "providerRequests": 4,
   "requiresHumanApproval": true,
   "checks": [
     {

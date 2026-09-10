@@ -8,8 +8,10 @@ import {
   type Vocabulary,
 } from '../src/content/schemas.ts';
 import {
+  hasUsableTokens,
   LETTER_PRESENCE_ISSUE,
   normalizePhrase,
+  phraseTokens,
   validateCandidate,
 } from '../src/content/validation.ts';
 
@@ -62,6 +64,17 @@ test('normalizePhrase applies NFC, Ukrainian case, whitespace, and apostrophes',
   assert.equal(normalizePhrase('и\u0306'), normalizePhrase('й'));
   assert.equal(normalizePhrase('п\u2019ять'), "п'ять");
   assert.equal(normalizePhrase('ри\u00ADба'), 'риба');
+});
+
+test('phraseTokens keep lettered words and drop punctuation-only tokens', () => {
+  assert.deepEqual(phraseTokens("п'ять риб"), ["п'ять", 'риб']);
+  assert.deepEqual(phraseTokens('будь-який лис'), ['будь-який', 'лис']);
+  assert.deepEqual(phraseTokens('---'), []);
+  assert.deepEqual(phraseTokens("'''"), []);
+  assert.deepEqual(phraseTokens('!!!'), []);
+  assert.equal(hasUsableTokens('риба'), true);
+  assert.equal(hasUsableTokens('---'), false);
+  assert.equal(hasUsableTokens("'''"), false);
 });
 
 test('valid single-sound and mixed-sound candidates pass with the letter caveat', () => {

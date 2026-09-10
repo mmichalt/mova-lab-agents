@@ -269,6 +269,7 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
     status: 'READY_FOR_REVIEW',
     candidateVersion: 1,
     revisionCount: 0,
+    providerRequests: 4,
     requiresHumanApproval: true,
     checks: passedChecks,
     proposals: [
@@ -285,7 +286,8 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
       { status: 'unavailable', name: 'language', errorCode: 'PROVIDER_INCOMPLETE' },
     ],
   };
-  const revised = { ...ready, revisionCount: 1 };
+  const revised = { ...ready, revisionCount: 1, providerRequests: 7 };
+  const reasked = { ...ready, revisionCount: 0, providerRequests: 5 };
   const first = classifySmokeRun(request, {
     httpOk: true,
     status: 200,
@@ -307,6 +309,13 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
     requestId: 'c',
     body: revised,
   });
+  const reviewReask = classifySmokeRun(request, {
+    httpOk: true,
+    status: 200,
+    code: null,
+    requestId: 'c-reask',
+    body: reasked,
+  });
   const timedOut = classifySmokeRun(request, {
     httpOk: false,
     status: 504,
@@ -327,8 +336,11 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
   assert.equal(recovered.revisionAssisted, true);
   assert.equal(recovered.firstAttemptReady, false);
   assert.equal(recovered.truncated, null);
+  assert.equal(reviewReask.revisionAssisted, false);
+  assert.equal(reviewReask.firstAttemptReady, false);
   assert.equal(timedOut.truncated, true);
   assert.equal(smokeSettingsSufficed([first, recovered]), false);
+  assert.equal(smokeSettingsSufficed([first, reviewReask]), false);
   assert.equal(smokeTruncated([first, recovered]), null);
   assert.equal(smokeTruncated([first]), null);
 });

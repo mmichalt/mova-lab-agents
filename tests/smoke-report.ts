@@ -3,6 +3,7 @@ import { assessGeneration, type QualityFinding } from './properties.ts';
 
 export const SMOKE_META_TIMEOUT_MS = 5_000;
 export const SMOKE_UNLOAD_TIMEOUT_MS = 15_000;
+export const SMOKE_FIRST_PASS_PROVIDER_REQUESTS = 4;
 
 export type SmokeDraft = {
   httpOk: boolean;
@@ -27,6 +28,8 @@ export function classifySmokeRun(request: ContentRequest, draft: SmokeDraft): Sm
   const body = draft.body;
   const workflowStatus = typeof body?.status === 'string' ? body.status : null;
   const revisionCount = typeof body?.revisionCount === 'number' ? body.revisionCount : 0;
+  const providerRequests =
+    typeof body?.providerRequests === 'number' ? body.providerRequests : null;
   const readyForReview = workflowStatus === 'READY_FOR_REVIEW';
   const checksPassed = requiredChecksPassed(body);
   return {
@@ -35,7 +38,11 @@ export function classifySmokeRun(request: ContentRequest, draft: SmokeDraft): Sm
     readyForReview,
     checksPassed,
     revisionAssisted: readyForReview && revisionCount > 0,
-    firstAttemptReady: readyForReview && revisionCount === 0 && checksPassed,
+    firstAttemptReady:
+      readyForReview &&
+      revisionCount === 0 &&
+      checksPassed &&
+      providerRequests === SMOKE_FIRST_PASS_PROVIDER_REQUESTS,
     truncated: truncationOf(draft),
     qualities: body ? assessGeneration(request, body) : null,
   };

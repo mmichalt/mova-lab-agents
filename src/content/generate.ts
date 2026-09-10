@@ -10,7 +10,7 @@ import {
   type Vocabulary,
   vocabularyOutputSchema,
 } from './schemas.ts';
-import { phraseTokens } from './validation.ts';
+import { hasUsableTokens } from './validation.ts';
 
 export { GENERATION_TEMPERATURE };
 export const VOCABULARY_PROMPT_VERSION = 'vocabulary/v1';
@@ -144,10 +144,7 @@ async function produceExercises(
 }
 
 function usableVocabulary(request: ContentRequest, items: Vocabulary['items']) {
-  return (
-    coversRequestedSounds(request, items) &&
-    items.every((item) => phraseTokens(item.word).length > 0)
-  );
+  return coversRequestedSounds(request, items) && items.every((item) => hasUsableTokens(item.word));
 }
 
 function coversRequestedSounds(request: ContentRequest, items: Vocabulary['items']) {

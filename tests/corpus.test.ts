@@ -82,6 +82,7 @@ test('quality properties judge shape, not exact wording', () => {
     status: 'READY_FOR_REVIEW',
     candidateVersion: 1,
     revisionCount: 0,
+    providerRequests: 4,
     requiresHumanApproval: true,
     checks: [{ status: 'passed', name: 'content', issues: [] }],
     proposals: Array.from({ length: 6 }, (_, i) => ({ ...proposal, localId: `proposal-${i + 1}` })),

@@ -48,6 +48,7 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(body.status, 'READY_FOR_REVIEW');
   assert.equal(body.candidateVersion, 1);
   assert.equal(body.revisionCount, 0);
+  assert.equal(body.providerRequests, 4);
   assert.equal(body.requestId, response.headers.get('x-request-id'));
   assert.deepEqual(body.checks, [
     { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
@@ -250,6 +251,23 @@ test('failed vocabulary selection does not generate exercises', async (t) => {
             items: [
               { word: '!!!', targetSound: 'р' },
               { word: '...', targetSound: 'л' },
+            ],
+          }),
+        },
+      }),
+      status: 502,
+      code: 'PROVIDER_INVALID_OUTPUT',
+    },
+    {
+      name: 'punctuation-only tokens',
+      reply: chatEnvelope({
+        message: {
+          role: 'assistant',
+          content: JSON.stringify({
+            status: 'selected',
+            items: [
+              { word: '---', targetSound: 'р' },
+              { word: "'''", targetSound: 'л' },
             ],
           }),
         },

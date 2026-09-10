@@ -391,6 +391,7 @@ function present(requestId: string, state: GenerationState): GenerationResult {
       status: state.status === 'READY_FOR_REVIEW' ? 'READY_FOR_REVIEW' : 'FAILED',
       candidateVersion: state.candidateVersion,
       revisionCount: state.revisionCount,
+      providerRequests: state.providerRequests,
       requiresHumanApproval: state.status === 'READY_FOR_REVIEW',
       checks: state.checks,
       proposals: (state.candidate ?? []).map((proposal, index) => ({
