@@ -47,6 +47,21 @@ export function workflowTimeout() {
   return new AppError(504, 'WORKFLOW_TIMEOUT', 'The workflow deadline was exceeded.');
 }
 
+export function clientDisconnected() {
+  return new AppError(499, 'CLIENT_DISCONNECTED', 'The client disconnected.');
+}
+
+export function abortError(signal: AbortSignal) {
+  return signal.reason instanceof AppError ? signal.reason : workflowTimeout();
+}
+
+export function isCancellation(err: unknown): err is AppError {
+  return (
+    err instanceof AppError &&
+    (err.code === 'WORKFLOW_TIMEOUT' || err.code === 'CLIENT_DISCONNECTED')
+  );
+}
+
 export function budgetExhausted() {
   return new AppError(
     503,
@@ -85,8 +100,9 @@ export function retryDelayMs(options: {
 }
 
 export function attemptSignal(limits: ExecutionLimits, workflowSignal: AbortSignal, now: number) {
+  if (workflowSignal.aborted) throw abortError(workflowSignal);
   const attemptMs = Math.min(limits.attemptTimeoutMs, remainingMs(limits, now));
-  if (attemptMs <= 0 || workflowSignal.aborted) throw workflowTimeout();
+  if (attemptMs <= 0) throw workflowTimeout();
   return AbortSignal.any([workflowSignal, AbortSignal.timeout(attemptMs)]);
 }
 
@@ -103,9 +119,8 @@ export async function withTransportRetry<T>(
 ): Promise<T> {
   let last: unknown;
   for (let attempt = 1; attempt <= MAX_TRANSPORT_ATTEMPTS; attempt += 1) {
-    if (options.signal.aborted || remainingMs(options.limits, options.clock.now()) <= 0) {
-      throw workflowTimeout();
-    }
+    if (options.signal.aborted) throw abortError(options.signal);
+    if (remainingMs(options.limits, options.clock.now()) <= 0) throw workflowTimeout();
     if (options.limits.providerRequests >= options.limits.maxProviderRequests) {
       throw budgetExhausted();
     }
@@ -115,8 +130,9 @@ export async function withTransportRetry<T>(
     } catch (err) {
       last = err;
       if (!isRetryable(err) || attempt === MAX_TRANSPORT_ATTEMPTS) throw err;
+      if (options.signal.aborted) throw abortError(options.signal);
       const remaining = remainingMs(options.limits, options.clock.now());
-      if (remaining <= 0 || options.signal.aborted) throw workflowTimeout();
+      if (remaining <= 0) throw workflowTimeout();
       const wait = retryDelayMs({
         failedAttempt: attempt,
         random: options.clock.random(),
@@ -143,7 +159,7 @@ export async function withTransportRetry<T>(
 export function sleep(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) {
-      reject(workflowTimeout());
+      reject(abortError(signal));
       return;
     }
     const timer = setTimeout(() => {
@@ -152,7 +168,7 @@ export function sleep(ms: number, signal: AbortSignal) {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(workflowTimeout());
+      reject(abortError(signal));
     };
     signal.addEventListener('abort', onAbort, { once: true });
   });

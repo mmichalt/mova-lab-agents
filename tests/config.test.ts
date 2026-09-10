@@ -55,6 +55,22 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
     () => loadConfig({ SERVICE_TOKEN: 'token', WORKFLOW_TIMEOUT_MS: '0' }),
     /Invalid configuration/,
   );
+  assert.equal(
+    loadConfig({ SERVICE_TOKEN: 'token', LLM_ATTEMPT_TIMEOUT_MS: '1' }).llmAttemptTimeoutMs,
+    1,
+  );
+  assert.equal(
+    loadConfig({ SERVICE_TOKEN: 'token', WORKFLOW_TIMEOUT_MS: '2147483647' }).workflowTimeoutMs,
+    2_147_483_647,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', WORKFLOW_TIMEOUT_MS: '2147483648' }),
+    /Invalid configuration/,
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', LLM_ATTEMPT_TIMEOUT_MS: '2147483648' }),
+    /Invalid configuration/,
+  );
   assert.throws(
     () => loadConfig({ SERVICE_TOKEN: 'token', OLLAMA_BASE_URL: 'http://localhost:11434/proxy' }),
     /Invalid configuration/,

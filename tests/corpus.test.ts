@@ -82,6 +82,7 @@ test('quality properties judge shape, not exact wording', () => {
     status: 'READY_FOR_REVIEW',
     candidateVersion: 1,
     revisionCount: 0,
+    providerRequests: 4,
     requiresHumanApproval: true,
     checks: [{ status: 'passed', name: 'content', issues: [] }],
     proposals: Array.from({ length: 6 }, (_, i) => ({ ...proposal, localId: `proposal-${i + 1}` })),
@@ -101,6 +102,16 @@ test('quality properties judge shape, not exact wording', () => {
   assert.equal(findings['ukrainian-script'], false);
   assert.equal(findings['literal-target-letter'], false);
   assert.equal(findings['schema-valid'], true);
+
+  const failed = {
+    ...ok,
+    status: 'FAILED',
+    requiresHumanApproval: false,
+  };
+  assert.equal(
+    assessGeneration(request, failed).every((f) => f.passed === false),
+    true,
+  );
 
   const mixed = contentRequestSchema.parse(cases.find((c) => c.id === 'rl-mixed-animals')?.request);
   const onlyR = {

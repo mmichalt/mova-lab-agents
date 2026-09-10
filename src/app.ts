@@ -3,7 +3,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { Config } from './config.ts';
 import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
-import type { Clock } from './llm/execution.ts';
+import { type Clock, clientDisconnected } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
 
 const jsonLimitBytes = 16 * 1024;
@@ -36,23 +36,36 @@ export function createApp(options: {
     res.setHeader('x-request-id', requestId);
     next();
   });
-  app.use(express.json({ limit: jsonLimitBytes }));
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
+  const json = express.json({ limit: jsonLimitBytes });
   app.post(
     '/content-drafts',
     requireServiceToken(options.config.serviceToken),
-    async (req, res) => {
-      const result = await generateContentDrafts({
-        config: options.config,
-        logger: res.locals.log as Logger,
-        requestId: res.locals.requestId as string,
-        body: req.body,
-        clock: options.clock,
-        maxProviderRequests: options.maxProviderRequests,
-      });
-      res.json(result);
+    json,
+    async (req, res, next) => {
+      const requestAbort = new AbortController();
+      const onClose = () => {
+        if (!res.writableEnded) requestAbort.abort(clientDisconnected());
+      };
+      res.on('close', onClose);
+      try {
+        const result = await generateContentDrafts({
+          config: options.config,
+          logger: res.locals.log as Logger,
+          requestId: res.locals.requestId as string,
+          body: req.body,
+          clock: options.clock,
+          maxProviderRequests: options.maxProviderRequests,
+          signal: requestAbort.signal,
+        });
+        res.json(result);
+      } catch (err) {
+        next(err);
+      } finally {
+        res.off('close', onClose);
+      }
     },
   );
   if (options.testRoutes) {

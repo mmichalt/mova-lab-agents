@@ -71,6 +71,17 @@ test('negative verdicts stay failed and do not become unavailable', async () => 
   assert.equal(language.status, 'passed');
 });
 
+test('workflow timeout wins over a successful review', async () => {
+  await assert.rejects(
+    () =>
+      settleReviews(
+        Promise.reject(new AppError(504, 'WORKFLOW_TIMEOUT', 'deadline')),
+        Promise.resolve(passed('language')),
+      ),
+    (err: AppError) => err.code === 'WORKFLOW_TIMEOUT',
+  );
+});
+
 test('aborts map to unavailable without inventing a pass', async () => {
   const [age, language] = await settleReviews(
     Promise.reject(new AppError(504, 'PROVIDER_TIMEOUT', 'aborted')),

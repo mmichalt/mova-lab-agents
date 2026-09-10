@@ -65,13 +65,32 @@ test('protected route rejects invalid tokens before the handler runs', async (t)
   assert.deepEqual(await ok.json(), { ok: true, hits: 1 });
 });
 
-test('malformed and oversized JSON return sanitized errors', async (t) => {
+test('malformed and oversized JSON on protected routes return sanitized errors', async (t) => {
   const { server, url } = await listen(createApp({ config, logger }));
   t.after(() => shutDown(server, 100));
+  const drafts = `${url}/content-drafts`;
+  const jsonHeaders = { 'content-type': 'application/json' };
+  const authHeaders = { ...jsonHeaders, authorization: 'Bearer test-token' };
+  const oversized = `{"x":"${'a'.repeat(16 * 1024)}"}`;
 
-  const malformed = await fetch(url, {
+  const unauthenticated = await fetch(drafts, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: jsonHeaders,
+    body: '{',
+  });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal((await unauthenticated.json()).error.code, 'UNAUTHORIZED');
+
+  const unauthenticatedOversize = await fetch(drafts, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: oversized,
+  });
+  assert.equal(unauthenticatedOversize.status, 401);
+
+  const malformed = await fetch(drafts, {
+    method: 'POST',
+    headers: authHeaders,
     body: '{',
   });
   assert.equal(malformed.status, 400);
@@ -86,15 +105,22 @@ test('malformed and oversized JSON return sanitized errors', async (t) => {
   assert.equal(missingBody.error.code, 'NOT_FOUND');
   assert.equal(missingBody.error.requestId, missing.headers.get('x-request-id'));
 
-  const oversized = await fetch(url, {
+  const rootMalformed = await fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: `{"x":"${'a'.repeat(16 * 1024)}"}`,
+    headers: jsonHeaders,
+    body: '{',
   });
-  assert.equal(oversized.status, 413);
-  const oversizedBody = await oversized.json();
+  assert.equal(rootMalformed.status, 404);
+
+  const oversizedAuth = await fetch(drafts, {
+    method: 'POST',
+    headers: authHeaders,
+    body: oversized,
+  });
+  assert.equal(oversizedAuth.status, 413);
+  const oversizedBody = await oversizedAuth.json();
   assert.equal(oversizedBody.error.code, 'PAYLOAD_TOO_LARGE');
-  assert.equal(oversizedBody.error.requestId, oversized.headers.get('x-request-id'));
+  assert.equal(oversizedBody.error.requestId, oversizedAuth.headers.get('x-request-id'));
 });
 
 test('unexpected errors omit stacks and secrets from the public body', async (t) => {

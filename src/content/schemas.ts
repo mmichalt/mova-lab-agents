@@ -160,6 +160,7 @@ export const generationResultSchema = z
     status: z.enum(['READY_FOR_REVIEW', 'FAILED']),
     candidateVersion: z.int().positive(),
     revisionCount: z.int().nonnegative().max(2),
+    providerRequests: z.int().nonnegative(),
     proposals: z.array(recordingProposalSchema).min(1).max(limits.exerciseCountMax),
     checks: z.array(checkResultSchema).min(1),
     requiresHumanApproval: z.boolean(),

@@ -24,11 +24,12 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `OLLAMA_MODEL` | `qwen3:4b-instruct` | Explicit local model tag. |
 | `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`. |
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
-| `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. |
-| `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
+| `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. Must be `1`–`2147483647` so Node timers do not overflow. |
+| `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Must be `1`–`2147483647`. Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-`POST /content-drafts` requires the service token, then runs a bounded workflow:
+It does not parse a request body. `POST /content-drafts` authenticates the service
+token before reading JSON (16 KiB limit), then runs a bounded workflow:
 `selectVocabulary`, `generateExercises`, deterministic `validateCandidate`, and
 when content checks pass, concurrent `reviewAge` and `reviewLanguage`. Application
 code owns the next step and the serializable run state. The chat steps are LLM
@@ -46,22 +47,28 @@ Schema-valid generation or vocabulary refusals return `422 MODEL_REFUSED` and
 do not start content revision. A schema-valid reviewer refusal is a failed named
 check (`REVIEW_REFUSED`), not HTTP `422`; it cannot become a pass or trigger
 revision. Malformed, truncated, or unexpected output during vocabulary still
-returns `502`. The same failures during an exercise or revision call consume a
-candidate version and, if revisions remain, regenerate with schema errors;
-exhausted or repeated identical invalid candidates return `422`. A malformed
+returns `502`. The same failures during an exercise or revision call are recorded
+in attempt history and, if revisions remain, regenerate with schema errors;
+`candidateVersion` counts actual candidates, not malformed output. Exhausted or
+repeated identical invalid candidates return `422`. A malformed
 reviewer response is re-asked once, then becomes an `unavailable` check.
 Operational review failures become `unavailable` checks, block approval, and do
-not trigger revision. Missing models return `503 MODEL_UNAVAILABLE`; load/OOM
-and rejected settings return `503 MODEL_CAPACITY`; unreachable or overloaded
-Ollama returns `503 PROVIDER_UNAVAILABLE`; exhausted provider-call budget
-returns `503 PROVIDER_BUDGET_EXHAUSTED`. Vocabulary/generation timeouts return
-`504 PROVIDER_TIMEOUT` unless they occur on a review (unavailable check). The
-workflow deadline returns `504 WORKFLOW_TIMEOUT` and aborts further attempts;
-cancellation cannot guarantee that Ollama immediately stops GPU work. Temporary
-network errors, HTTP 429, and 503 overload may retry once with jittered backoff
-(honoring `Retry-After` only within remaining time). Missing models, invalid
-settings, load/OOM, schema-valid refusals, and other 5xx responses do not retry;
-there is no auto-pull or cloud fallback. At most two transport attempts occur
+not trigger revision. A workflow deadline during a review or optional metadata
+read returns `504 WORKFLOW_TIMEOUT` rather than a ready or failed reviewable
+body; attempt timeouts on a review stay `unavailable`. Missing models return
+`503 MODEL_UNAVAILABLE`; load/OOM and rejected settings return
+`503 MODEL_CAPACITY`; unreachable Ollama or transient gateway/server failures
+(`429`, `500` without a capacity signature, `502`, `503`, `504`) return
+`503 PROVIDER_UNAVAILABLE`; exhausted provider-call budget returns
+`503 PROVIDER_BUDGET_EXHAUSTED`. Vocabulary/generation attempt timeouts return
+`504 PROVIDER_TIMEOUT`. The workflow deadline returns `504 WORKFLOW_TIMEOUT`
+and aborts further attempts. Disconnecting the caller or forcing shutdown after
+the drain period aborts unfinished synchronous work so later provider calls do
+not start; cancellation cannot guarantee that Ollama immediately stops GPU work.
+Temporary network errors, HTTP 429, and recognized transient 5xx gateway/server
+failures may retry once with jittered backoff (honoring `Retry-After` only
+within remaining time). Missing models, invalid settings, load/OOM, and
+schema-valid refusals do not retry; there is no auto-pull or cloud fallback. At most two transport attempts occur
 per operation, and every attempt counts toward a shared 20-provider-request
 budget. Transport retries never consume a candidate version or reset the two
 revision slots. A candidate that fails deterministic or semantic checks is
@@ -75,15 +82,16 @@ IDENTICAL_INVALID_CANDIDATE`. A successful first-pass request makes four model
 calls plus metadata fetches; a transport retry or reviewer re-ask adds another
 provider attempt without changing revision limits.
 
-JSON bodies are limited to 16 KiB.
+JSON bodies are limited to 16 KiB. `LLM_ATTEMPT_TIMEOUT_MS` and
+`WORKFLOW_TIMEOUT_MS` must fit Node's timer range (`1`–`2147483647`).
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
 authorization values. Logs include the request ID, step (`vocabulary`,
 `generation`, `revision`, `validation`, `age`, or `language`), prompt version,
 candidate version, and revision count on workflow finish, and they redact
-authorization fields. Refusal logs for vocabulary and generation may include a
-clipped model reason. Reviewer refusal logs omit the reason so candidate phrases
-are not echoed. Failed content checks log issue codes and paths without phrases.
-Logs do not include vocabulary items or phrases.
+authorization fields. Refusal logs omit model-provided reasons. Reviewer finding
+codes are untrusted text and are not copied into ordinary logs; workflow finish
+logs application issue codes and counts. Failed content checks log issue codes
+and paths without phrases. Logs do not include vocabulary items or phrases.
 
 ## Recording-proposal contracts
 
@@ -107,11 +115,14 @@ with Unicode NFC, Ukrainian case folding (`toLocaleLowerCase('uk')`), collapsed
 Unicode whitespace, stripped format characters, and apostrophe folding (`'` /
 U+2019 / U+02BC / U+02B9). Vocabulary matching tokenizes that normalized string
 after turning other punctuation into separators, then looks for the vocabulary
-item as a contiguous whole-token sequence. Any selected item counts, even if its
-associated sound differs from the exercise. Equivalent normalized token sequences
-are duplicates. Each phrase must contain its assigned target letter; a longer
-word that merely contains a vocabulary stem does not count. Other requested
-letters may occur incidentally and do not satisfy assigned-sound coverage.
+item as a contiguous whole-token sequence. Vocabulary items that tokenize to
+no usable tokens (for example `!!!` or `---`) fail selection before generation.
+A token is usable only if it contains a Unicode letter or digit. Any selected
+item counts, even if its associated sound differs from the exercise. Equivalent
+normalized token sequences are duplicates. Each phrase must contain its assigned
+target letter; a longer word that merely contains a vocabulary stem does not
+count. Other requested letters may occur incidentally and do not satisfy
+assigned-sound coverage.
 Passed checks include a `LETTER_PRESENCE_ONLY` warning: literal Cyrillic-letter
 presence is not phonetic, hard/soft, or therapeutic validation. Age and language
 reviews are model judgments of complexity/clarity and wording/theme; they are
@@ -253,14 +264,25 @@ npm run smoke:local
 model and waits until it is gone from `/api/ps`, then records cold and warm
 latency for the mixed Р/Л case, GPU share from `GET /api/ps`, structured-output
 mapping for Р, Л, and both, and a 12-exercise maximum-size request. It exits
-non-zero on HTTP failure, truncation (`PROVIDER_INCOMPLETE`), or when
-`size_vram` is not exactly equal to `size` (partial CPU offload, including
-values that would round to 100%). Property failures (for example missing target letters) are
-recorded and do not fail the process. HTTP bodies omit usage; match `requestId`
+non-zero when a run is not `READY_FOR_REVIEW`, when truncation is observed, or
+when `size_vram` is not exactly equal to `size` (partial CPU offload, including
+values that would round to 100%). HTTP `200` with `status: "FAILED"` is not a
+ready candidate: the report records workflow status, first-attempt readiness,
+revision-assisted recovery, and quality properties separately. First-attempt
+readiness requires passed checks, no content revision, and exactly four provider
+calls; a reviewer re-ask is extra provider work even when `revisionCount` stays
+0. Truncation is `true` when `PROVIDER_INCOMPLETE` is observed and `null` when
+truncation history is unobserved. Do not report unobserved history as `false`.
+Property failures
+(for example missing target letters) are recorded and do not fail the process.
+Health, metadata, unload, and draft requests have finite timeouts, including
+body reads; a timeout names the stage. HTTP bodies omit usage; match `requestId`
 and `step` to `llm attempt completed` logs. Record digest, quantization, Ollama
 version, wall times, GPU percent, measured `nvidia-smi` hardware, and whether
 4096 context / 2000 output sufficed in `evals/smoke-results.md`,
-`evals/smoke-report.json`, and `evals/runtime.json`. A first-pass success still
+`evals/smoke-report.json`, and `evals/runtime.json`. Historical single-call
+smoke results remain historical; recheck the current workflow's maximum-size
+and revision prompts when hardware is available. A first-pass success still
 makes four model calls (vocabulary, exercises, age, language). A content or
 review failure may add a revision call and a second pair of reviews, still
 serialized by `OLLAMA_NUM_PARALLEL=1`. Wall time is not comparable to earlier

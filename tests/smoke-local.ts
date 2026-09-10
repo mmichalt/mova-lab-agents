@@ -8,7 +8,15 @@ import {
 } from '../src/content/generate.ts';
 import { AGE_PROMPT_VERSION, LANGUAGE_PROMPT_VERSION } from '../src/content/review.ts';
 import { type ContentRequest, contentRequestSchema } from '../src/content/schemas.ts';
-import { assessGeneration } from './properties.ts';
+import {
+  classifySmokeRun,
+  fetchJson,
+  SMOKE_META_TIMEOUT_MS,
+  SMOKE_UNLOAD_TIMEOUT_MS,
+  smokeSettingsSufficed,
+  smokeTruncated,
+  timedOutError,
+} from './smoke-report.ts';
 
 const corpus = JSON.parse(
   readFileSync(new URL('../evals/corpus.json', import.meta.url), 'utf8'),
@@ -24,20 +32,16 @@ function parseCase(id: string) {
   return contentRequestSchema.parse(item.request);
 }
 
-function json(value: Response) {
-  return value.json() as Promise<Record<string, unknown>>;
-}
-
 async function timed<T>(fn: () => Promise<T>) {
   const started = Date.now();
   const value = await fn();
   return { value, wallMs: Date.now() - started };
 }
 
-async function get(url: URL) {
-  const response = await fetch(url);
+async function get(url: URL, stage: string, timeoutMs = SMOKE_META_TIMEOUT_MS) {
+  const { response, body } = await fetchJson(url, stage, timeoutMs);
   if (!response.ok) throw new Error(`${url.pathname} returned ${response.status}`);
-  return json(response);
+  return body;
 }
 
 function gpuShare(ps: Record<string, unknown>, model: string) {
@@ -78,52 +82,78 @@ function sleep(ms: number) {
 }
 
 async function unload(config: ReturnType<typeof loadConfig>) {
-  const response = await fetch(new URL('api/generate', `${config.ollamaBaseUrl}/`), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: config.ollamaModel, keep_alive: 0 }),
+  const deadline = Date.now() + SMOKE_UNLOAD_TIMEOUT_MS;
+  await fetchJson(
+    new URL('api/generate', `${config.ollamaBaseUrl}/`),
+    'unload',
+    remaining(deadline),
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: config.ollamaModel, keep_alive: 0 }),
+    },
+  ).then(({ response }) => {
+    if (!response.ok) throw new Error(`Unload failed with HTTP ${response.status}`);
   });
-  if (!response.ok) {
-    throw new Error(`Unload failed with HTTP ${response.status}`);
-  }
-  const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
-    const ps = await get(new URL('api/ps', `${config.ollamaBaseUrl}/`));
+    const ps = await get(
+      new URL('api/ps', `${config.ollamaBaseUrl}/`),
+      'unload poll',
+      remaining(deadline),
+    );
     if (gpuShare(ps, config.ollamaModel).processor === 'not-loaded') return;
     await sleep(250);
   }
-  throw new Error('Model was still loaded after keep_alive: 0; cold latency would be invalid.');
+  throw timedOutError('unload');
+}
+
+function remaining(deadline: number) {
+  return Math.max(1, deadline - Date.now());
 }
 
 async function main() {
   const config = loadConfig();
   const service = process.env.SMOKE_BASE_URL ?? `http://127.0.0.1:${config.port}`;
-  const health = await fetch(`${service}/health`).catch(() => null);
-  if (!health?.ok) {
+  const health = await fetchJson(`${service}/health`, 'health', SMOKE_META_TIMEOUT_MS).catch(
+    (err) => {
+      if (err instanceof Error && err.message === 'health timed out') throw err;
+      return null;
+    },
+  );
+  if (!health?.response.ok) {
     throw new Error(
       `Service at ${service}/health is not reachable. Start it with npm run dev and Ollama with docker compose --profile local-model up -d ollama.`,
     );
   }
 
-  const version = await get(new URL('api/version', `${config.ollamaBaseUrl}/`)).catch(() => {
+  const version = await get(
+    new URL('api/version', `${config.ollamaBaseUrl}/`),
+    'ollama version',
+  ).catch((err) => {
+    if (err instanceof Error && err.message === 'ollama version timed out') throw err;
     throw new Error(
       `Ollama at ${config.ollamaBaseUrl} is not reachable. Start it with docker compose --profile local-model up -d ollama.`,
     );
   });
-  const tags = await get(new URL('api/tags', `${config.ollamaBaseUrl}/`));
-  const showRes = await fetch(new URL('api/show', `${config.ollamaBaseUrl}/`), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: config.ollamaModel }),
-  });
-  const show = showRes.ok ? await json(showRes) : {};
+  const tags = await get(new URL('api/tags', `${config.ollamaBaseUrl}/`), 'ollama tags');
+  const show = await fetchJson(
+    new URL('api/show', `${config.ollamaBaseUrl}/`),
+    'ollama show',
+    SMOKE_META_TIMEOUT_MS,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: config.ollamaModel }),
+    },
+  );
+  const showBody = show.response.ok ? show.body : {};
   const digest = Array.isArray(tags.models)
     ? ((tags.models as Array<Record<string, unknown>>).find((m) => m.name === config.ollamaModel)
         ?.digest ?? null)
     : null;
   const quantization =
-    typeof show.details === 'object' && show.details !== null
-      ? ((show.details as Record<string, unknown>).quantization_level ?? null)
+    typeof showBody.details === 'object' && showBody.details !== null
+      ? ((showBody.details as Record<string, unknown>).quantization_level ?? null)
       : null;
 
   await unload(config);
@@ -132,19 +162,25 @@ async function main() {
   const rRequest = parseCase('r-only-animals');
   const lRequest = parseCase('l-only-home');
   const maxRequest = parseCase('rl-max-12');
-  const cold = await timed(() => postDraft(service, config.serviceToken, mixed));
-  const ps = await get(new URL('api/ps', `${config.ollamaBaseUrl}/`));
+  const draftMs = config.workflowTimeoutMs;
+  const cold = await timed(() => postDraft(service, config.serviceToken, mixed, draftMs));
+  const ps = await get(new URL('api/ps', `${config.ollamaBaseUrl}/`), 'ollama ps');
   const gpu = gpuShare(ps, config.ollamaModel);
-  const warm = await timed(() => postDraft(service, config.serviceToken, mixed));
-  const rOnly = await timed(() => postDraft(service, config.serviceToken, rRequest));
-  const lOnly = await timed(() => postDraft(service, config.serviceToken, lRequest));
-  const max = await timed(() => postDraft(service, config.serviceToken, maxRequest));
+  const warm = await timed(() => postDraft(service, config.serviceToken, mixed, draftMs));
+  const rOnly = await timed(() => postDraft(service, config.serviceToken, rRequest, draftMs));
+  const lOnly = await timed(() => postDraft(service, config.serviceToken, lRequest, draftMs));
+  const max = await timed(() => postDraft(service, config.serviceToken, maxRequest, draftMs));
 
-  const settingsSufficed =
-    cold.value.ok && warm.value.ok && rOnly.value.ok && lOnly.value.ok && max.value.ok;
-  const truncated = [cold, warm, rOnly, lOnly, max].some(
-    (run) => run.value.code === 'PROVIDER_INCOMPLETE',
-  );
+  const classified = {
+    coldMixed: summarize('rl-mixed-animals', mixed, cold),
+    warmMixed: summarize('rl-mixed-animals', mixed, warm),
+    rOnly: summarize('r-only-animals', rRequest, rOnly),
+    lOnly: summarize('l-only-home', lRequest, lOnly),
+    max12: summarize('rl-max-12', maxRequest, max),
+  };
+  const runList = Object.values(classified);
+  const settingsSufficed = smokeSettingsSufficed(runList);
+  const truncated = smokeTruncated(runList);
   const report = {
     vocabularyPromptVersion: VOCABULARY_PROMPT_VERSION,
     exercisesPromptVersion: EXERCISES_PROMPT_VERSION,
@@ -165,16 +201,16 @@ async function main() {
     truncated,
     usageNote:
       'HTTP bodies do not include usage. Match requestId to llm attempt completed logs for load/tokens.',
-    runs: {
-      coldMixed: summarize('rl-mixed-animals', mixed, cold),
-      warmMixed: summarize('rl-mixed-animals', mixed, warm),
-      rOnly: summarize('r-only-animals', rRequest, rOnly),
-      lOnly: summarize('l-only-home', lRequest, lOnly),
-      max12: summarize('rl-max-12', maxRequest, max),
-    },
+    runs: classified,
   };
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (!settingsSufficed || truncated || !gpu.fullyOnGpu) process.exitCode = 1;
+  const ready = runList.every(
+    (run) =>
+      run.readyForReview &&
+      run.checksPassed &&
+      run.qualities?.some((item) => item.id === 'schema-valid' && item.passed),
+  );
+  if (!ready || truncated === true || !gpu.fullyOnGpu) process.exitCode = 1;
 }
 
 function summarize(
@@ -182,35 +218,47 @@ function summarize(
   request: ContentRequest,
   run: { value: Awaited<ReturnType<typeof postDraft>>; wallMs: number },
 ) {
+  const classification = classifySmokeRun(request, run.value);
   return {
     id,
     requestId: run.value.requestId,
     wallMs: run.wallMs,
-    status: run.value.status,
+    httpStatus: run.value.status,
+    httpOk: classification.httpOk,
+    workflowStatus: classification.workflowStatus,
+    readyForReview: classification.readyForReview,
+    checksPassed: classification.checksPassed,
+    revisionAssisted: classification.revisionAssisted,
+    firstAttemptReady: classification.firstAttemptReady,
+    truncated: classification.truncated,
     code: run.value.code,
-    qualities: run.value.body ? assessGeneration(request, run.value.body) : null,
+    qualities: classification.qualities,
   };
 }
 
-async function postDraft(baseUrl: string, token: string, body: ContentRequest) {
-  const response = await fetch(`${baseUrl}/content-drafts`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = await json(response).catch(() => ({}) as Record<string, unknown>);
+async function postDraft(baseUrl: string, token: string, body: ContentRequest, timeoutMs: number) {
+  const { response, body: payload } = await fetchJson(
+    `${baseUrl}/content-drafts`,
+    'content-drafts',
+    timeoutMs,
+    {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
   const error =
     typeof payload.error === 'object' && payload.error !== null
       ? (payload.error as { code?: string })
       : undefined;
   return {
-    ok: response.ok,
+    httpOk: response.ok,
     status: response.status,
     code: error?.code ?? null,
     requestId:
       (typeof payload.requestId === 'string' && payload.requestId) ||
       response.headers.get('x-request-id'),
-    body: response.ok ? payload : null,
+    body: payload,
   };
 }
 

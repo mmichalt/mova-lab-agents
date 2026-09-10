@@ -462,6 +462,7 @@ test('generation result requires checks, local IDs, workflow status, and an appr
   assert.equal(result.status, 'READY_FOR_REVIEW');
   assert.equal(result.candidateVersion, 1);
   assert.equal(result.revisionCount, 0);
+  assert.equal(result.providerRequests, 4);
   assert.equal(
     generationResultSchema.safeParse({
       ...result,

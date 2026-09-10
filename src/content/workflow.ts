@@ -1,7 +1,16 @@
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import type { LlmCall } from '../llm/complete.ts';
-import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '../llm/execution.ts';
+import {
+  abortError,
+  type Clock,
+  createLimits,
+  type ExecutionLimits,
+  MAX_PROVIDER_REQUESTS,
+  remainingMs,
+  systemClock,
+  workflowTimeout,
+} from '../llm/execution.ts';
 import type { Logger } from '../logger.ts';
 import { generateExercises, reviseExercises, selectVocabulary } from './generate.ts';
 import { reviewAge, reviewLanguage, settleReviews } from './review.ts';
@@ -32,6 +41,17 @@ const schemaIssue: ValidationIssue = {
   message: 'The model returned invalid output.',
 };
 
+const loggedIssueCode = new Set([
+  'INVALID_OUTPUT',
+  'WRONG_COUNT',
+  'UNREQUESTED_SOUND',
+  'DUPLICATE_PHRASE',
+  'MISSING_TARGET_LETTER',
+  'MISSING_VOCABULARY',
+  'SOUND_DISTRIBUTION',
+  'REVIEW_REFUSED',
+]);
+
 export type AttemptSummary = {
   candidateVersion: number;
   revisionCount: number;
@@ -42,6 +62,7 @@ export type AttemptSummary = {
 export type WorkflowError = {
   code: string;
   message: string;
+  status: number;
 };
 
 export type GenerationState = {
@@ -69,6 +90,7 @@ type RunOptions = {
   request: ContentRequest;
   clock?: Clock;
   maxProviderRequests?: number;
+  signal?: AbortSignal;
 };
 
 export async function generateContentDrafts(options: {
@@ -78,6 +100,7 @@ export async function generateContentDrafts(options: {
   body: unknown;
   clock?: Clock;
   maxProviderRequests?: number;
+  signal?: AbortSignal;
 }): Promise<GenerationResult> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -92,6 +115,7 @@ export async function generateContentDrafts(options: {
       request: parsed.data,
       clock: options.clock,
       maxProviderRequests: options.maxProviderRequests,
+      signal: options.signal,
     }),
   );
 }
@@ -104,7 +128,16 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     options.maxProviderRequests ?? MAX_PROVIDER_REQUESTS,
   );
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.config.workflowTimeoutMs);
+  const onExternalAbort = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(options.signal ? abortError(options.signal) : workflowTimeout());
+    }
+  };
+  if (options.signal?.aborted) onExternalAbort();
+  else options.signal?.addEventListener('abort', onExternalAbort);
+  const timer = setTimeout(() => {
+    if (!controller.signal.aborted) controller.abort(workflowTimeout());
+  }, options.config.workflowTimeoutMs);
   const state: GenerationState = {
     request: options.request,
     phase: 'vocabulary',
@@ -119,13 +152,14 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     history: [],
     usage: [],
   };
-  const llm = {
+  const llm: LlmCall = {
     config: options.config,
     logger: options.logger,
     requestId: options.requestId,
     limits,
     signal: controller.signal,
     clock,
+    usage: state.usage,
   };
   try {
     const vocabulary = await selectVocabulary({ ...llm, request: options.request });
@@ -135,13 +169,16 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     const invalid = new Map<string, CheckResult[]>();
     while (state.status === 'RUNNING') {
       const produced = await nextCandidate(state, llm, vocabulary, feedback);
+      if (expired(controller, limits, clock)) {
+        failExpired(state, controller);
+        break;
+      }
       if (produced.status === 'refused') {
         record(state, 'refused', []);
-        fail(state, 'MODEL_REFUSED', 'The model refused to generate proposals.');
+        fail(state, refusedError());
         break;
       }
       if (produced.status === 'malformed') {
-        state.candidateVersion += 1;
         record(state, 'malformed', [schemaIssue.code]);
         if (!tryRevise(state, options, [schemaIssue])) break;
         feedback = [schemaIssue];
@@ -156,12 +193,23 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         state.phase = 'checks';
         state.checks = previousChecks;
         record(state, 'identical', issueCodes(state.checks));
-        fail(state, 'IDENTICAL_INVALID_CANDIDATE', 'The model repeated an invalid candidate.');
+        fail(
+          state,
+          new AppError(
+            422,
+            'IDENTICAL_INVALID_CANDIDATE',
+            'The model repeated an invalid candidate.',
+          ),
+        );
         break;
       }
 
       state.phase = 'checks';
       state.checks = await runChecks(state, llm, vocabulary, produced.proposals);
+      if (expired(controller, limits, clock)) {
+        failExpired(state, controller);
+        break;
+      }
       const decision = decide(state.checks);
       if (decision === 'pass') {
         record(state, 'passed', []);
@@ -171,12 +219,15 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       }
       if (decision === 'unavailable') {
         record(state, 'failed', issueCodes(state.checks));
-        fail(state, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.');
+        fail(state, new AppError(200, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.'));
         break;
       }
       if (decision === 'refused') {
         record(state, 'failed', issueCodes(state.checks));
-        fail(state, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.');
+        fail(
+          state,
+          new AppError(200, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.'),
+        );
         break;
       }
 
@@ -186,8 +237,18 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       if (!tryRevise(state, options, issues)) break;
       feedback = issues;
     }
+  } catch (err) {
+    if (state.status === 'RUNNING') {
+      fail(
+        state,
+        err instanceof AppError
+          ? err
+          : new AppError(500, 'INTERNAL_ERROR', 'Internal server error.'),
+      );
+    }
   } finally {
     clearTimeout(timer);
+    options.signal?.removeEventListener('abort', onExternalAbort);
     state.providerRequests = limits.providerRequests;
   }
 
@@ -199,9 +260,11 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       revisionCount: state.revisionCount,
       attempts: state.history.length,
       providerRequests: state.providerRequests,
+      usageCount: state.usage.length,
       deadlineAt: state.deadlineAt,
       errorCode: state.error?.code,
-      issueCodes: issueCodes(state.checks),
+      issueCodes: loggedCodes(issueCodes(state.checks)),
+      issueCount: issueCodes(state.checks).length,
     },
     'workflow finished',
   );
@@ -282,8 +345,11 @@ function tryRevise(
   if (state.revisionCount >= MAX_REVISIONS) {
     fail(
       state,
-      'CONTENT_VALIDATION_EXHAUSTED',
-      'Unable to produce a valid draft within the configured limits.',
+      new AppError(
+        422,
+        'CONTENT_VALIDATION_EXHAUSTED',
+        'Unable to produce a valid draft within the configured limits.',
+      ),
     );
     return false;
   }
@@ -294,7 +360,7 @@ function tryRevise(
       step: 'revision',
       candidateVersion: state.candidateVersion,
       revisionCount: state.revisionCount,
-      issueCodes: issues.map((item) => item.code),
+      issueCodes: loggedCodes(issues.map((item) => item.code)),
     },
     'content revision started',
   );
@@ -325,6 +391,7 @@ function present(requestId: string, state: GenerationState): GenerationResult {
       status: state.status === 'READY_FOR_REVIEW' ? 'READY_FOR_REVIEW' : 'FAILED',
       candidateVersion: state.candidateVersion,
       revisionCount: state.revisionCount,
+      providerRequests: state.providerRequests,
       requiresHumanApproval: state.status === 'READY_FOR_REVIEW',
       checks: state.checks,
       proposals: (state.candidate ?? []).map((proposal, index) => ({
@@ -336,8 +403,9 @@ function present(requestId: string, state: GenerationState): GenerationResult {
   const error = state.error ?? {
     code: 'INTERNAL_ERROR',
     message: 'Internal server error.',
+    status: 500,
   };
-  throw new AppError(httpStatus(error.code), error.code, error.message);
+  throw new AppError(error.status, error.code, error.message);
 }
 
 function keepFailedResult(state: GenerationState) {
@@ -348,10 +416,26 @@ function keepFailedResult(state: GenerationState) {
   );
 }
 
-function fail(state: GenerationState, code: string, message: string) {
+function fail(state: GenerationState, err: AppError) {
   state.status = 'FAILED';
   state.phase = 'finished';
-  state.error = { code, message };
+  state.error = { code: err.code, message: err.message, status: err.status };
+}
+
+function expired(controller: AbortController, limits: ExecutionLimits, clock: Clock) {
+  return controller.signal.aborted || remainingMs(limits, clock.now()) <= 0;
+}
+
+function failExpired(state: GenerationState, controller: AbortController) {
+  fail(state, controller.signal.aborted ? abortError(controller.signal) : workflowTimeout());
+}
+
+function refusedError() {
+  return new AppError(422, 'MODEL_REFUSED', 'The model refused to generate proposals.');
+}
+
+function loggedCodes(codes: readonly string[]) {
+  return codes.filter((code) => loggedIssueCode.has(code));
 }
 
 function record(state: GenerationState, outcome: AttemptSummary['outcome'], issueCodes: string[]) {
@@ -375,10 +459,4 @@ function issueCodes(checks: readonly CheckResult[]): string[] {
 
 function fingerprint(proposals: readonly GeneratedProposal[]) {
   return JSON.stringify(proposals);
-}
-
-function httpStatus(code: string) {
-  if (code === 'MODEL_REFUSED' || code === 'CONTENT_VALIDATION_EXHAUSTED') return 422;
-  if (code === 'IDENTICAL_INVALID_CANDIDATE') return 422;
-  return 500;
 }

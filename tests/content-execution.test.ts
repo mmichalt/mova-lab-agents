@@ -76,10 +76,10 @@ test('malformed reviewer output is re-asked once', async (t) => {
     }),
   });
   assert.equal(recovered.response.status, 200);
-  assert.equal(
-    generationResultSchema.parse(await recovered.response.json()).status,
-    'READY_FOR_REVIEW',
-  );
+  const recoveredBody = generationResultSchema.parse(await recovered.response.json());
+  assert.equal(recoveredBody.status, 'READY_FOR_REVIEW');
+  assert.equal(recoveredBody.revisionCount, 0);
+  assert.equal(recoveredBody.providerRequests, 5);
   assert.equal(chatsOf(recovered.ollama.calls, 'age').length, 2);
   assert.equal(chatsOf(recovered.ollama.calls, 'revision').length, 0);
   assert.match(recovered.logs, /review re-ask/);
@@ -162,6 +162,31 @@ test('error body classifies capacity vs overload across status codes', async (t)
   assert.equal(busy.response.status, 503);
   assert.equal((await busy.response.json()).error.code, 'PROVIDER_UNAVAILABLE');
   assert.equal(chatCalls(busy.ollama.calls).length, 2);
+});
+
+test('gateway and generic 500 failures retry; load failures stay terminal', async (t) => {
+  for (const status of [500, 502, 504]) {
+    const run = await postDrafts(t, {
+      reply: () => ({ status, json: { error: 'temporary upstream failure' } }),
+    });
+    assert.equal(run.response.status, 503);
+    assert.equal((await run.response.json()).error.code, 'PROVIDER_UNAVAILABLE');
+    assert.equal(chatCalls(run.ollama.calls).length, 2);
+  }
+
+  const load = await postDrafts(t, {
+    reply: () => ({ status: 500, json: errorBodies.loadFailure }),
+  });
+  assert.equal(load.response.status, 503);
+  assert.equal((await load.response.json()).error.code, 'MODEL_CAPACITY');
+  assert.equal(chatCalls(load.ollama.calls).length, 1);
+
+  const notImplemented = await postDrafts(t, {
+    reply: () => ({ status: 501, json: { error: 'busy' } }),
+  });
+  assert.equal(notImplemented.response.status, 503);
+  assert.equal((await notImplemented.response.json()).error.code, 'PROVIDER_UNAVAILABLE');
+  assert.equal(chatCalls(notImplemented.ollama.calls).length, 1);
 });
 
 test('exhausted provider budget prevents the next attempt', async (t) => {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { AppError } from '../errors.ts';
-import { clip, completeStructured, GENERATION_TEMPERATURE, type LlmCall } from '../llm/complete.ts';
+import { completeStructured, GENERATION_TEMPERATURE, type LlmCall } from '../llm/complete.ts';
 import type { Logger } from '../logger.ts';
 import {
   type ContentRequest,
@@ -10,6 +10,7 @@ import {
   type Vocabulary,
   vocabularyOutputSchema,
 } from './schemas.ts';
+import { hasUsableTokens } from './validation.ts';
 
 export { GENERATION_TEMPERATURE };
 export const VOCABULARY_PROMPT_VERSION = 'vocabulary/v1';
@@ -64,10 +65,9 @@ export async function selectVocabulary(
       requestId: options.requestId,
       step: 'vocabulary',
       promptVersion: VOCABULARY_PROMPT_VERSION,
-      reason: output.reason,
     });
   }
-  if (!coversRequestedSounds(options.request, output.items)) {
+  if (!usableVocabulary(options.request, output.items)) {
     options.logger.warn(
       {
         requestId: options.requestId,
@@ -138,10 +138,13 @@ async function produceExercises(
       requestId: options.requestId,
       step: options.step,
       promptVersion: options.promptVersion,
-      reason: output.reason,
     });
   }
   return output.proposals;
+}
+
+function usableVocabulary(request: ContentRequest, items: Vocabulary['items']) {
+  return coversRequestedSounds(request, items) && items.every((item) => hasUsableTokens(item.word));
 }
 
 function coversRequestedSounds(request: ContentRequest, items: Vocabulary['items']) {
@@ -154,14 +157,13 @@ function coversRequestedSounds(request: ContentRequest, items: Vocabulary['items
 
 function refuse(
   logger: Logger,
-  fields: { requestId: string; step: string; promptVersion: string; reason: string },
+  fields: { requestId: string; step: string; promptVersion: string },
 ): never {
   logger.info(
     {
       requestId: fields.requestId,
       step: fields.step,
       promptVersion: fields.promptVersion,
-      reason: clip(fields.reason),
     },
     'model refused',
   );
