@@ -26,9 +26,18 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. Must be `1`–`2147483647` so Node timers do not overflow. |
 | `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Must be `1`–`2147483647`. Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
+| `SQLITE_PATH` | `data/workflows.sqlite` | Local SQLite file for workflow artifacts (runs, attempts, candidate revisions, approvals, import receipts). Empty values use the default. `:memory:` is rejected. The Compose `agents` service always uses `/data/workflows.sqlite` on the `workflows` volume. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-It does not parse a request body. `POST /content-drafts` authenticates the service
+It does not parse a request body. Process startup opens `SQLITE_PATH`, applies
+SQL migrations, and enables WAL, foreign keys, and a 5000 ms busy timeout.
+Creating the Express app still does not open a port or a database. Persisted
+values are JSON-serializable and include workflow/constraint/prompt versions
+plus configured and consumed limits. Checkpoint writes (run status/state plus
+any new attempt or candidate revision) commit in one SQLite transaction;
+provider HTTP calls stay outside those transactions. This deployment is one
+host with local disk; do not put the SQLite file on a network filesystem.
+`POST /content-drafts` authenticates the service
 token before reading JSON (16 KiB limit), then runs a bounded workflow:
 `selectVocabulary`, `generateExercises`, deterministic `validateCandidate`, and
 when content checks pass, concurrent `reviewAge` and `reviewLanguage`. Application
@@ -198,7 +207,9 @@ that file even for `config` and the `local-model` profile.
 
 The image is a multi-stage Debian slim build: TypeScript compiles in the first
 stage; the runtime has production `npm ci` from the lockfile, runs as `node`,
-and does not contain `.env`. GPU access uses Compose `gpus: all` (Compose 2.30+).
+and does not contain `.env`. Workflow SQLite lives on the named `workflows`
+volume at `/data/workflows.sqlite` (uid `node`). GPU access uses Compose
+`gpus: all` (Compose 2.30+).
 
 ```sh
 docker compose up --build -d
@@ -211,8 +222,26 @@ Without Compose:
 
 ```sh
 docker build -t mova-lab-agents .
-docker run --rm -e SERVICE_TOKEN=replace-me -p 127.0.0.1:3000:3000 mova-lab-agents
+docker run --rm -e SERVICE_TOKEN=replace-me -e SQLITE_PATH=/data/workflows.sqlite \
+  -v mova-lab-agents-workflows:/data -p 127.0.0.1:3000:3000 mova-lab-agents
 ```
+
+### SQLite backup and restore
+
+The file is an execution artifact, not Content Studio. Ordinary tests use
+temporary databases and do not need this volume. Stop the process before
+restore. Replace `SQLITE_PATH` and delete sibling `-wal`/`-shm`/`-journal`
+files together; leaving stale WAL next to a replaced database can mix files.
+The restore helper removes those sidecars before copying.
+
+```sh
+sqlite3 data/workflows.sqlite ".backup data/workflows.backup.sqlite"
+# stop the process, then restore SQLITE_PATH plus -wal/-shm/-journal
+```
+
+`VACUUM INTO` is the same snapshot used by store tests. `npm test` covers
+migration, constraints, checkpoint rollback, close/reopen, and backup/restore
+without GPU, Ollama, or live inference.
 
 `GET /health` is process liveness only. Ordinary CI does not need a GPU,
 Ollama, or an LLM API key. `POST /content-drafts` uses the configured local

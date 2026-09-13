@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-011 and AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-011, AG-015, and AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -46,7 +46,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [ ] [AG-012 — Internal read APIs in Mova-Lab](#ag-012)
 - [ ] [AG-013 — Validated Mova-Lab HTTP functions](#ag-013)
 - [ ] [AG-014 — Bounded model-selected tool calling](#ag-014)
-- [ ] [AG-015 — SQLite persistence and migrations](#ag-015)
+- [x] [AG-015 — SQLite persistence and migrations](#ag-015)
 - [ ] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
 - [ ] [AG-017 — Claims and interrupted-run recovery](#ag-017)
 - [ ] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
@@ -839,7 +839,7 @@ separately and record its results.
 **Stage:** 7  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-011](#ag-011)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand transactions and the difference
 between an execution artifact and authoritative application content.
@@ -862,6 +862,21 @@ transaction rollback, close/reopen, and backup/restore checks.
 
 **Out of scope:** ORM, generic repositories, main-app database access, network
 filesystems, multi-host deployment, and queue infrastructure.
+
+Recorded: `better-sqlite3` opens `SQLITE_PATH` at process start (not when
+constructing the Express app). Migration `001_workflow_persistence` stores runs,
+step attempts, candidate revisions, approvals, and import receipts. WAL, foreign
+keys, and a 5000 ms busy timeout are set on open. `saveCheckpoint` commits status,
+state, and optional attempt/candidate rows in one transaction; a unique-candidate
+failure rolls back the status change. Functions are synchronous SQL, so provider
+calls stay outside transactions. Stored rows include workflow/constraint/prompt
+versions and configured/consumed limits. Compose mounts `workflows:/data` with
+`SQLITE_PATH=/data/workflows.sqlite`. Backup/restore uses `VACUUM INTO` and file
+copy on temporary databases. This host keeps the file on local disk. `npm test`
+(182), `npm run typecheck`, `npx biome ci .`, and `npm run build` pass without
+GPU, Ollama, or live inference. Docker CLI was unavailable in this WSL session,
+so `docker compose config` was not re-run; `compose.yaml` now mounts
+`workflows:/data`.
 
 ### AG-016
 

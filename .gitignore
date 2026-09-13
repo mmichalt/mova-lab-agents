@@ -143,3 +143,10 @@ vite.config.ts.timestamp-*
 .vite/
 
 .skills.json
+
+# Local SQLite workflow store
+/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
