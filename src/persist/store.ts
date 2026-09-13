@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { copyFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { copyFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { MIGRATIONS, SCHEMA_VERSION, SQLITE_BUSY_TIMEOUT_MS } from './schema.ts';
@@ -507,10 +507,19 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
 }
 
 export function restoreWorkflowStore(backupPath: string, destinationPath: string): WorkflowStore {
+  const backup = resolve(backupPath);
   const dest = resolve(destinationPath);
   mkdirSync(dirname(dest), { recursive: true });
-  removeSqliteFiles(dest);
-  copyFileSync(resolve(backupPath), dest);
+  const staging = `${dest}.${randomUUID()}.restore`;
+  try {
+    copyFileSync(backup, staging);
+    assertReadableSqlite(staging);
+    removeSqliteSidecars(dest);
+    renameSync(staging, dest);
+  } catch (err) {
+    removeSqliteFiles(staging);
+    throw err;
+  }
   return openWorkflowStore(dest);
 }
 
@@ -610,11 +619,32 @@ function checkpointAllowed(from: RunStatus, to: RunStatus, phase: RunPhase) {
   if (from !== 'PENDING' && from !== 'RUNNING') return false;
   if (to === 'RUNNING') return phase !== 'finished';
   if (to === 'AWAITING_APPROVAL' || to === 'FAILED') return phase === 'finished';
+  if (to === 'COMPLETED') return from === 'RUNNING' && phase === 'import';
   return false;
 }
 
-function removeSqliteFiles(dest: string) {
-  for (const extra of ['', '-wal', '-shm', '-journal']) {
+function assertReadableSqlite(sqlitePath: string) {
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(sqlitePath, { readonly: true, fileMustExist: true });
+    const check = String(db.pragma('quick_check', { simple: true }));
+    if (check !== 'ok') {
+      throw new Error('Backup is not a valid SQLite database.');
+    }
+  } finally {
+    db?.close();
+  }
+}
+
+function removeSqliteSidecars(dest: string) {
+  removeSqliteFiles(dest, ['-wal', '-shm', '-journal']);
+}
+
+function removeSqliteFiles(
+  dest: string,
+  extras: readonly string[] = ['', '-wal', '-shm', '-journal'],
+) {
+  for (const extra of extras) {
     try {
       unlinkSync(`${dest}${extra}`);
     } catch (err) {

@@ -275,6 +275,19 @@ test('concurrent claims over two connections produce one owner', (t) => {
 test('recordApproval commits the decision and status together', (t) => {
   const store = tempStore(t);
   const run = create(store);
+  assert.throws(
+    () =>
+      store.saveCheckpoint({
+        runId: run.id,
+        expectedStateVersion: 0,
+        status: 'COMPLETED',
+        phase: 'import',
+        consumed: { providerRequests: 0, revisionCount: 0 },
+        state: {},
+        now: 3_900,
+      }),
+    isPersist('CONFLICT'),
+  );
   store.saveCheckpoint({
     runId: run.id,
     expectedStateVersion: 0,
@@ -328,6 +341,17 @@ test('recordApproval commits the decision and status together', (t) => {
     isPersist('CONFLICT'),
   );
   assert.equal(store.getApproval(run.id)?.decision, 'approved');
+  const completed = store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 2,
+    status: 'COMPLETED',
+    phase: 'import',
+    consumed: { providerRequests: 4, revisionCount: 0 },
+    state: { candidateVersion: 1 },
+    now: 4_300,
+  });
+  assert.equal(completed.status, 'COMPLETED');
+  assert.equal(completed.phase, 'import');
 });
 
 test('import receipts reject duplicate keys and incomplete imported rows', (t) => {
@@ -429,6 +453,22 @@ test('close/reopen and backup/restore keep the same run', (t) => {
   assert.equal(copy?.status, 'RUNNING');
   assert.deepEqual(copy?.consumed, { providerRequests: 1, revisionCount: 0 });
   assert.deepEqual(copy?.state, { step: 'generation' });
+});
+
+test('restore validates the backup before replacing the live store', (t) => {
+  const store = tempStore(t);
+  const run = create(store, { now: 10_000 });
+  store.close();
+  const live = store.path;
+  const missing = path.join(path.dirname(live), 'missing.sqlite');
+  const junk = path.join(path.dirname(live), 'junk.sqlite');
+  writeFileSync(junk, 'not-a-database');
+  assert.throws(() => restoreWorkflowStore(missing, live));
+  assert.throws(() => restoreWorkflowStore(junk, live));
+  const kept = openWorkflowStore(live);
+  t.after(() => kept.close());
+  assert.equal(kept.getRun(run.id)?.id, run.id);
+  assert.equal(kept.getRun(run.id)?.status, 'PENDING');
 });
 
 test('rejects lossy JSON, shrinking counters, and checkpoints from terminal runs', (t) => {
