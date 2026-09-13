@@ -8,5 +8,6 @@ coverage
 tests
 evals
 docs
+data
 *.md
 compose.yaml

@@ -30,6 +30,11 @@ const schema = z.object({
   OLLAMA_NUM_PREDICT: positiveInt,
   LLM_ATTEMPT_TIMEOUT_MS: timeoutMs,
   WORKFLOW_TIMEOUT_MS: timeoutMs,
+  SQLITE_PATH: z
+    .string()
+    .trim()
+    .min(1)
+    .refine((value) => value !== ':memory:', { error: 'Must be a filesystem path' }),
 });
 
 export type Config = {
@@ -42,6 +47,7 @@ export type Config = {
   ollamaNumPredict: number;
   llmAttemptTimeoutMs: number;
   workflowTimeoutMs: number;
+  sqlitePath: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -55,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     OLLAMA_NUM_PREDICT: env.OLLAMA_NUM_PREDICT?.trim() || '2000',
     LLM_ATTEMPT_TIMEOUT_MS: env.LLM_ATTEMPT_TIMEOUT_MS?.trim() || '120000',
     WORKFLOW_TIMEOUT_MS: env.WORKFLOW_TIMEOUT_MS?.trim() || '600000',
+    SQLITE_PATH: env.SQLITE_PATH?.trim() || 'data/workflows.sqlite',
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${z.prettifyError(parsed.error)}`);
@@ -69,5 +76,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ollamaNumPredict: parsed.data.OLLAMA_NUM_PREDICT,
     llmAttemptTimeoutMs: parsed.data.LLM_ATTEMPT_TIMEOUT_MS,
     workflowTimeoutMs: parsed.data.WORKFLOW_TIMEOUT_MS,
+    sqlitePath: parsed.data.SQLITE_PATH,
   };
 }

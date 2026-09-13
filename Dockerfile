@@ -16,6 +16,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build --chown=node:node /app/dist ./dist
+RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 3000
 CMD ["node", "dist/server.js"]

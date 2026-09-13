@@ -19,6 +19,7 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
   assert.equal(config.ollamaNumPredict, 2000);
   assert.equal(config.llmAttemptTimeoutMs, 120000);
   assert.equal(config.workflowTimeoutMs, 600000);
+  assert.equal(config.sqlitePath, 'data/workflows.sqlite');
 });
 
 test('loadConfig rejects missing, empty, or invalid values', () => {
@@ -74,6 +75,18 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
   assert.throws(
     () => loadConfig({ SERVICE_TOKEN: 'token', OLLAMA_BASE_URL: 'http://localhost:11434/proxy' }),
     /Invalid configuration/,
+  );
+  assert.equal(
+    loadConfig({ SERVICE_TOKEN: 'token', SQLITE_PATH: '' }).sqlitePath,
+    'data/workflows.sqlite',
+  );
+  assert.throws(
+    () => loadConfig({ SERVICE_TOKEN: 'token', SQLITE_PATH: ':memory:' }),
+    /Invalid configuration/,
+  );
+  assert.equal(
+    loadConfig({ SERVICE_TOKEN: 'token', SQLITE_PATH: ' /tmp/workflows.sqlite ' }).sqlitePath,
+    '/tmp/workflows.sqlite',
   );
 });
 

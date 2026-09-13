@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { createApp } from './app.ts';
 import { type Config, loadConfig } from './config.ts';
 import { createLogger, type Logger } from './logger.ts';
+import { openWorkflowStore } from './persist/store.ts';
 
 export const SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -45,10 +46,20 @@ function isEntrypoint() {
 if (isEntrypoint()) {
   try {
     const config = loadConfig();
+    const store = openWorkflowStore(config.sqlitePath);
     const logger = createLogger(config.logLevel);
+    logger.info({ sqlitePath: config.sqlitePath }, 'sqlite ready');
     const server = startServer(config, logger);
+    const closeStore = () => {
+      try {
+        store.close();
+      } catch (err) {
+        logger.error({ err }, 'sqlite close failed');
+      }
+    };
     server.on('error', (err) => {
       logger.error({ err }, 'listen failed');
+      closeStore();
       process.exit(1);
     });
     let stopping = false;
@@ -57,9 +68,13 @@ if (isEntrypoint()) {
       stopping = true;
       logger.info({ signal, drainMs: SHUTDOWN_DRAIN_MS }, 'shutting down');
       void shutDown(server).then(
-        () => process.exit(0),
+        () => {
+          closeStore();
+          process.exit(0);
+        },
         (err: unknown) => {
           logger.error({ err }, 'shutdown failed');
+          closeStore();
           process.exit(1);
         },
       );
