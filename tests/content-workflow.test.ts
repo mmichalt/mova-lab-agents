@@ -280,3 +280,22 @@ test('generation refusal does not start a revision', async (t) => {
   assert.equal(workflowLog(logs).candidateVersion, 0);
   assert.equal(workflowLog(logs).revisionCount, 0);
 });
+
+test('malformed revisions keep the checked candidate version', async (t) => {
+  const { response, logs } = await postDrafts(t, {
+    reply: scriptedChats({
+      generation: { status: 200, json: duplicateGenerated },
+      revision: [
+        { status: 200, json: chatFixtures.invalidJson },
+        { status: 200, json: chatFixtures.invalidJson },
+      ],
+    }),
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, 'CONTENT_VALIDATION_EXHAUSTED');
+  const finished = workflowLog(logs);
+  assert.equal(finished.candidateVersion, 1);
+  assert.equal(finished.revisionCount, 2);
+  assert.equal(finished.attempts, 3);
+  assert.deepEqual(finished.issueCodes, ['DUPLICATE_PHRASE']);
+});

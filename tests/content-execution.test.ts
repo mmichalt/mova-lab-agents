@@ -5,6 +5,8 @@ import {
   chatCalls,
   chatKind,
   chatsOf,
+  completedAttempts,
+  failedAttempts,
   postDrafts,
   scriptedChats,
   sequentialReply,
@@ -198,4 +200,96 @@ test('exhausted provider budget prevents the next attempt', async (t) => {
   assert.equal((await response.json()).error.code, 'PROVIDER_BUDGET_EXHAUSTED');
   assert.equal(chatCalls(ollama.calls).length, 1);
   assert.equal(chatsOf(ollama.calls, 'generation').length, 0);
+});
+
+test('oversized and stalled error bodies stay bounded and keep timeout codes', async (t) => {
+  const oversized = await postDrafts(t, {
+    reply: () => ({ status: 500, raw: 'x'.repeat(2 * 1024 * 1024) }),
+  });
+  assert.equal(oversized.response.status, 503);
+  assert.equal((await oversized.response.json()).error.code, 'PROVIDER_UNAVAILABLE');
+
+  const stalled503 = await postDrafts(t, {
+    reply: () => ({ hangBody: true, status: 503 }),
+    timeoutMs: '80',
+  });
+  assert.equal(stalled503.response.status, 504);
+  assert.equal((await stalled503.response.json()).error.code, 'PROVIDER_TIMEOUT');
+  assert.equal(chatCalls(stalled503.ollama.calls).length, 1);
+
+  const stalled500 = await postDrafts(t, {
+    reply: () => ({ hangBody: true, status: 500 }),
+    timeoutMs: '80',
+  });
+  assert.equal(stalled500.response.status, 504);
+  assert.equal((await stalled500.response.json()).error.code, 'PROVIDER_TIMEOUT');
+});
+
+test('stalled metadata cannot turn an expired workflow into ready-for-review', async (t) => {
+  const fallback = sequentialReply();
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: (call) => {
+      if (call.url === '/api/version' || call.url === '/api/tags') return { hang: true };
+      return fallback(call);
+    },
+    workflowTimeoutMs: '180',
+  });
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error.code, 'WORKFLOW_TIMEOUT');
+  assert.equal(chatsOf(ollama.calls, 'generation').length, 0);
+  assert.equal(workflowLog(logs).errorCode, 'WORKFLOW_TIMEOUT');
+});
+
+test('a deadline during review chat returns WORKFLOW_TIMEOUT', async (t) => {
+  const { response, logs } = await postDrafts(t, {
+    reply: scriptedChats({ age: { hang: true } }),
+    workflowTimeoutMs: '250',
+  });
+  assert.equal(response.status, 504);
+  assert.equal((await response.json()).error.code, 'WORKFLOW_TIMEOUT');
+  assert.equal(workflowLog(logs).status, 'FAILED');
+  assert.equal(workflowLog(logs).errorCode, 'WORKFLOW_TIMEOUT');
+});
+
+test('operational failures still finish with terminal state and counters', async (t) => {
+  const { response, logs } = await postDrafts(t, {
+    reply: () => ({ status: 404, json: errorBodies.missingModel }),
+  });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error.code, 'MODEL_UNAVAILABLE');
+  const finished = workflowLog(logs);
+  assert.equal(finished.status, 'FAILED');
+  assert.equal(finished.errorCode, 'MODEL_UNAVAILABLE');
+  assert.equal(finished.providerRequests, 1);
+  assert.equal(logs.includes('workflow finished'), true);
+});
+
+test('truncated envelopes still retain reported usage', async (t) => {
+  const { response, logs } = await postDrafts(t, {
+    reply: () => ({ status: 200, json: chatFixtures.truncated }),
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, 'PROVIDER_INCOMPLETE');
+  assert.equal(workflowLog(logs).usageCount, 1);
+});
+
+test('each transport attempt is logged and successful usage is retained', async (t) => {
+  const { response, ollama, logs } = await postDrafts(t, {
+    reply: scriptedChats({
+      generation: [
+        { status: 503, json: errorBodies.overload },
+        { status: 200, json: chatFixtures.generated },
+      ],
+    }),
+  });
+  assert.equal(response.status, 200);
+  generationResultSchema.parse(await response.json());
+  assert.equal(chatsOf(ollama.calls, 'generation').length, 2);
+  const failed = failedAttempts(logs).filter((item) => item.step === 'generation');
+  const completed = completedAttempts(logs).filter((item) => item.step === 'generation');
+  assert.equal(failed.length, 1);
+  assert.equal(completed.length, 1);
+  assert.notEqual(failed[0]?.attemptId, completed[0]?.attemptId);
+  assert.equal(workflowLog(logs).usageCount, 4);
+  assert.equal(workflowLog(logs).providerRequests, 5);
 });

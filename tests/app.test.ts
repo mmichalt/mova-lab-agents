@@ -7,7 +7,14 @@ import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
-import { testEnv } from './drafts-harness.ts';
+import {
+  chatCalls,
+  fakeMovaLab,
+  fakeOllama,
+  instantClock,
+  teacherRequest,
+  testEnv,
+} from './drafts-harness.ts';
 
 const config = loadConfig(testEnv());
 const logger = createLogger('silent');
@@ -21,6 +28,15 @@ async function listen(app: ReturnType<typeof createApp>) {
 
 function listeningServers() {
   return process.getActiveResourcesInfo().filter((name) => name === 'TCPServerWrap').length;
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting');
 }
 
 test('createApp constructs an Express app without opening a port', () => {
@@ -175,4 +191,63 @@ test('shutdown stops new work and aborts remaining work after the drain period',
   const elapsed = Date.now() - started;
   assert.ok(elapsed >= drainMs - 25, `drain returned too early (${elapsed}ms)`);
   assert.ok(elapsed < 1000, `drain lasted too long (${elapsed}ms)`);
+});
+
+test('client disconnect and forced shutdown stop later provider calls', async (t) => {
+  const hangChat = (call: { url: string }) =>
+    call.url === '/api/chat' ? { hang: true as const } : { status: 200, json: {} };
+
+  const disconnectOllama = await fakeOllama(t, hangChat);
+  const movaLab = await fakeMovaLab(t);
+  const draftsConfig = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: disconnectOllama.url,
+      MOVA_LAB_BASE_URL: movaLab.url,
+      LLM_ATTEMPT_TIMEOUT_MS: '5000',
+      WORKFLOW_TIMEOUT_MS: '600000',
+    }),
+  );
+  const { server, url } = await listen(
+    createApp({ config: draftsConfig, logger, clock: instantClock() }),
+  );
+  t.after(() => shutDown(server, 50));
+
+  const ac = new AbortController();
+  const pending = fetch(`${url}/content-drafts`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify(teacherRequest),
+    signal: ac.signal,
+  });
+  await waitUntil(() => chatCalls(disconnectOllama.calls).length === 1);
+  ac.abort();
+  await assert.rejects(pending);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(chatCalls(disconnectOllama.calls).length, 1);
+
+  const shutdownOllama = await fakeOllama(t, hangChat);
+  const shutdownApp = await listen(
+    createApp({
+      config: loadConfig(
+        testEnv({
+          OLLAMA_BASE_URL: shutdownOllama.url,
+          MOVA_LAB_BASE_URL: movaLab.url,
+          LLM_ATTEMPT_TIMEOUT_MS: '5000',
+          WORKFLOW_TIMEOUT_MS: '600000',
+        }),
+      ),
+      logger,
+      clock: instantClock(),
+    }),
+  );
+  const hang = fetch(`${shutdownApp.url}/content-drafts`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify(teacherRequest),
+  });
+  hang.catch(() => {});
+  await waitUntil(() => chatCalls(shutdownOllama.calls).length === 1);
+  await shutDown(shutdownApp.server, 40);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(chatCalls(shutdownOllama.calls).length, 1);
 });

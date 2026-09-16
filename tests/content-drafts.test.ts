@@ -31,6 +31,7 @@ import {
   teacherRequest,
   testEnv,
   userJson,
+  workflowLog,
 } from './drafts-harness.ts';
 import {
   chatEnvelope,
@@ -511,6 +512,42 @@ test('vocabulary failure logs identify the step without raw words', async (t) =>
   assert.equal(logged.step, 'vocabulary');
   assert.equal(logged.promptVersion, VOCABULARY_PROMPT_VERSION);
   assert.equal(invalid.logs.includes('риба'), false);
+});
+
+test('refusal reasons and reviewer codes do not enter ordinary logs', async (t) => {
+  const marker = 'SECRET_TEACHER_MARKER';
+  const refused = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({ status: 'refused', reason: marker }),
+    },
+  });
+  const vocab = await postDrafts(t, { reply: sequentialReply(refused) });
+  assert.equal(vocab.response.status, 422);
+  assert.equal(vocab.logs.includes(marker), false);
+  assert.equal(
+    JSON.parse(vocab.logs.split('\n').find((line) => line.includes('model refused')) ?? '{}')
+      .reason,
+    undefined,
+  );
+
+  const invented = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({
+        status: 'failed',
+        issues: [{ code: marker, severity: 'error', message: marker }],
+      }),
+    },
+  });
+  const review = await postDrafts(t, {
+    reply: scriptedChats({
+      age: { status: 200, json: invented },
+      language: { status: 200, json: chatFixtures.reviewPassed },
+    }),
+  });
+  assert.equal(review.logs.includes(marker), false);
+  assert.equal((workflowLog(review.logs).issueCodes as string[]).includes(marker), false);
 });
 
 const outcomeCases: Array<{
