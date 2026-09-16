@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Config } from '../config.ts';
 import type { LlmUsage } from '../content/schemas.ts';
 import { AppError } from '../errors.ts';
-import { abortError, parseRetryAfterMs } from './execution.ts';
+import { abortError, parseRetryAfterMs, providerTimeout } from './execution.ts';
 
 const maxProviderBodyBytes = 1024 * 1024;
 
@@ -248,7 +248,7 @@ async function requestOllama(url: URL, init: RequestInit, workflowSignal: AbortS
   try {
     return await fetch(url, init);
   } catch (err) {
-    throw mapFetchError(err, workflowSignal);
+    throw mapFetchError(init.signal?.aborted ? init.signal.reason : err, workflowSignal);
   }
 }
 
@@ -305,9 +305,7 @@ function aborted(signal: AbortSignal) {
 function mapFetchError(err: unknown, workflowSignal: AbortSignal) {
   if (workflowSignal.aborted) return abortError(workflowSignal);
   if (err instanceof AppError) return err;
-  if (isAbort(err)) {
-    return new AppError(504, 'PROVIDER_TIMEOUT', 'The model request timed out.');
-  }
+  if (isAbort(err)) return providerTimeout();
   return new AppError(503, 'PROVIDER_UNAVAILABLE', 'The model server is unavailable.', {
     retryable: true,
   });

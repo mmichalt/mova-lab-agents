@@ -146,7 +146,7 @@ test('in-flight work aborts when remaining workflow time elapses', async (t) => 
     workflowTimeoutMs: '80',
   });
   assert.equal(response.status, 504);
-  assert.match((await response.json()).error.code, /^(WORKFLOW_TIMEOUT|PROVIDER_TIMEOUT)$/);
+  assert.equal((await response.json()).error.code, 'WORKFLOW_TIMEOUT');
   assert.equal(chatCalls(ollama.calls).length, 1);
 });
 

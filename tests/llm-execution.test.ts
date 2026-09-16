@@ -260,4 +260,18 @@ test('attemptSignal aborts at remaining workflow time, not the full attempt time
   const elapsed = Date.now() - started;
   assert.ok(elapsed >= 20, `elapsed ${elapsed}`);
   assert.ok(elapsed < 250, `elapsed ${elapsed}`);
+  assert.equal(signal.reason instanceof AppError && signal.reason.code, 'WORKFLOW_TIMEOUT');
+});
+
+test('attemptSignal abort reason is PROVIDER_TIMEOUT when the attempt budget binds', async () => {
+  const started = Date.now();
+  const signal = attemptSignal(
+    limits({ deadlineAt: started + 5000, attemptTimeoutMs: 40 }),
+    new AbortController().signal,
+    started,
+  );
+  await new Promise<void>((resolve) => {
+    signal.addEventListener('abort', () => resolve(), { once: true });
+  });
+  assert.equal(signal.reason instanceof AppError && signal.reason.code, 'PROVIDER_TIMEOUT');
 });

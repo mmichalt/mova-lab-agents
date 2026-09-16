@@ -47,6 +47,10 @@ export function workflowTimeout() {
   return new AppError(504, 'WORKFLOW_TIMEOUT', 'The workflow deadline was exceeded.');
 }
 
+export function providerTimeout() {
+  return new AppError(504, 'PROVIDER_TIMEOUT', 'The model request timed out.');
+}
+
 export function clientDisconnected() {
   return new AppError(499, 'CLIENT_DISCONNECTED', 'The client disconnected.');
 }
@@ -101,9 +105,17 @@ export function retryDelayMs(options: {
 
 export function attemptSignal(limits: ExecutionLimits, workflowSignal: AbortSignal, now: number) {
   if (workflowSignal.aborted) throw abortError(workflowSignal);
-  const attemptMs = Math.min(limits.attemptTimeoutMs, remainingMs(limits, now));
-  if (attemptMs <= 0) throw workflowTimeout();
-  return AbortSignal.any([workflowSignal, AbortSignal.timeout(attemptMs)]);
+  const remaining = remainingMs(limits, now);
+  if (remaining <= 0) throw workflowTimeout();
+  const timeout = new AbortController();
+  const timer = setTimeout(
+    () => {
+      timeout.abort(remaining <= limits.attemptTimeoutMs ? workflowTimeout() : providerTimeout());
+    },
+    Math.min(limits.attemptTimeoutMs, remaining),
+  );
+  timer.unref();
+  return AbortSignal.any([workflowSignal, timeout.signal]);
 }
 
 export async function withTransportRetry<T>(
