@@ -144,6 +144,13 @@ export type CheckpointInput = {
   candidate?: Omit<CandidateRevisionRecord, 'id' | 'runId'>;
 };
 
+export type ClaimInput = {
+  runId: string;
+  owner: string;
+  now: number;
+  leaseMs: number;
+};
+
 export type OpenedRun = {
   run: PersistedRun;
   created: boolean;
@@ -161,12 +168,8 @@ export type WorkflowStore = {
   getApproval: (runId: string) => ApprovalRecord | undefined;
   listImportReceipts: (runId: string) => ImportReceiptRecord[];
   saveCheckpoint: (input: CheckpointInput) => PersistedRun;
-  claimRun: (input: {
-    runId: string;
-    owner: string;
-    now: number;
-    leaseMs: number;
-  }) => string | undefined;
+  claimRun: (input: ClaimInput) => string | undefined;
+  heartbeatRun: (input: ClaimInput & { claimToken: string }) => boolean;
   recordApproval: (
     input: {
       runId: string;
@@ -247,19 +250,53 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       state = @state,
       model_tag = COALESCE(@modelTag, model_tag),
       model_digest = COALESCE(@modelDigest, model_digest),
+      lease_owner = CASE
+        WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
+        ELSE lease_owner
+      END,
+      lease_token = CASE
+        WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
+        ELSE lease_token
+      END,
+      lease_expires_at = CASE
+        WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
+        ELSE lease_expires_at
+      END,
       updated_at = @now
-    WHERE id = @id AND state_version = @expectedStateVersion
+    WHERE id = @id
+      AND state_version = @expectedStateVersion
+      AND (
+        (@claimToken IS NULL AND lease_token IS NULL)
+        OR (
+          @claimToken IS NOT NULL
+          AND lease_token = @claimToken
+          AND lease_expires_at > @now
+        )
+      )
   `);
   const claimStmt = db.prepare(`
     UPDATE runs SET
       lease_owner = @owner,
       lease_token = @token,
       lease_expires_at = @expiresAt,
-      status = CASE WHEN status = 'PENDING' THEN 'RUNNING' ELSE status END,
+      status = CASE WHEN status IN ('PENDING', 'FAILED') THEN 'RUNNING' ELSE status END,
+      phase = CASE WHEN status = 'FAILED' THEN 'checks' ELSE phase END,
       updated_at = @now
     WHERE id = @id
-      AND status IN ('PENDING', 'RUNNING')
+      AND (
+        status IN ('PENDING', 'RUNNING')
+        OR (status = 'FAILED' AND json_extract(state, '$.error.retryable') = 1)
+      )
       AND (lease_token IS NULL OR lease_expires_at <= @now)
+  `);
+  const heartbeatStmt = db.prepare(`
+    UPDATE runs SET
+      lease_expires_at = @expiresAt,
+      updated_at = @now
+    WHERE id = @id
+      AND status = 'RUNNING'
+      AND lease_token = @token
+      AND lease_expires_at > @now
   `);
   const updateApprovalRunStmt = db.prepare(`
     UPDATE runs SET
@@ -376,11 +413,20 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       if (run.stateVersion !== input.expectedStateVersion) {
         throw new PersistError('CONFLICT', 'Run state version does not match.');
       }
-      if (run.leaseToken && run.leaseToken !== input.claimToken) {
+      if (
+        run.leaseToken &&
+        (run.leaseToken !== input.claimToken || (run.leaseExpiresAt ?? 0) <= input.now)
+      ) {
         throw new PersistError('CONFLICT', 'Run claim token does not match.');
       }
       if (!checkpointAllowed(run.status, input.status, input.phase)) {
         throw new PersistError('CONFLICT', 'Run cannot take this checkpoint.');
+      }
+      if (run.modelTag && input.modelTag && run.modelTag !== input.modelTag) {
+        throw new PersistError('CONSTRAINT', 'Run model tag changed.');
+      }
+      if (run.modelDigest && input.modelDigest && run.modelDigest !== input.modelDigest) {
+        throw new PersistError('CONSTRAINT', 'Run model digest changed.');
       }
       assertConsumed(run.consumed, input.consumed, run.limits);
       if (input.attempt && !(input.modelTag ?? run.modelTag)) {
@@ -420,6 +466,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         state: jsonText(input.state),
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        claimToken: input.claimToken ?? null,
         now: input.now,
       });
       if (updated.changes !== 1) {
@@ -442,6 +489,17 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       });
       return result.changes === 1 ? token : undefined;
     });
+
+  const heartbeatRun: WorkflowStore['heartbeatRun'] = (input) =>
+    wrap(
+      () =>
+        heartbeatStmt.run({
+          id: input.runId,
+          token: input.claimToken,
+          expiresAt: input.now + input.leaseMs,
+          now: input.now,
+        }).changes === 1,
+    );
 
   const recordApproval: WorkflowStore['recordApproval'] = (input) =>
     wrap(() => {
@@ -497,6 +555,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
 
   const checkpointTx = db.transaction(saveCheckpoint);
   const claimTx = db.transaction(claimRun);
+  const heartbeatTx = db.transaction(heartbeatRun);
   const approvalTx = db.transaction(recordApproval);
 
   return {
@@ -520,6 +579,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     listImportReceipts: (runId) => (listReceiptsStmt.all(runId) as ReceiptRow[]).map(mapReceipt),
     saveCheckpoint: (input) => checkpointTx(input),
     claimRun: (input) => claimTx(input),
+    heartbeatRun: (input) => heartbeatTx(input),
     recordApproval: (input) => approvalTx(input),
     saveImportReceipt,
     backupTo: (destinationPath) => {

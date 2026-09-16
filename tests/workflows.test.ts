@@ -5,9 +5,16 @@ import path from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
+import { PROMPT_VERSIONS } from '../src/content/runs.ts';
 import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
+import type { Clock } from '../src/llm/execution.ts';
 import { createLogger } from '../src/logger.ts';
-import { openWorkflowStore, type WorkflowStore } from '../src/persist/store.ts';
+import {
+  CONSTRAINTS_VERSION,
+  openWorkflowStore,
+  WORKFLOW_VERSION,
+  type WorkflowStore,
+} from '../src/persist/store.ts';
 import { shutDown } from '../src/server.ts';
 import {
   chatCalls,
@@ -21,7 +28,7 @@ import {
   teacherRequest,
   testEnv,
 } from './drafts-harness.ts';
-import { chatEnvelope, generatedContent } from './fixtures/ollama.ts';
+import { chatEnvelope, generatedContent, vocabularyContent } from './fixtures/ollama.ts';
 
 const logger = createLogger('silent');
 
@@ -45,6 +52,7 @@ async function startService(
     store?: WorkflowStore;
     reply?: Parameters<typeof fakeOllama>[1];
     ollamaUrl?: string;
+    clock?: Clock;
   } = {},
 ) {
   const store = options.store ?? tempStore(t);
@@ -59,10 +67,127 @@ async function startService(
       MOVA_LAB_BASE_URL: movaLab.url,
     }),
   );
-  const { server, url } = await listen(createApp({ config, logger, store, clock: instantClock() }));
+  const { server, url } = await listen(
+    createApp({ config, logger, store, clock: options.clock ?? instantClock() }),
+  );
   t.after(() => shutDown(server, 50));
   return { store, url, ollama, config };
 }
+
+test('resume reuses a committed vocabulary checkpoint and remaining limits', async (t) => {
+  const store = tempStore(t);
+  const run = store.createRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'resume-1',
+    normalizedInput: teacherRequest,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions: PROMPT_VERSIONS,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: 'sha256:abc',
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600_000,
+      attemptTimeoutMs: 120_000,
+      deadlineAt: 100_000,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+  const token = store.claimRun({
+    runId: run.id,
+    owner: 'crashed-worker',
+    now: 1_000,
+    leaseMs: 100,
+  });
+  assert.ok(token);
+  store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 0,
+    status: 'RUNNING',
+    phase: 'generation',
+    consumed: { providerRequests: 1, revisionCount: 0 },
+    state: {
+      request: teacherRequest,
+      phase: 'generation',
+      status: 'RUNNING',
+      candidateVersion: 0,
+      revisionCount: 0,
+      constraintsVersion: CONSTRAINTS_VERSION,
+      vocabulary: JSON.parse(vocabularyContent),
+      candidate: null,
+      checks: [],
+      history: [],
+      usage: [],
+      error: null,
+      providerRequests: 1,
+      modelTag: 'qwen3:4b-instruct',
+      modelDigest: 'sha256:abc',
+    },
+    now: 1_050,
+    claimToken: token,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: 'sha256:abc',
+  });
+  const ollama = await fakeOllama(t, sequentialReply());
+  const { url } = await startService(t, {
+    store,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+  const response = await fetch(`${url}/workflows/${run.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'AWAITING_APPROVAL');
+  assert.equal(body.consumed.providerRequests, 4);
+  assert.equal(chatCalls(ollama.calls).length, 3);
+  assert.equal(store.getRun(run.id)?.leaseToken, null);
+});
+
+test('resume preserves limits for an unstarted pending run', async (t) => {
+  const store = tempStore(t);
+  const run = store.createRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'pending-resume-1',
+    normalizedInput: teacherRequest,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions: PROMPT_VERSIONS,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: null,
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600_000,
+      attemptTimeoutMs: 120_000,
+      deadlineAt: 1_500,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+  const ollama = await fakeOllama(t, sequentialReply());
+  const { url } = await startService(t, {
+    store,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+
+  const response = await fetch(`${url}/workflows/${run.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.error.code, 'WORKFLOW_TIMEOUT');
+  assert.equal(chatCalls(ollama.calls).length, 0);
+});
 
 function headers(actor = 'teacher-1', key = 'key-1') {
   return {

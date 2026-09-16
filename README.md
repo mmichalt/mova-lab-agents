@@ -57,7 +57,14 @@ synchronously, checkpoints vocabulary, candidates, and checks, and returns
 `AWAITING_APPROVAL`; execution failure is stored as `FAILED` and returned on
 the same resource. `GET /workflows/:id` returns that representation for the
 owning actor and `404` for missing or inaccessible runs. Lease tokens are not
-serialized. `POST /content-drafts` remains a development-only synchronous
+serialized. Active executions hold a 30-second expiring lease and heartbeat;
+an expired `RUNNING` lease is resumable through the authenticated
+`POST /workflows/:id/resume` endpoint. Explicitly retryable `FAILED` runs can
+use the same endpoint. Resume preserves the recorded deadline, provider and
+revision counters, checkpoints, workflow/prompt versions, and model digest;
+missing or changed model metadata fails explicitly. If a process dies after a
+provider response but before its checkpoint commits, that LLM call may repeat.
+`POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
 constraints over native `fetch` (`GET /api/internal/content-generation/constraints`
@@ -313,10 +320,10 @@ sqlite3 data/workflows.sqlite ".backup data/workflows.backup.sqlite"
 ```
 
 `VACUUM INTO` is the same snapshot used by store tests. `npm test` covers
-migration, constraints, checkpoint rollback, close/reopen, backup/restore,
-duplicate and concurrent workflow creation, conflicting idempotency hashes,
-owner access, persisted failure, and `/ready` without GPU, Ollama, or live
-inference.
+migration, constraints, checkpoint rollback, lease races and expiry, close/reopen,
+backup/restore, duplicate and concurrent workflow creation, conflicting
+idempotency hashes, owner access, persisted failure, checkpointed resume, and
+`/ready` without GPU, Ollama, or live inference.
 
 `GET /health` is process liveness only. `GET /ready` additionally checks the
 open SQLite handle and `GET /api/tags` for the configured model. Ordinary CI

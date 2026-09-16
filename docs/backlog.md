@@ -48,7 +48,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-014 — Bounded model-selected tool calling](#ag-014)
 - [x] [AG-015 — SQLite persistence and migrations](#ag-015)
 - [x] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
-- [ ] [AG-017 — Claims and interrupted-run recovery](#ag-017)
+- [x] [AG-017 — Claims and interrupted-run recovery](#ag-017)
 - [ ] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
 - [ ] [AG-019 — Durable approval and rejection](#ag-019)
 - [ ] [AG-020 — Approved draft import and partial recovery](#ag-020)
@@ -959,7 +959,7 @@ inference.
 **Stage:** 7  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-016](#ag-016)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn leases, stale-writer protection, and
 the limits of exactly-once execution after a crash.
@@ -984,6 +984,19 @@ unsupported versions, and exhausted budgets.
 
 **Out of scope:** Queue-driven resumption, budget resets, unrestricted terminal-run
 restarts, and exactly-once LLM execution guarantees.
+
+Recorded: active runs claim a 30-second lease, heartbeat at 10-second intervals,
+and pass the claim token plus lease expiry through every checkpoint. Terminal
+checkpoints release the lease; expired `RUNNING` rows are identified as
+resumable, and retryable `FAILED` rows may also resume through authorized
+`POST /workflows/:id/resume`. Resume reuses committed vocabulary/candidate
+checkpoints, the recorded deadline and consumed limits, and verifies the current
+workflow/prompt versions plus Ollama model tag/digest before provider work.
+Stale checkpoints fail with `RUN_CLAIM_LOST`; a provider response received before
+a process crash can still be repeated before its checkpoint commits. `npm test`,
+`npm run typecheck`, `npx biome ci .`, and `npm run build` pass without live
+inference; localhost-listener integration tests require the host network
+permission in this sandbox.
 
 ### AG-018
 
