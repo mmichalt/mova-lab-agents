@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-015, AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-016, AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -47,7 +47,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-013 — Validated Mova-Lab HTTP functions](#ag-013)
 - [x] [AG-014 — Bounded model-selected tool calling](#ag-014)
 - [x] [AG-015 — SQLite persistence and migrations](#ag-015)
-- [ ] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
+- [x] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
 - [ ] [AG-017 — Claims and interrupted-run recovery](#ag-017)
 - [ ] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
 - [ ] [AG-019 — Durable approval and rejection](#ag-019)
@@ -911,7 +911,7 @@ so `docker compose config` was not re-run; `compose.yaml` now mounts
 **Stage:** 7  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-015](#ag-015), [AG-014](#ag-014)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Turn a request-scoped operation into a durable
 resource and learn creation idempotency.
@@ -936,6 +936,22 @@ owner access, safe serialization, persisted failure, and reopening before retrie
 
 **Out of scope:** Automatic background execution, human decisions, import,
 queue retries, and in-memory substitutes for persistence.
+
+Recorded: `POST /workflows/content-generation` requires `X-Actor-Id` and
+`Idempotency-Key` after the service token. `openRun` hashes the normalized
+request: same actor/key/input returns the existing run (`200`); a different
+hash returns `409 IDEMPOTENCY_CONFLICT` with `workflowId` and leaves the
+original row unchanged. A new run executes synchronously, checkpoints
+`RUNNING` then vocabulary/candidates/checks, and returns `201` with
+`docs/examples/persisted-run.json`. Completed generation is
+`AWAITING_APPROVAL`; provider failure is stored as `FAILED` and survives
+close/reopen. Observed Ollama model tag and digest are checkpointed from
+runtime metadata. `GET /workflows/:id` omits lease fields and returns `404` for
+other actors. `POST /content-drafts` sets `Deprecation: true`. `GET /ready`
+pings SQLite and bounded `GET /api/tags` without `/api/chat` or pulls;
+`GET /health` stays independent. `npm test` (210), `npm run typecheck`,
+`npx biome ci .`, and `npm run build` pass without GPU, Ollama, or live
+inference.
 
 ### AG-017
 

@@ -82,6 +82,8 @@ export type GenerationState = {
   checks: CheckResult[];
   history: AttemptSummary[];
   usage: LlmUsage[];
+  modelTag: string | null;
+  modelDigest: string | null;
   error?: WorkflowError;
 };
 
@@ -93,6 +95,7 @@ type RunOptions = {
   clock?: Clock;
   maxProviderRequests?: number;
   signal?: AbortSignal;
+  onCheckpoint?: (state: GenerationState) => void;
 };
 
 export async function generateContentDrafts(options: {
@@ -153,6 +156,8 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     checks: [],
     history: [],
     usage: [],
+    modelTag: options.config.ollamaModel,
+    modelDigest: null,
   };
   const llm: LlmCall = {
     config: options.config,
@@ -162,6 +167,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     signal: controller.signal,
     clock,
     usage: state.usage,
+    observed: { modelTag: options.config.ollamaModel, modelDigest: null },
   };
   try {
     if (expired(controller, limits, clock)) {
@@ -180,6 +186,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     if (state.status === 'RUNNING') {
       const vocabulary = await selectVocabulary({ ...llm, request: options.request });
       state.vocabulary = vocabulary;
+      checkpoint(state, limits, options, llm);
 
       let feedback: readonly ValidationIssue[] | undefined;
       const invalid = new Map<string, CheckResult[]>();
@@ -251,6 +258,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         invalid.set(mark, state.checks);
         const issues = blockingIssues(state.checks);
         if (!tryRevise(state, options, issues)) break;
+        checkpoint(state, limits, options, llm);
         feedback = issues;
       }
     }
@@ -267,6 +275,8 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onExternalAbort);
     state.providerRequests = limits.providerRequests;
+    state.modelTag = llm.observed?.modelTag ?? state.modelTag;
+    state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
   }
 
   options.logger.info(
@@ -412,10 +422,7 @@ function present(requestId: string, state: GenerationState): GenerationResult {
       providerRequests: state.providerRequests,
       requiresHumanApproval: state.status === 'READY_FOR_REVIEW',
       checks: state.checks,
-      proposals: (state.candidate ?? []).map((proposal, index) => ({
-        ...proposal,
-        localId: `proposal-${index + 1}`,
-      })),
+      proposals: withLocalIds(state.candidate ?? []),
     };
   }
   const error = state.error ?? {
@@ -432,6 +439,25 @@ function keepFailedResult(state: GenerationState) {
     state.candidate !== undefined &&
     (state.error?.code === 'REVIEW_UNAVAILABLE' || state.error?.code === 'REVIEW_REFUSED')
   );
+}
+
+export function withLocalIds(proposals: readonly GeneratedProposal[]) {
+  return proposals.map((proposal, index) => ({
+    ...proposal,
+    localId: `proposal-${index + 1}`,
+  }));
+}
+
+function checkpoint(
+  state: GenerationState,
+  limits: ExecutionLimits,
+  options: RunOptions,
+  llm: LlmCall,
+) {
+  state.providerRequests = limits.providerRequests;
+  state.modelTag = llm.observed?.modelTag ?? state.modelTag;
+  state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
+  options.onCheckpoint?.(state);
 }
 
 function fail(state: GenerationState, err: AppError) {

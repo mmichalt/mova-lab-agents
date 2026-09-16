@@ -24,6 +24,7 @@ export type LlmCall = {
   signal: AbortSignal;
   clock: Clock;
   usage: LlmUsage[];
+  observed?: { modelTag: string | null; modelDigest: string | null };
 };
 
 type ChatOptions = LlmCall & {
@@ -91,6 +92,11 @@ async function chatOnce(options: ChatOptions): Promise<ChatAttempt> {
       now: options.clock.now(),
       usage: options.usage,
     });
+    options.observed ??= { modelTag: null, modelDigest: null };
+    options.observed.modelTag = attempt.model;
+    if (attempt.modelDigest && !options.observed.modelDigest) {
+      options.observed.modelDigest = attempt.modelDigest;
+    }
     options.logger.info(
       {
         attemptId,

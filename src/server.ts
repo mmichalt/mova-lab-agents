@@ -4,12 +4,12 @@ import { pathToFileURL } from 'node:url';
 import { createApp } from './app.ts';
 import { type Config, loadConfig } from './config.ts';
 import { createLogger, type Logger } from './logger.ts';
-import { openWorkflowStore } from './persist/store.ts';
+import { openWorkflowStore, type WorkflowStore } from './persist/store.ts';
 
 export const SHUTDOWN_DRAIN_MS = 10_000;
 
-export function startServer(config: Config, logger: Logger) {
-  const app = createApp({ config, logger });
+export function startServer(config: Config, logger: Logger, store: WorkflowStore) {
+  const app = createApp({ config, logger, store });
   const server = app.listen(config.port);
   server.on('listening', () => {
     logger.info({ port: listeningPort(server) }, 'listening');
@@ -49,7 +49,7 @@ if (isEntrypoint()) {
     const store = openWorkflowStore(config.sqlitePath);
     const logger = createLogger(config.logLevel);
     logger.info({ sqlitePath: config.sqlitePath }, 'sqlite ready');
-    const server = startServer(config, logger);
+    const server = startServer(config, logger, store);
     const closeStore = () => {
       try {
         store.close();

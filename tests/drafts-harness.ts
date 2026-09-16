@@ -21,7 +21,13 @@ export type MovaLabCall = { method: string; url: string; authorization: string |
 export type OllamaReply =
   | { hang: true }
   | { hangBody: true; status?: number }
-  | { status: number; json?: unknown; raw?: string; headers?: Record<string, string> };
+  | {
+      status: number;
+      json?: unknown;
+      raw?: string;
+      headers?: Record<string, string>;
+      wait?: Promise<void>;
+    };
 
 export function testEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
@@ -70,6 +76,7 @@ export async function fakeOllama(t: After, reply: (call: OllamaCall) => OllamaRe
         res.write('{');
         return;
       }
+      if (result.wait) await result.wait;
       res.writeHead(result.status, {
         'content-type': 'application/json',
         ...result.headers,
