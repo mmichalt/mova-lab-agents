@@ -2,6 +2,7 @@ import type { Request } from 'express';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '../llm/execution.ts';
+import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
   CONSTRAINTS_VERSION,
@@ -9,6 +10,7 @@ import {
   type PersistedRun,
   type RunPhase,
   type RunStatus,
+  SCHEMA_VERSION,
   WORKFLOW_VERSION,
   type WorkflowStore,
 } from '../persist/store.ts';
@@ -18,13 +20,26 @@ import {
   VOCABULARY_PROMPT_VERSION,
 } from './generate.ts';
 import { AGE_PROMPT_VERSION, LANGUAGE_PROMPT_VERSION } from './review.ts';
-import { type ContentRequest, contentRequestSchema, type GeneratedProposal } from './schemas.ts';
+import {
+  type CheckResult,
+  type ContentRequest,
+  contentRequestSchema,
+  type GeneratedProposal,
+} from './schemas.ts';
 import {
   type GenerationState,
   MAX_REVISIONS,
   runContentWorkflow,
   withLocalIds,
 } from './workflow.ts';
+
+export const RUN_LEASE_MS = 30_000;
+const RUN_HEARTBEAT_MS = RUN_LEASE_MS / 3;
+
+type ExecutionOptions = Omit<
+  Parameters<typeof createContentGeneration>[0],
+  'idempotencyKey' | 'body'
+>;
 
 export const PROMPT_VERSIONS = {
   vocabulary: VOCABULARY_PROMPT_VERSION,
@@ -43,6 +58,7 @@ export type WorkflowResource = {
   idempotencyKey: string;
   createdAt: number;
   updatedAt: number;
+  resumable: boolean;
   schemaVersion: string;
   workflowVersion: string;
   constraintsVersion: string;
@@ -61,7 +77,7 @@ export type WorkflowResource = {
     checks: unknown;
     proposals: ReturnType<typeof withLocalIds>;
     vocabulary: unknown;
-    error: { code: string; message: string } | null;
+    error: { code: string; message: string; retryable: boolean } | null;
   };
   candidates: Array<{
     candidateVersion: number;
@@ -97,24 +113,79 @@ export async function createContentGeneration(options: {
   }
   const opened = openPersistedRun(options, parsed.data);
   if (!opened.created) {
-    return { created: false, resource: presentRun(options.store, opened.run, options.ownerId) };
+    return {
+      created: false,
+      resource: presentRun(
+        options.store,
+        opened.run,
+        options.ownerId,
+        (options.clock ?? systemClock).now(),
+      ),
+    };
   }
   await executePersistedRun(options, opened.run, parsed.data);
   const latest = options.store.getRun(opened.run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  return { created: true, resource: presentRun(options.store, latest, options.ownerId) };
+  return {
+    created: true,
+    resource: presentRun(
+      options.store,
+      latest,
+      options.ownerId,
+      (options.clock ?? systemClock).now(),
+    ),
+  };
 }
 
-export function getContentGeneration(store: WorkflowStore, id: string, actorId: string) {
+export async function resumeContentGeneration(options: ExecutionOptions & { id: string }) {
+  const clock = options.clock ?? systemClock;
+  const run = options.store.getRun(options.id);
+  if (!run || run.ownerId !== options.ownerId) {
+    throw new AppError(404, 'NOT_FOUND', 'Not found.');
+  }
+  if (!isResumable(run, clock.now())) {
+    throw new AppError(409, 'RUN_NOT_RESUMABLE', 'The workflow is not interrupted or retryable.');
+  }
+  await assertRecoveryCompatible(options.config, options.signal, run);
+  const claimToken = options.store.claimRun({
+    runId: run.id,
+    owner: options.requestId,
+    now: clock.now(),
+    leaseMs: RUN_LEASE_MS,
+  });
+  if (!claimToken) {
+    throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being resumed.');
+  }
+  const request = contentRequestSchema.safeParse(run.normalizedInput);
+  if (!request.success) {
+    throw new AppError(
+      409,
+      'WORKFLOW_INPUT_UNSUPPORTED',
+      'The recorded workflow input is invalid.',
+    );
+  }
+  await executePersistedRun(options, run, request.data, claimToken);
+  const latest = options.store.getRun(run.id);
+  if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+  return presentRun(options.store, latest, options.ownerId, clock.now());
+}
+
+export function getContentGeneration(
+  store: WorkflowStore,
+  id: string,
+  actorId: string,
+  now = Date.now(),
+) {
   const run = store.getRun(id);
   if (!run) throw new AppError(404, 'NOT_FOUND', 'Not found.');
-  return presentRun(store, run, actorId);
+  return presentRun(store, run, actorId, now);
 }
 
 export function presentRun(
   store: WorkflowStore,
   run: PersistedRun,
   actorId: string,
+  now = Date.now(),
 ): WorkflowResource {
   if (run.ownerId !== actorId) {
     throw new AppError(404, 'NOT_FOUND', 'Not found.');
@@ -132,6 +203,7 @@ export function presentRun(
     idempotencyKey: run.idempotencyKey,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
+    resumable: isResumable(run, now),
     schemaVersion: run.schemaVersion,
     workflowVersion: run.workflowVersion,
     constraintsVersion: run.constraintsVersion,
@@ -207,13 +279,51 @@ function openPersistedRun(
 }
 
 async function executePersistedRun(
-  options: Parameters<typeof createContentGeneration>[0],
+  options: ExecutionOptions,
   run: PersistedRun,
   request: ContentRequest,
+  claimedToken?: string,
 ) {
   const clock = options.clock ?? systemClock;
-  const saved = new Set<number>();
-  let current = run;
+  const fresh = run.status === 'PENDING';
+  const claimToken =
+    claimedToken ??
+    options.store.claimRun({
+      runId: run.id,
+      owner: options.requestId,
+      now: clock.now(),
+      leaseMs: RUN_LEASE_MS,
+    });
+  if (!claimToken) {
+    throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being executed.');
+  }
+  const previousCandidates = options.store.listCandidates(run.id);
+  const saved = new Set(previousCandidates.map((item) => item.candidateVersion));
+  const loaded = options.store.getRun(run.id);
+  if (!loaded) throw new AppError(404, 'NOT_FOUND', 'Not found.');
+  let current = loaded;
+  const leaseLost = new AbortController();
+  let lost = false;
+  const heartbeat = setInterval(() => {
+    try {
+      if (
+        !options.store.heartbeatRun({
+          runId: run.id,
+          owner: options.requestId,
+          claimToken,
+          now: clock.now(),
+          leaseMs: RUN_LEASE_MS,
+        })
+      ) {
+        lost = true;
+        leaseLost.abort(claimLostError());
+      }
+    } catch {
+      lost = true;
+      leaseLost.abort(claimLostError());
+    }
+  }, RUN_HEARTBEAT_MS);
+  heartbeat.unref();
   const write = (input: {
     status: PersistedRun['status'];
     phase: RunPhase;
@@ -239,48 +349,81 @@ async function executePersistedRun(
         phase: input.phase,
         state: input.state,
         consumed: input.consumed,
+        claimToken,
         candidate: input.candidate,
       });
       if (input.candidate) saved.add(input.candidate.candidateVersion);
     } catch (err) {
-      throw sqliteUnavailable(err);
+      throw checkpointError(err);
     }
   };
-  write({
-    status: 'RUNNING',
-    phase: 'vocabulary',
-    consumed: current.consumed,
-    state: {},
-  });
-  const state = await runContentWorkflow({
-    config: options.config,
-    logger: options.logger,
-    requestId: options.requestId,
-    request,
-    clock,
-    maxProviderRequests: options.maxProviderRequests,
-    signal: options.signal,
-    onCheckpoint: (next) => {
+  try {
+    if (fresh) {
       write({
         status: 'RUNNING',
-        phase: runningPhase(next.phase),
-        consumed: consumedOf(next),
-        state: snapshot(next),
-        modelTag: next.modelTag,
-        modelDigest: next.modelDigest,
-        candidate: candidateRow(next, saved, clock.now()),
+        phase: 'vocabulary',
+        consumed: current.consumed,
+        state: {},
       });
-    },
-  });
-  write({
-    status: state.status === 'READY_FOR_REVIEW' ? 'AWAITING_APPROVAL' : 'FAILED',
-    phase: 'finished',
-    consumed: consumedOf(state),
-    state: snapshot(state),
-    modelTag: state.modelTag,
-    modelDigest: state.modelDigest,
-    candidate: candidateRow(state, saved, clock.now()),
-  });
+    }
+    const state = await runContentWorkflow({
+      config: options.config,
+      logger: options.logger,
+      requestId: options.requestId,
+      request,
+      clock,
+      maxProviderRequests: current.limits.maxProviderRequests,
+      maxRevisions: current.limits.maxRevisions,
+      signal: AbortSignal.any(
+        [options.signal, leaseLost.signal].filter(
+          (signal): signal is AbortSignal => signal !== undefined,
+        ),
+      ),
+      resume: fresh
+        ? undefined
+        : {
+            checkpoint: current.state,
+            deadlineAt: current.limits.deadlineAt,
+            attemptTimeoutMs: current.limits.attemptTimeoutMs,
+            maxProviderRequests: current.limits.maxProviderRequests,
+            maxRevisions: current.limits.maxRevisions,
+            ollamaNumCtx: current.limits.ollamaNumCtx,
+            ollamaNumPredict: current.limits.ollamaNumPredict,
+            providerRequests: current.consumed.providerRequests,
+            revisionCount: current.consumed.revisionCount,
+            constraintsVersion: current.constraintsVersion,
+            modelTag: current.modelTag,
+            modelDigest: current.modelDigest,
+            invalidCandidates: previousCandidates.map((item) => ({
+              proposals: item.proposals as GeneratedProposal[],
+              checks: Array.isArray(item.checks) ? (item.checks as CheckResult[]) : [],
+            })),
+          },
+      onCheckpoint: (next) => {
+        write({
+          status: 'RUNNING',
+          phase: runningPhase(next.phase),
+          consumed: consumedOf(next),
+          state: snapshot(next),
+          modelTag: next.modelTag,
+          modelDigest: next.modelDigest,
+          candidate: candidateRow(next, saved, clock.now()),
+        });
+      },
+    });
+    if (lost) throw claimLostError();
+    write({
+      status: state.status === 'READY_FOR_REVIEW' ? 'AWAITING_APPROVAL' : 'FAILED',
+      phase: 'finished',
+      consumed: consumedOf(state),
+      state: snapshot(state),
+      modelTag: state.modelTag,
+      modelDigest: state.modelDigest,
+      candidate: candidateRow(state, saved, clock.now()),
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 function snapshot(state: GenerationState) {
@@ -333,13 +476,77 @@ function asCount(value: unknown) {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
-function errorOf(value: unknown): { code: string; message: string } | null {
+function errorOf(value: unknown): { code: string; message: string; retryable: boolean } | null {
   if (typeof value !== 'object' || value === null) return null;
-  const error = value as { code?: unknown; message?: unknown };
+  const error = value as { code?: unknown; message?: unknown; retryable?: unknown };
   return {
     code: typeof error.code === 'string' ? error.code : 'INTERNAL_ERROR',
     message: typeof error.message === 'string' ? error.message : 'Internal server error.',
+    retryable: error.retryable === true,
   };
+}
+
+function isResumable(run: PersistedRun, now: number) {
+  if (run.status === 'PENDING') return true;
+  if (run.status === 'FAILED') return retryableState(run.state);
+  return (
+    run.status === 'RUNNING' &&
+    run.phase !== 'finished' &&
+    (run.leaseExpiresAt === null || run.leaseExpiresAt <= now)
+  );
+}
+
+function retryableState(value: unknown) {
+  const state = asState(value);
+  const error = asState(state.error);
+  return error.retryable === true;
+}
+
+async function assertRecoveryCompatible(
+  config: Config,
+  signal: AbortSignal | undefined,
+  run: PersistedRun,
+) {
+  if (run.schemaVersion !== SCHEMA_VERSION || run.workflowVersion !== WORKFLOW_VERSION) {
+    throw new AppError(
+      409,
+      'WORKFLOW_VERSION_UNSUPPORTED',
+      'The recorded workflow version is not supported.',
+    );
+  }
+  if (!sameVersions(run.promptVersions, PROMPT_VERSIONS)) {
+    throw new AppError(
+      409,
+      'PROMPT_VERSION_UNSUPPORTED',
+      'The recorded prompts are not supported.',
+    );
+  }
+  if (run.modelTag !== config.ollamaModel) {
+    throw new AppError(409, 'MODEL_TAG_CHANGED', 'The configured model tag changed.');
+  }
+  const model = await ollamaModelInfo(config, signal);
+  if (model.status !== 'ok') {
+    throw new AppError(503, 'MODEL_UNAVAILABLE', 'The recorded model is not available.');
+  }
+  if (!run.modelDigest) {
+    if (run.consumed.providerRequests > 0) {
+      throw new AppError(409, 'MODEL_DIGEST_UNRECORDED', 'The run has no recorded model digest.');
+    }
+    return;
+  }
+  if (!model.digest) {
+    throw new AppError(409, 'MODEL_DIGEST_UNAVAILABLE', 'The current model digest is unavailable.');
+  }
+  if (model.digest !== run.modelDigest) {
+    throw new AppError(409, 'MODEL_DIGEST_CHANGED', 'The recorded model digest changed.');
+  }
+}
+
+function sameVersions(actual: Record<string, string>, expected: Record<string, string>) {
+  return (
+    Object.keys(actual).length === Object.keys(expected).length &&
+    Object.entries(expected).every(([key, value]) => actual[key] === value)
+  );
 }
 
 function requiredHeader(req: Request, name: string, message: string) {
@@ -348,6 +555,15 @@ function requiredHeader(req: Request, name: string, message: string) {
     throw new AppError(400, 'VALIDATION_ERROR', message);
   }
   return value;
+}
+
+function claimLostError() {
+  return new AppError(409, 'RUN_CLAIM_LOST', 'The workflow lease was lost.');
+}
+
+function checkpointError(err: unknown): AppError {
+  if (err instanceof PersistError && err.code === 'CONFLICT') return claimLostError();
+  return sqliteUnavailable(err);
 }
 
 function sqliteUnavailable(err: unknown): AppError {

@@ -25,6 +25,8 @@ export type LlmCall = {
   clock: Clock;
   usage: LlmUsage[];
   observed?: { modelTag: string | null; modelDigest: string | null };
+  expectedModelTag?: string | null;
+  expectedModelDigest?: string | null;
 };
 
 type ChatOptions = LlmCall & {
@@ -92,6 +94,12 @@ async function chatOnce(options: ChatOptions): Promise<ChatAttempt> {
       now: options.clock.now(),
       usage: options.usage,
     });
+    if (options.expectedModelTag && attempt.model !== options.expectedModelTag) {
+      throw new AppError(409, 'MODEL_TAG_CHANGED', 'The model tag changed during recovery.');
+    }
+    if (options.expectedModelDigest && attempt.modelDigest !== options.expectedModelDigest) {
+      throw new AppError(409, 'MODEL_DIGEST_CHANGED', 'The model digest changed during recovery.');
+    }
     options.observed ??= { modelTag: null, modelDigest: null };
     options.observed.modelTag = attempt.model;
     if (attempt.modelDigest && !options.observed.modelDigest) {

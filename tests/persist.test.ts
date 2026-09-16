@@ -335,6 +335,84 @@ test('concurrent claims over two connections produce one owner', (t) => {
   assert.equal(other.getRun(run.id)?.leaseOwner, 'worker-b');
 });
 
+test('heartbeats extend a lease and expired owners cannot checkpoint', (t) => {
+  const store = tempStore(t);
+  const token = store.claimRun({
+    runId: create(store).id,
+    owner: 'worker-a',
+    now: 1_000,
+    leaseMs: 100,
+  });
+  assert.ok(token);
+  const run = store.getRunByIdempotency('teacher-1', 'key-1');
+  assert.ok(run);
+  assert.equal(
+    store.heartbeatRun({
+      runId: run.id,
+      owner: 'worker-a',
+      claimToken: token,
+      now: 1_050,
+      leaseMs: 100,
+    }),
+    true,
+  );
+  assert.equal(store.getRun(run.id)?.leaseExpiresAt, 1_150);
+  assert.equal(
+    store.heartbeatRun({
+      runId: run.id,
+      owner: 'worker-a',
+      claimToken: token,
+      now: 1_150,
+      leaseMs: 100,
+    }),
+    false,
+  );
+  assert.throws(
+    () =>
+      store.saveCheckpoint({
+        runId: run.id,
+        expectedStateVersion: 0,
+        status: 'RUNNING',
+        phase: 'generation',
+        consumed: { providerRequests: 0, revisionCount: 0 },
+        state: {},
+        now: 1_151,
+        claimToken: token,
+      }),
+    isPersist('CONFLICT'),
+  );
+});
+
+test('retryable failures can be claimed back into active execution', (t) => {
+  const store = tempStore(t);
+  const run = create(store);
+  store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 0,
+    status: 'FAILED',
+    phase: 'finished',
+    consumed: { providerRequests: 1, revisionCount: 0 },
+    state: { error: { code: 'PROVIDER_UNAVAILABLE', retryable: true } },
+    now: 1_100,
+    modelTag: 'qwen3:4b-instruct',
+  });
+  const token = store.claimRun({ runId: run.id, owner: 'worker-a', now: 2_000, leaseMs: 100 });
+  assert.ok(token);
+  assert.equal(store.getRun(run.id)?.status, 'RUNNING');
+  const resumed = store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 1,
+    status: 'RUNNING',
+    phase: 'generation',
+    consumed: { providerRequests: 1, revisionCount: 0 },
+    state: {},
+    now: 2_010,
+    claimToken: token,
+    modelTag: 'qwen3:4b-instruct',
+  });
+  assert.equal(resumed.status, 'RUNNING');
+});
+
 test('recordApproval commits the decision and status together', (t) => {
   const store = tempStore(t);
   const run = create(store);

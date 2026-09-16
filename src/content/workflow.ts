@@ -64,6 +64,7 @@ export type WorkflowError = {
   code: string;
   message: string;
   status: number;
+  retryable: boolean;
 };
 
 export type GenerationState = {
@@ -87,6 +88,22 @@ export type GenerationState = {
   error?: WorkflowError;
 };
 
+export type WorkflowResume = {
+  checkpoint: unknown;
+  deadlineAt: number;
+  attemptTimeoutMs: number;
+  maxProviderRequests: number;
+  maxRevisions: number;
+  ollamaNumCtx: number;
+  ollamaNumPredict: number;
+  providerRequests: number;
+  revisionCount: number;
+  constraintsVersion: string;
+  modelTag: string | null;
+  modelDigest: string | null;
+  invalidCandidates: Array<{ proposals: GeneratedProposal[]; checks: CheckResult[] }>;
+};
+
 type RunOptions = {
   config: Config;
   logger: Logger;
@@ -94,7 +111,9 @@ type RunOptions = {
   request: ContentRequest;
   clock?: Clock;
   maxProviderRequests?: number;
+  maxRevisions?: number;
   signal?: AbortSignal;
+  resume?: WorkflowResume;
   onCheckpoint?: (state: GenerationState) => void;
 };
 
@@ -127,11 +146,28 @@ export async function generateContentDrafts(options: {
 
 export async function runContentWorkflow(options: RunOptions): Promise<GenerationState> {
   const clock = options.clock ?? systemClock;
-  const limits = createLimits(
-    options.config,
-    clock.now(),
-    options.maxProviderRequests ?? MAX_PROVIDER_REQUESTS,
-  );
+  const resume = options.resume;
+  const config = resume
+    ? {
+        ...options.config,
+        llmAttemptTimeoutMs: resume.attemptTimeoutMs,
+        ollamaNumCtx: resume.ollamaNumCtx,
+        ollamaNumPredict: resume.ollamaNumPredict,
+      }
+    : options.config;
+  const limits: ExecutionLimits = resume
+    ? {
+        deadlineAt: resume.deadlineAt,
+        attemptTimeoutMs: config.llmAttemptTimeoutMs,
+        maxProviderRequests: resume.maxProviderRequests,
+        providerRequests: resume.providerRequests,
+      }
+    : createLimits(
+        options.config,
+        clock.now(),
+        options.maxProviderRequests ?? MAX_PROVIDER_REQUESTS,
+      );
+  const checkpointState = recordOf(resume?.checkpoint);
   const controller = new AbortController();
   const onExternalAbort = () => {
     if (!controller.signal.aborted) {
@@ -140,56 +176,84 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
   };
   if (options.signal?.aborted) onExternalAbort();
   else options.signal?.addEventListener('abort', onExternalAbort);
-  const timer = setTimeout(() => {
-    if (!controller.signal.aborted) controller.abort(workflowTimeout());
-  }, options.config.workflowTimeoutMs);
+  const timer = setTimeout(
+    () => {
+      if (!controller.signal.aborted) controller.abort(workflowTimeout());
+    },
+    Math.max(0, limits.deadlineAt - clock.now()),
+  );
   const state: GenerationState = {
     request: options.request,
-    phase: 'vocabulary',
+    phase: phaseOf(checkpointState.phase),
     status: 'RUNNING',
-    candidateVersion: 0,
-    revisionCount: 0,
+    candidateVersion: countOf(checkpointState.candidateVersion),
+    revisionCount: resume?.revisionCount ?? 0,
     deadlineAt: limits.deadlineAt,
     attemptTimeoutMs: limits.attemptTimeoutMs,
     maxProviderRequests: limits.maxProviderRequests,
-    providerRequests: 0,
-    checks: [],
-    history: [],
-    usage: [],
-    modelTag: options.config.ollamaModel,
-    modelDigest: null,
+    providerRequests: limits.providerRequests,
+    checks: Array.isArray(checkpointState.checks) ? (checkpointState.checks as CheckResult[]) : [],
+    history: Array.isArray(checkpointState.history)
+      ? (checkpointState.history as AttemptSummary[])
+      : [],
+    usage: Array.isArray(checkpointState.usage) ? (checkpointState.usage as LlmUsage[]) : [],
+    modelTag: resume?.modelTag ?? config.ollamaModel,
+    modelDigest: resume?.modelDigest ?? null,
+    vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
+    candidate: Array.isArray(checkpointState.candidate)
+      ? (checkpointState.candidate as GeneratedProposal[])
+      : undefined,
   };
   const llm: LlmCall = {
-    config: options.config,
+    config,
     logger: options.logger,
     requestId: options.requestId,
     limits,
     signal: controller.signal,
     clock,
     usage: state.usage,
-    observed: { modelTag: options.config.ollamaModel, modelDigest: null },
+    observed: { modelTag: config.ollamaModel, modelDigest: null },
+    expectedModelTag: resume?.modelTag,
+    expectedModelDigest: resume?.modelDigest,
   };
   try {
     if (expired(controller, limits, clock)) {
       failExpired(state, controller);
     } else {
-      state.constraintsVersion = (
-        await readGenerationConstraints({
-          config: options.config,
-          signal: controller.signal,
-        })
-      ).version;
+      const constraints = await readGenerationConstraints({
+        config,
+        signal: controller.signal,
+      });
+      if (resume && constraints.version !== resume.constraintsVersion) {
+        throw new AppError(
+          409,
+          'CONSTRAINTS_VERSION_CHANGED',
+          'The recorded generation constraints are no longer available.',
+        );
+      }
+      state.constraintsVersion = constraints.version;
     }
     if (state.status === 'RUNNING' && expired(controller, limits, clock)) {
       failExpired(state, controller);
     }
     if (state.status === 'RUNNING') {
-      const vocabulary = await selectVocabulary({ ...llm, request: options.request });
-      state.vocabulary = vocabulary;
-      checkpoint(state, limits, options, llm);
+      const vocabulary =
+        state.vocabulary ?? (await selectVocabulary({ ...llm, request: options.request }));
+      if (!state.vocabulary) {
+        state.vocabulary = vocabulary;
+        checkpoint(state, limits, options, llm);
+      }
 
-      let feedback: readonly ValidationIssue[] | undefined;
-      const invalid = new Map<string, CheckResult[]>();
+      let feedback: readonly ValidationIssue[] | undefined =
+        resume && state.candidate && state.revisionCount > 0
+          ? blockingIssues(state.checks)
+          : undefined;
+      const invalid = new Map<string, CheckResult[]>(
+        resume?.invalidCandidates.map((item) => [fingerprint(item.proposals), item.checks]),
+      );
+      if (resume && state.candidate && state.checks.length > 0) {
+        invalid.set(fingerprint(state.candidate), state.checks);
+      }
       while (state.status === 'RUNNING') {
         const produced = await nextCandidate(state, llm, vocabulary, feedback);
         if (expired(controller, limits, clock)) {
@@ -370,7 +434,7 @@ function tryRevise(
   options: RunOptions,
   issues: readonly ValidationIssue[],
 ): boolean {
-  if (state.revisionCount >= MAX_REVISIONS) {
+  if (state.revisionCount >= (options.maxRevisions ?? MAX_REVISIONS)) {
     fail(
       state,
       new AppError(
@@ -429,6 +493,7 @@ function present(requestId: string, state: GenerationState): GenerationResult {
     code: 'INTERNAL_ERROR',
     message: 'Internal server error.',
     status: 500,
+    retryable: false,
   };
   throw new AppError(error.status, error.code, error.message);
 }
@@ -463,7 +528,32 @@ function checkpoint(
 function fail(state: GenerationState, err: AppError) {
   state.status = 'FAILED';
   state.phase = 'finished';
-  state.error = { code: err.code, message: err.message, status: err.status };
+  state.error = {
+    code: err.code,
+    message: err.message,
+    status: err.status,
+    retryable: err.retryable,
+  };
+}
+
+function phaseOf(value: unknown): GenerationState['phase'] {
+  return value === 'vocabulary' ||
+    value === 'generation' ||
+    value === 'checks' ||
+    value === 'revision' ||
+    value === 'finished'
+    ? value
+    : 'vocabulary';
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function countOf(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 function expired(controller: AbortController, limits: ExecutionLimits, clock: Clock) {
@@ -502,5 +592,11 @@ function issueCodes(checks: readonly CheckResult[]): string[] {
 }
 
 function fingerprint(proposals: readonly GeneratedProposal[]) {
-  return JSON.stringify(proposals);
+  return JSON.stringify(
+    proposals.map((proposal) => {
+      const copy = { ...proposal } as GeneratedProposal & { localId?: string };
+      delete copy.localId;
+      return copy;
+    }),
+  );
 }

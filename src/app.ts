@@ -6,6 +6,7 @@ import {
   createContentGeneration,
   getContentGeneration,
   idempotencyKeyFrom,
+  resumeContentGeneration,
 } from './content/runs.ts';
 import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
@@ -97,11 +98,32 @@ export function createApp(options: {
   app.get('/workflows/:id', auth, (req, res, next) => {
     try {
       res.json(
-        getContentGeneration(requireStore(options.store), String(req.params.id), actorIdFrom(req)),
+        getContentGeneration(
+          requireStore(options.store),
+          String(req.params.id),
+          actorIdFrom(req),
+          options.clock?.now(),
+        ),
       );
     } catch (err) {
       next(err);
     }
+  });
+  app.post('/workflows/:id/resume', auth, (req, res, next) => {
+    void withRequestAbort(res, next, async (signal) => {
+      const resource = await resumeContentGeneration({
+        store: requireStore(options.store),
+        config: options.config,
+        logger: res.locals.log as Logger,
+        requestId: res.locals.requestId as string,
+        ownerId: actorIdFrom(req),
+        id: String(req.params.id),
+        clock: options.clock,
+        maxProviderRequests: options.maxProviderRequests,
+        signal,
+      });
+      res.json(resource);
+    });
   });
   if (options.testRoutes) {
     let protectedHits = 0;

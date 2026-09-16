@@ -241,18 +241,29 @@ export async function ollamaModelReady(
   config: Config,
   signal?: AbortSignal,
 ): Promise<'ok' | 'missing' | 'unavailable'> {
+  return (await ollamaModelInfo(config, signal)).status;
+}
+
+export async function ollamaModelInfo(
+  config: Config,
+  signal?: AbortSignal,
+): Promise<{ status: 'ok' | 'missing' | 'unavailable'; digest: string | null }> {
   const timeout = AbortSignal.timeout(2000);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   try {
     const response = await fetch(ollamaUrl(config.ollamaBaseUrl, 'api/tags'), { signal: combined });
     if (!response.ok) {
       cancelBody(response);
-      return 'unavailable';
+      return { status: 'unavailable', digest: null };
     }
     const json: unknown = JSON.parse(await readBody(response, combined, combined));
-    return listedModel(json, config.ollamaModel) ? 'ok' : 'missing';
+    const model = listedModel(json, config.ollamaModel);
+    return {
+      status: model ? 'ok' : 'missing',
+      digest: typeof model?.digest === 'string' && model.digest.length > 0 ? model.digest : null,
+    };
   } catch {
-    return 'unavailable';
+    return { status: 'unavailable', digest: null };
   }
 }
 
