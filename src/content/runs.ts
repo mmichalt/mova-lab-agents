@@ -241,6 +241,7 @@ async function executePersistedRun(
         consumed: input.consumed,
         candidate: input.candidate,
       });
+      if (input.candidate) saved.add(input.candidate.candidateVersion);
     } catch (err) {
       throw sqliteUnavailable(err);
     }
@@ -306,7 +307,6 @@ function candidateRow(state: GenerationState, saved: Set<number>, createdAt: num
   if (!state.candidate || state.candidateVersion < 1 || saved.has(state.candidateVersion)) {
     return undefined;
   }
-  saved.add(state.candidateVersion);
   return {
     candidateVersion: state.candidateVersion,
     proposals: withLocalIds(state.candidate),

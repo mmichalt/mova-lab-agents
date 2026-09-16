@@ -16,10 +16,12 @@ import {
   instantClock,
   listen,
   runtimeReply,
+  scriptedChats,
   sequentialReply,
   teacherRequest,
   testEnv,
 } from './drafts-harness.ts';
+import { chatEnvelope, generatedContent } from './fixtures/ollama.ts';
 
 const logger = createLogger('silent');
 
@@ -264,6 +266,42 @@ test('create requires actor and idempotency headers and does not persist invalid
   const invalid = await createRun(url, { body: { theme: 'тварини' } });
   assert.equal(invalid.status, 400);
   assert.equal(store.getRunByIdempotency('teacher-1', 'key-1'), undefined);
+});
+
+test('a failed candidate checkpoint is retried on the terminal write', async (t) => {
+  const store = tempStore(t);
+  const save = store.saveCheckpoint.bind(store);
+  let rejected = false;
+  store.saveCheckpoint = (input) => {
+    if (input.candidate && !rejected) {
+      rejected = true;
+      throw new Error('checkpoint busy');
+    }
+    return save(input);
+  };
+  const duplicate = JSON.parse(generatedContent) as {
+    proposals: Array<Record<string, unknown>>;
+  };
+  duplicate.proposals[1] = { ...duplicate.proposals[1], phrase: duplicate.proposals[0]?.phrase };
+  const { url } = await startService(t, {
+    store,
+    reply: scriptedChats({
+      generation: {
+        status: 200,
+        json: chatEnvelope({
+          message: { role: 'assistant', content: JSON.stringify(duplicate) },
+        }),
+      },
+    }),
+  });
+  const response = await createRun(url, { key: 'checkpoint-retry' });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.candidateVersion, 1);
+  assert.equal(body.result.proposals.length, 2);
+  assert.equal(body.candidates.length, 1);
+  assert.equal(body.candidates[0].candidateVersion, 1);
 });
 
 test('GET /ready checks sqlite and model tags without generation; /health stays independent', async (t) => {
