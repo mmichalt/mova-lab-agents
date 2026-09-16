@@ -18,6 +18,7 @@ import {
   chatKind,
   chatOf,
   completedAttempts,
+  fakeMovaLab,
   instantClock,
   listen,
   type OllamaCall,
@@ -28,7 +29,9 @@ import {
   scriptedChats,
   sequentialReply,
   teacherRequest,
+  testEnv,
   userJson,
+  workflowLog,
 } from './drafts-harness.ts';
 import {
   chatEnvelope,
@@ -212,10 +215,12 @@ test('invalid requests and missing tokens never call the provider', async (t) =>
   assert.equal(invalid.response.status, 400);
   assert.equal((await invalid.response.json()).error.code, 'VALIDATION_ERROR');
   assert.equal(invalid.ollama.calls.length, 0);
+  assert.equal(invalid.movaLab.calls.length, 0);
 
   const unauthorized = await postDrafts(t, { token: null });
   assert.equal(unauthorized.response.status, 401);
   assert.equal(unauthorized.ollama.calls.length, 0);
+  assert.equal(unauthorized.movaLab.calls.length, 0);
 });
 
 test('failed vocabulary selection does not generate exercises', async (t) => {
@@ -509,6 +514,42 @@ test('vocabulary failure logs identify the step without raw words', async (t) =>
   assert.equal(invalid.logs.includes('риба'), false);
 });
 
+test('refusal reasons and reviewer codes do not enter ordinary logs', async (t) => {
+  const marker = 'SECRET_TEACHER_MARKER';
+  const refused = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({ status: 'refused', reason: marker }),
+    },
+  });
+  const vocab = await postDrafts(t, { reply: sequentialReply(refused) });
+  assert.equal(vocab.response.status, 422);
+  assert.equal(vocab.logs.includes(marker), false);
+  assert.equal(
+    JSON.parse(vocab.logs.split('\n').find((line) => line.includes('model refused')) ?? '{}')
+      .reason,
+    undefined,
+  );
+
+  const invented = chatEnvelope({
+    message: {
+      role: 'assistant',
+      content: JSON.stringify({
+        status: 'failed',
+        issues: [{ code: marker, severity: 'error', message: marker }],
+      }),
+    },
+  });
+  const review = await postDrafts(t, {
+    reply: scriptedChats({
+      age: { status: 200, json: invented },
+      language: { status: 200, json: chatFixtures.reviewPassed },
+    }),
+  });
+  assert.equal(review.logs.includes(marker), false);
+  assert.equal((workflowLog(review.logs).issueCodes as string[]).includes(marker), false);
+});
+
 const outcomeCases: Array<{
   name: string;
   reply: OllamaReply | ((call: OllamaCall) => OllamaReply);
@@ -631,11 +672,14 @@ for (const { name, reply, status, code, timeoutMs } of outcomeCases) {
 }
 
 test('unreachable Ollama is unavailable', async (t) => {
-  const config = loadConfig({
-    SERVICE_TOKEN: 'test-token',
-    OLLAMA_BASE_URL: 'http://127.0.0.1:9',
-    LLM_ATTEMPT_TIMEOUT_MS: '200',
-  });
+  const movaLab = await fakeMovaLab(t);
+  const config = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: 'http://127.0.0.1:9',
+      MOVA_LAB_BASE_URL: movaLab.url,
+      LLM_ATTEMPT_TIMEOUT_MS: '200',
+    }),
+  );
   const { server, url } = await listen(
     createApp({ config, logger: createLogger('silent'), clock: instantClock() }),
   );

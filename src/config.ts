@@ -24,6 +24,9 @@ const schema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535),
   LOG_LEVEL: z.enum(logLevels),
   SERVICE_TOKEN: z.string().trim().min(1).regex(/^\S+$/),
+  MOVA_LAB_BASE_URL: httpOrigin,
+  MOVA_LAB_SERVICE_TOKEN: z.string().trim().min(1).regex(/^\S+$/),
+  MOVA_LAB_TIMEOUT_MS: timeoutMs,
   OLLAMA_BASE_URL: httpOrigin,
   OLLAMA_MODEL: z.string().trim().min(1).regex(/^\S+$/),
   OLLAMA_NUM_CTX: positiveInt,
@@ -41,6 +44,9 @@ export type Config = {
   port: number;
   logLevel: (typeof logLevels)[number];
   serviceToken: string;
+  movaLabBaseUrl: string;
+  movaLabServiceToken: string;
+  movaLabTimeoutMs: number;
   ollamaBaseUrl: string;
   ollamaModel: string;
   ollamaNumCtx: number;
@@ -55,6 +61,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     PORT: env.PORT?.trim() || '3000',
     LOG_LEVEL: env.LOG_LEVEL?.trim() || 'info',
     SERVICE_TOKEN: env.SERVICE_TOKEN,
+    MOVA_LAB_BASE_URL: env.MOVA_LAB_BASE_URL,
+    MOVA_LAB_SERVICE_TOKEN: env.MOVA_LAB_SERVICE_TOKEN,
+    MOVA_LAB_TIMEOUT_MS: env.MOVA_LAB_TIMEOUT_MS?.trim() || '10000',
     OLLAMA_BASE_URL: env.OLLAMA_BASE_URL?.trim() || 'http://localhost:11434',
     OLLAMA_MODEL: env.OLLAMA_MODEL?.trim() || 'qwen3:4b-instruct',
     OLLAMA_NUM_CTX: env.OLLAMA_NUM_CTX?.trim() || '4096',
@@ -70,6 +79,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: parsed.data.PORT,
     logLevel: parsed.data.LOG_LEVEL,
     serviceToken: parsed.data.SERVICE_TOKEN,
+    movaLabBaseUrl: parsed.data.MOVA_LAB_BASE_URL,
+    movaLabServiceToken: parsed.data.MOVA_LAB_SERVICE_TOKEN,
+    movaLabTimeoutMs: parsed.data.MOVA_LAB_TIMEOUT_MS,
     ollamaBaseUrl: parsed.data.OLLAMA_BASE_URL,
     ollamaModel: parsed.data.OLLAMA_MODEL,
     ollamaNumCtx: parsed.data.OLLAMA_NUM_CTX,

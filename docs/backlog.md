@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-011, AG-015, and AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-013, AG-015, and AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -43,8 +43,8 @@ are stable identifiers, not issue numbers from an external tracker.
 
 ### Milestone 2 — Tools and durable human approval
 
-- [ ] [AG-012 — Internal read APIs in Mova-Lab](#ag-012)
-- [ ] [AG-013 — Validated Mova-Lab HTTP functions](#ag-013)
+- [x] [AG-012 — Internal read APIs in Mova-Lab](#ag-012)
+- [x] [AG-013 — Validated Mova-Lab HTTP functions](#ag-013)
 - [ ] [AG-014 — Bounded model-selected tool calling](#ag-014)
 - [x] [AG-015 — SQLite persistence and migrations](#ag-015)
 - [ ] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
@@ -737,7 +737,7 @@ permissions remain authoritative.
 **Stage:** 6  
 **Repository:** `mova-lab` — companion backend work  
 **Dependencies:** [AG-011](#ag-011)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Learn an explicit service boundary that
 provides authoritative application information without database access.
@@ -762,13 +762,18 @@ empty search results.
 **Out of scope:** Content mutation, publication, semantic duplicate detection,
 and importing the agent service into the Mova-Lab monorepo.
 
+Recorded in the companion `mova-lab` repository: unversioned
+`GET /api/internal/content-generation/{constraints,categories,recording-exercises/search}`
+with `AGENTS_API_SERVICE_TOKEN`, contract version `recording-generation/v1`,
+server-side search bounds, and no vocabulary endpoint.
+
 ### AG-013
 
 **Title:** Add validated Mova-Lab HTTP functions  
 **Stage:** 6  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-012](#ag-012)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand deterministic service calls before
 letting a model request tools.
@@ -792,6 +797,15 @@ query limits, response validation, malformed payloads, timeout, and abort behavi
 
 **Out of scope:** Model-selected calls, arbitrary HTTP tools, direct database access,
 and a universal API client framework.
+
+Recorded: `src/tools/mova-lab.ts` uses native `fetch` against the AG-012 routes.
+`MOVA_LAB_BASE_URL` and `MOVA_LAB_SERVICE_TOKEN` are required and separate from
+inbound `SERVICE_TOKEN`. `readGenerationConstraints` runs before vocabulary
+selection; lookup/contract failures return `503`/`502`/`504` without provider
+calls. Search accepts only `q`/`limit`, strips extra item fields, and
+`exactPhraseMatches` uses content-check normalization. Empty hits are not
+treated as uniqueness. Tests in `tests/mova-lab.test.ts` cover the fake HTTP
+contract; ordinary `npm test` does not contact Mova-Lab.
 
 ### AG-014
 

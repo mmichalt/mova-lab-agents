@@ -1,5 +1,5 @@
 export const WORKFLOW_VERSION = 'content-drafts/v1';
-export const CONSTRAINTS_VERSION = 'recording-rl-easy/v1';
+export const CONSTRAINTS_VERSION = 'recording-generation/v1';
 export const SCHEMA_VERSION = 'recording-proposal/v1';
 export const SQLITE_BUSY_TIMEOUT_MS = 5000;
 

@@ -25,3 +25,4 @@ jobs:
       - run: docker compose config -q
         env:
           SERVICE_TOKEN: ci
+          MOVA_LAB_SERVICE_TOKEN: ci-mova-lab

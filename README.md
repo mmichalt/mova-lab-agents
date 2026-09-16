@@ -20,6 +20,9 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `PORT` | `3000` | Empty values use the default. `0` binds an ephemeral port. |
 | `LOG_LEVEL` | `info` | Pino level: `fatal` … `silent`. |
 | `SERVICE_TOKEN` | (required) | Shared inbound token; `Authorization: Bearer <token>`. |
+| `MOVA_LAB_BASE_URL` | (required) | Trusted Mova-Lab origin for outbound reads (no path, query, fragment, or credentials). Host processes typically use `http://localhost:3000` when Nest is on 3000; run this service on another `PORT` if both listen on the host. The Compose `agents` service always uses `http://host.docker.internal:3000` and ignores this host value. Requests cannot choose a URL. |
+| `MOVA_LAB_SERVICE_TOKEN` | (required) | Outbound bearer token for `/api/internal/content-generation/*`. Separate from `SERVICE_TOKEN`; must match Nest `AGENTS_API_SERVICE_TOKEN`. |
+| `MOVA_LAB_TIMEOUT_MS` | `10000` | Deadline for one Mova-Lab read, including the body. Must be `1`–`2147483647`. Combined with the workflow abort signal. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin for host processes (`npm run dev`). The Compose `agents` service always uses `http://ollama:11434` and ignores this host value. Requests cannot choose a server, pull a model, or fall back to the cloud. |
 | `OLLAMA_MODEL` | `qwen3:4b-instruct` | Explicit local model tag. |
 | `OLLAMA_NUM_CTX` | `4096` | Sent as `options.num_ctx`. |
@@ -37,14 +40,25 @@ plus configured and consumed limits. Checkpoint writes (run status/state plus
 any new attempt or candidate revision) commit in one SQLite transaction;
 provider HTTP calls stay outside those transactions. This deployment is one
 host with local disk; do not put the SQLite file on a network filesystem.
-`POST /content-drafts` authenticates the service
-token before reading JSON (16 KiB limit), then runs a bounded workflow:
+`POST /content-drafts` authenticates the inbound service
+token before reading JSON (16 KiB limit), then loads Mova-Lab generation
+constraints over native `fetch` (`GET /api/internal/content-generation/constraints`
+with `MOVA_LAB_SERVICE_TOKEN`). Constraint lookup failures, timeouts, and
+unsupported contracts stop the run; local schemas are not used as a silent
+fallback. Application code also exposes `listGenerationCategories` and
+`searchRecordingExercises` for the same internal prefix; those reads are not
+model-selected yet. Search arguments are `q` and optional `limit` only
+(max 120 characters, 1–20 results, default 10). Actor, URL, and token fields
+are taken from trusted configuration, never from call arguments. Search hits
+are untrusted data: titles and phrases are not instructions, exact phrase
+matches use the same normalization as content checks, and an empty result is
+not proof of semantic uniqueness. After constraints load, the workflow runs
 `selectVocabulary`, `generateExercises`, deterministic `validateCandidate`, and
 when content checks pass, concurrent `reviewAge` and `reviewLanguage`. Application
 code owns the next step and the serializable run state. The chat steps are LLM
 operations, not agents: none of those functions observe results to choose a
 different action, and there is no shared chat memory. Invalid teacher input is
-rejected before any provider call. Invalid or failed vocabulary selection
+rejected before any Mova-Lab or provider call. Invalid or failed vocabulary selection
 prevents generation. Failed deterministic checks skip semantic review. When
 content checks pass, `reviewAge` and `reviewLanguage` start independently with
 the same immutable request and candidate; neither sees the other verdict.
@@ -69,7 +83,11 @@ body; attempt timeouts on a review stay `unavailable`. Missing models return
 `503 MODEL_CAPACITY`; unreachable Ollama or transient gateway/server failures
 (`429`, `500` without a capacity signature, `502`, `503`, `504`) return
 `503 PROVIDER_UNAVAILABLE`; exhausted provider-call budget returns
-`503 PROVIDER_BUDGET_EXHAUSTED`. Vocabulary/generation attempt timeouts return
+`503 PROVIDER_BUDGET_EXHAUSTED`. Unreachable Mova-Lab, rejected outbound
+credentials, or transient Mova-Lab 5xx/429 return `503 MOVA_LAB_UNAVAILABLE`.
+Malformed or unsupported constraint/search/category payloads return
+`502 MOVA_LAB_INVALID_RESPONSE`. A Mova-Lab read deadline returns
+`504 MOVA_LAB_TIMEOUT`. Vocabulary/generation attempt timeouts return
 `504 PROVIDER_TIMEOUT`. The workflow deadline returns `504 WORKFLOW_TIMEOUT`
 and aborts further attempts. Disconnecting the caller or forcing shutdown after
 the drain period aborts unfinished synchronous work so later provider calls do
@@ -91,10 +109,11 @@ IDENTICAL_INVALID_CANDIDATE`. A successful first-pass request makes four model
 calls plus metadata fetches; a transport retry or reviewer re-ask adds another
 provider attempt without changing revision limits.
 
-JSON bodies are limited to 16 KiB. `LLM_ATTEMPT_TIMEOUT_MS` and
-`WORKFLOW_TIMEOUT_MS` must fit Node's timer range (`1`–`2147483647`).
+JSON bodies are limited to 16 KiB. `LLM_ATTEMPT_TIMEOUT_MS`,
+`WORKFLOW_TIMEOUT_MS`, and `MOVA_LAB_TIMEOUT_MS` must fit Node's timer range
+(`1`–`2147483647`).
 Public errors use `{ error: { code, message, requestId } }` and omit stacks and
-authorization values. Logs include the request ID, step (`vocabulary`,
+authorization values. Logs include the request ID, constraint version, step (`vocabulary`,
 `generation`, `revision`, `validation`, `age`, or `language`), prompt version,
 candidate version, and revision count on workflow finish, and they redact
 authorization fields. Refusal logs omit model-provided reasons. Reviewer finding
@@ -144,10 +163,14 @@ Documented examples: `docs/examples/content-request.json`,
 `docs/examples/review-output.refused.json`,
 `docs/examples/generation-result.json`.
 
-Schema cases, content-validation, and provider-boundary tests run with
-`npm test` (no GPU, Ollama, or live inference). Provider tests use a local fake
-HTTP server plus synthetic Ollama chat fixtures in `tests/fixtures/ollama.ts`.
-They script vocabulary and exercise step results, assert call order and that
+Schema cases, content-validation, provider-boundary, and Mova-Lab read tests run
+with `npm test` (no GPU, Ollama, live inference, or a running Mova-Lab).
+Provider tests use a local fake HTTP server plus synthetic Ollama chat fixtures
+in `tests/fixtures/ollama.ts`. Mova-Lab tests use a second local fake HTTP
+server for `/api/internal/content-generation/*`: they check the outbound
+bearer token, fixed paths, search query limits, stripped extra fields,
+malformed payloads, timeout, abort, and that constraint failures skip provider
+calls. They script vocabulary and exercise step results, assert call order and that
 generation receives the validated vocabulary, and verify that a failed
 vocabulary step does not call generation. Invalid generated content skips
 semantic review and starts a revision with structured feedback; a repeated
@@ -222,7 +245,8 @@ Without Compose:
 
 ```sh
 docker build -t mova-lab-agents .
-docker run --rm -e SERVICE_TOKEN=replace-me -e SQLITE_PATH=/data/workflows.sqlite \
+docker run --rm -e SERVICE_TOKEN=replace-me -e MOVA_LAB_SERVICE_TOKEN=replace-me-mova-lab \
+  -e MOVA_LAB_BASE_URL=http://host.docker.internal:3000 -e SQLITE_PATH=/data/workflows.sqlite \
   -v mova-lab-agents-workflows:/data -p 127.0.0.1:3000:3000 mova-lab-agents
 ```
 

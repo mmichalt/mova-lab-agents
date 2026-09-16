@@ -9,12 +9,13 @@ import {
   VOCABULARY_PROMPT_VERSION,
 } from '../src/content/generate.ts';
 import { contentRequestSchema } from '../src/content/schemas.ts';
+import { testEnv } from './drafts-harness.ts';
 import { assessGeneration } from './properties.ts';
 
 const corpus = JSON.parse(readFileSync(new URL('../evals/corpus.json', import.meta.url), 'utf8'));
 const runtime = JSON.parse(readFileSync(new URL('../evals/runtime.json', import.meta.url), 'utf8'));
 const compose = readFileSync(new URL('../compose.yaml', import.meta.url), 'utf8');
-const defaults = loadConfig({ SERVICE_TOKEN: 'x' });
+const defaults = loadConfig(testEnv({ SERVICE_TOKEN: 'x' }));
 
 const cases = corpus.cases as Array<{
   id: string;

@@ -6,14 +6,25 @@ import { loadConfig } from '../src/config.ts';
 import type { Clock } from '../src/llm/execution.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
+import { EXPECTED_CONSTRAINTS } from '../src/tools/mova-lab.ts';
 import { chatFixtures } from './fixtures/ollama.ts';
 
 export type ChatKind = 'vocabulary' | 'generation' | 'revision' | 'age' | 'language';
 export type OllamaCall = { method: string; url: string; body: unknown };
+export type MovaLabCall = { method: string; url: string; authorization: string | undefined };
 export type OllamaReply =
   | { hang: true }
   | { hangBody: true; status?: number }
   | { status: number; json?: unknown; raw?: string; headers?: Record<string, string> };
+
+export function testEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    SERVICE_TOKEN: 'test-token',
+    MOVA_LAB_BASE_URL: 'http://127.0.0.1:9',
+    MOVA_LAB_SERVICE_TOKEN: 'mova-lab-token',
+    ...overrides,
+  };
+}
 
 export const teacherRequest = {
   ageYears: 7,
@@ -67,6 +78,46 @@ export async function fakeOllama(t: After, reply: (call: OllamaCall) => OllamaRe
   return { calls, url: `http://127.0.0.1:${address.port}` };
 }
 
+export async function fakeMovaLab(
+  t: After,
+  reply: (call: MovaLabCall) => OllamaReply = () => ({
+    status: 200,
+    json: EXPECTED_CONSTRAINTS,
+  }),
+) {
+  const calls: MovaLabCall[] = [];
+  const server = http.createServer((req, res) => {
+    const call: MovaLabCall = {
+      method: req.method ?? '',
+      url: req.url ?? '',
+      authorization: header(req, 'authorization'),
+    };
+    calls.push(call);
+    const result = reply(call);
+    if ('hang' in result) return;
+    if ('hangBody' in result) {
+      res.writeHead(result.status ?? 200, { 'content-type': 'application/json' });
+      res.write('{');
+      return;
+    }
+    res.writeHead(result.status, {
+      'content-type': 'application/json',
+      ...result.headers,
+    });
+    res.end(result.raw ?? JSON.stringify(result.json ?? {}));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => shutDown(server, 50));
+  const address = server.address() as AddressInfo;
+  return { calls, url: `http://127.0.0.1:${address.port}` };
+}
+
+function header(req: http.IncomingMessage, name: string) {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
 export function instantClock(overrides: Partial<Clock> = {}): Clock {
   return {
     now: () => Date.now(),
@@ -80,10 +131,12 @@ export async function postDrafts(
   t: After,
   options: {
     reply?: (call: OllamaCall) => OllamaReply;
+    movaLabReply?: (call: MovaLabCall) => OllamaReply;
     body?: unknown;
     token?: string | null;
     timeoutMs?: string;
     workflowTimeoutMs?: string;
+    movaLabTimeoutMs?: string;
     clock?: Clock;
     maxProviderRequests?: number;
     log?: ReturnType<typeof createLogger>;
@@ -93,6 +146,7 @@ export async function postDrafts(
     t,
     options.reply ?? (() => ({ status: 500, json: { error: 'unused' } })),
   );
+  const movaLab = await fakeMovaLab(t, options.movaLabReply);
   const chunks: string[] = [];
   const logger =
     options.log ??
@@ -101,12 +155,15 @@ export async function postDrafts(
         chunks.push(msg);
       },
     });
-  const config = loadConfig({
-    SERVICE_TOKEN: 'test-token',
-    OLLAMA_BASE_URL: ollama.url,
-    LLM_ATTEMPT_TIMEOUT_MS: options.timeoutMs ?? '2000',
-    WORKFLOW_TIMEOUT_MS: options.workflowTimeoutMs ?? '600000',
-  });
+  const config = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: ollama.url,
+      MOVA_LAB_BASE_URL: movaLab.url,
+      LLM_ATTEMPT_TIMEOUT_MS: options.timeoutMs ?? '2000',
+      WORKFLOW_TIMEOUT_MS: options.workflowTimeoutMs ?? '600000',
+      MOVA_LAB_TIMEOUT_MS: options.movaLabTimeoutMs,
+    }),
+  );
   const { server, url } = await listen(
     createApp({
       config,
@@ -123,7 +180,7 @@ export async function postDrafts(
     headers,
     body: JSON.stringify(options.body ?? teacherRequest),
   });
-  return { response, ollama, logs: chunks.join('\n') };
+  return { response, ollama, movaLab, logs: chunks.join('\n') };
 }
 
 export function chatCalls(calls: OllamaCall[]) {
