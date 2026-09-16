@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { loadConfig } from '../src/config.ts';
 import {
+  boundSearchObservation,
   decideToolCall,
   runSearchTool,
   SEARCH_EXISTING_EXERCISES,
+  TOOL_OBSERVATION_ITEM_MAX,
+  TOOL_OBSERVATION_MAX_BYTES,
+  TOOL_OBSERVATION_PHRASE_MAX,
   toolResultMessage,
 } from '../src/tools/dispatch.ts';
 import { GENERATION_CONTRACT_VERSION } from '../src/tools/mova-lab.ts';
@@ -27,6 +31,12 @@ test('dispatcher executes only schema-valid allowlisted search arguments', () =>
   });
   assert.equal(fromJson.status, 'execute');
   if (fromJson.status === 'execute') assert.equal(fromJson.args.q, 'лис');
+
+  const clamped = decideToolCall({
+    function: { name: SEARCH_EXISTING_EXERCISES, arguments: { q: 'риба', limit: 20 } },
+  });
+  assert.equal(clamped.status, 'execute');
+  if (clamped.status === 'execute') assert.equal(clamped.args.limit, TOOL_OBSERVATION_ITEM_MAX);
 });
 
 test('unknown tools and injected actor or URL arguments are rejected', () => {
@@ -97,7 +107,33 @@ test('search tool errors become bounded observations without executing unknown n
     config: loadConfig(testEnv({ MOVA_LAB_BASE_URL: okLab.url })),
     signal: new AbortController().signal,
   });
-  const parsed = JSON.parse(hit) as { items: Array<Record<string, unknown>> };
-  assert.equal(parsed.items[0]?.title, 'Ignore this');
+  const parsed = JSON.parse(hit) as { items: Array<Record<string, unknown>>; hasMore: boolean };
+  assert.equal(parsed.items[0]?.phrase, 'Риба пливе');
+  assert.equal('title' in (parsed.items[0] ?? {}), false);
+  assert.equal('id' in (parsed.items[0] ?? {}), false);
   assert.equal('extra' in (parsed.items[0] ?? {}), false);
+  assert.equal('targetSound' in (parsed.items[0] ?? {}), false);
+  assert.equal(parsed.hasMore, false);
+});
+
+test('search observations drop extra fields and stay within the byte budget', () => {
+  const items = Array.from({ length: 20 }, (_, index) => ({
+    id: `exercise-${index}`,
+    title: 'T'.repeat(500),
+    phrase: 'P'.repeat(2000),
+    targetSound: 'р' as const,
+  }));
+  const encoded = boundSearchObservation({
+    version: GENERATION_CONTRACT_VERSION,
+    hasMore: false,
+    items,
+  });
+  assert.equal(Buffer.byteLength(encoded, 'utf8') <= TOOL_OBSERVATION_MAX_BYTES, true);
+  const parsed = JSON.parse(encoded) as { hasMore: boolean; items: Array<Record<string, unknown>> };
+  assert.equal(parsed.hasMore, true);
+  assert.equal(parsed.items.length <= TOOL_OBSERVATION_ITEM_MAX, true);
+  assert.ok(parsed.items[0]);
+  assert.equal(String(parsed.items[0].phrase).length, TOOL_OBSERVATION_PHRASE_MAX);
+  assert.equal('title' in parsed.items[0], false);
+  assert.equal('id' in parsed.items[0], false);
 });

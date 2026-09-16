@@ -61,8 +61,9 @@ model turns, with the last turn reserved for schema-constrained vocabulary
 without tools). The dispatcher allowlists the name, validates argument objects,
 executes search sequentially, and appends the assistant `tool_calls` message plus
 matching `tool` messages with `tool_name` in call order. Unknown tools, extra
-actor/URL fields, and a fifth tool fail without executing. Retrieved text is
-passed back as data. Generation, revision, and reviews remain single structured
+actor/URL fields, and a fifth tool fail without executing. Retrieved hits are
+trimmed to phrase and target sound, at most five short examples, and a 2 KiB
+JSON observation before they go back into the prompt. Generation, revision, and reviews remain single structured
 LLM calls: they do not observe results to choose another action. Invalid teacher
 input is
 rejected before any Mova-Lab or provider call. Invalid or failed vocabulary selection

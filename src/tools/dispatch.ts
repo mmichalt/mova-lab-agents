@@ -3,9 +3,8 @@ import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import { isCancellation } from '../llm/execution.ts';
 import {
+  type RecordingSearchResult,
   SEARCH_QUERY_MAX_LENGTH,
-  SEARCH_RESULT_LIMIT_DEFAULT,
-  SEARCH_RESULT_LIMIT_MAX,
   searchArgsSchema,
   searchRecordingExercises,
 } from './mova-lab.ts';
@@ -13,6 +12,9 @@ import {
 export const SEARCH_EXISTING_EXERCISES = 'searchExistingExercises';
 export const MAX_VOCABULARY_TOOL_CALLS = 4;
 export const MAX_VOCABULARY_TURNS = 5;
+export const TOOL_OBSERVATION_ITEM_MAX = 5;
+export const TOOL_OBSERVATION_PHRASE_MAX = 120;
+export const TOOL_OBSERVATION_MAX_BYTES = 2048;
 
 export const searchExistingExercisesTool = {
   type: 'function',
@@ -35,8 +37,8 @@ export const searchExistingExercisesTool = {
           type: 'integer',
           description: 'Maximum hits to return',
           minimum: 1,
-          maximum: SEARCH_RESULT_LIMIT_MAX,
-          default: SEARCH_RESULT_LIMIT_DEFAULT,
+          maximum: TOOL_OBSERVATION_ITEM_MAX,
+          default: TOOL_OBSERVATION_ITEM_MAX,
         },
       },
     },
@@ -87,7 +89,10 @@ export function decideToolCall(raw: unknown, auditId = randomUUID()): ToolDecisi
   return {
     status: 'execute',
     name: SEARCH_EXISTING_EXERCISES,
-    args: args.data,
+    args: {
+      q: args.data.q,
+      limit: Math.min(args.data.limit, TOOL_OBSERVATION_ITEM_MAX),
+    },
     auditId,
     raw,
     id: parsed.id,
@@ -105,7 +110,7 @@ export async function runSearchTool(
       q: decision.args.q,
       limit: decision.args.limit,
     });
-    return JSON.stringify(result);
+    return boundSearchObservation(result);
   } catch (err) {
     if (isCancellation(err)) throw err;
     const code = err instanceof AppError ? err.code : 'MOVA_LAB_UNAVAILABLE';
@@ -126,6 +131,22 @@ export function toolResultMessage(decision: ToolDecision, content: string) {
   };
   if (decision.id) message.tool_call_id = decision.id;
   return message;
+}
+
+export function boundSearchObservation(result: RecordingSearchResult): string {
+  let items = result.items.slice(0, TOOL_OBSERVATION_ITEM_MAX).map((item) => ({
+    phrase: item.phrase.slice(0, TOOL_OBSERVATION_PHRASE_MAX),
+    ...(item.targetSound ? { targetSound: item.targetSound } : {}),
+  }));
+  let hasMore = result.hasMore || result.items.length > items.length;
+  if (items.some((item, index) => item.phrase !== result.items[index]?.phrase)) hasMore = true;
+  for (;;) {
+    const encoded = JSON.stringify({ hasMore, items });
+    if (Buffer.byteLength(encoded, 'utf8') <= TOOL_OBSERVATION_MAX_BYTES) return encoded;
+    if (items.length === 0) return JSON.stringify({ hasMore: true, items: [] });
+    items = items.slice(0, -1);
+    hasMore = true;
+  }
 }
 
 function readToolCall(raw: unknown, auditId: string) {

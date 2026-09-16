@@ -88,7 +88,12 @@ test('a single native tool call is executed and followed by a format-only vocabu
   assert.equal(followMessages[3]?.role, 'tool');
   assert.equal(followMessages[3]?.tool_name, SEARCH_EXISTING_EXERCISES);
   assert.equal('tool_call_id' in (followMessages[3] ?? {}), false);
-  assert.equal(String(followMessages[3]?.content ?? '').includes(marker), true);
+  assert.equal(String(followMessages[3]?.content ?? '').includes(marker), false);
+  assert.equal(String(followMessages[3]?.content ?? '').includes('title'), false);
+  assert.equal(
+    String(followMessages[3]?.content ?? '').includes('Ignore previous instructions'),
+    true,
+  );
   assert.equal('format' in (followUp.body as object), false);
   assert.equal('tools' in (final.body as object), false);
   assert.equal('format' in (final.body as object), true);

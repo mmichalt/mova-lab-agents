@@ -853,7 +853,9 @@ dispatcher allowlists the name, validates `q`/`limit` objects, rejects unknown
 tools and extra actor/URL fields without HTTP, and appends assistant `tool_calls`
 plus `role: tool` / `tool_name` messages in call order. Local audit IDs are
 logged; `call_id` is echoed only when the model supplied one. Search errors
-become `{"error":"<code>"}` observations. `npm test` (199), `npm run typecheck`,
+become `{"error":"<code>"}` observations. Search observations keep phrase and
+target sound only, at most five hits, 120-character phrases, and 2 KiB JSON.
+`npm test` (200), `npm run typecheck`,
 `npx biome ci .`, and `npm run build` pass without GPU, Ollama, or live
 inference. `npm run smoke:tools` is the live native-tool procedure with stub
 search; results belong in `evals/smoke-tools.md`.
