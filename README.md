@@ -46,18 +46,25 @@ constraints over native `fetch` (`GET /api/internal/content-generation/constrain
 with `MOVA_LAB_SERVICE_TOKEN`). Constraint lookup failures, timeouts, and
 unsupported contracts stop the run; local schemas are not used as a silent
 fallback. Application code also exposes `listGenerationCategories` and
-`searchRecordingExercises` for the same internal prefix; those reads are not
-model-selected yet. Search arguments are `q` and optional `limit` only
-(max 120 characters, 1–20 results, default 10). Actor, URL, and token fields
-are taken from trusted configuration, never from call arguments. Search hits
-are untrusted data: titles and phrases are not instructions, exact phrase
-matches use the same normalization as content checks, and an empty result is
-not proof of semantic uniqueness. After constraints load, the workflow runs
-`selectVocabulary`, `generateExercises`, deterministic `validateCandidate`, and
-when content checks pass, concurrent `reviewAge` and `reviewLanguage`. Application
-code owns the next step and the serializable run state. The chat steps are LLM
-operations, not agents: none of those functions observe results to choose a
-different action, and there is no shared chat memory. Invalid teacher input is
+`searchRecordingExercises` against the same internal prefix. Search arguments
+are `q` and optional `limit` only (max 120 characters, 1–20 results, default 10).
+Actor, URL, and token fields come from trusted configuration, never from model
+arguments. Search hits are untrusted data: titles and phrases are not
+instructions, exact phrase matches use the same normalization as content checks,
+and an empty result is not proof of semantic uniqueness. After constraints load,
+the workflow runs `selectVocabulary`, `generateExercises`, deterministic
+`validateCandidate`, and when content checks pass, concurrent `reviewAge` and
+`reviewLanguage`. Application code owns the next workflow step and the
+serializable run state. Vocabulary selection is a bounded agent loop: Ollama may
+propose native `searchExistingExercises` tool calls (at most four tools and five
+model turns, with the last turn reserved for schema-constrained vocabulary
+without tools). The dispatcher allowlists the name, validates argument objects,
+executes search sequentially, and appends the assistant `tool_calls` message plus
+matching `tool` messages with `tool_name` in call order. Unknown tools, extra
+actor/URL fields, and a fifth tool fail without executing. Retrieved text is
+passed back as data. Generation, revision, and reviews remain single structured
+LLM calls: they do not observe results to choose another action. Invalid teacher
+input is
 rejected before any Mova-Lab or provider call. Invalid or failed vocabulary selection
 prevents generation. Failed deterministic checks skip semantic review. When
 content checks pass, `reviewAge` and `reviewLanguage` start independently with
@@ -105,9 +112,12 @@ checks on every changed candidate. `READY_FOR_REVIEW` returns `200` with
 A required unavailable or refused review returns `200` with `status: "FAILED"`
 and `requiresHumanApproval: false`. Exhausted revisions return `422
 CONTENT_VALIDATION_EXHAUSTED`; an unchanged invalid candidate returns `422
-IDENTICAL_INVALID_CANDIDATE`. A successful first-pass request makes four model
-calls plus metadata fetches; a transport retry or reviewer re-ask adds another
-provider attempt without changing revision limits.
+IDENTICAL_INVALID_CANDIDATE`. A successful first-pass request with no vocabulary
+search makes five model calls plus metadata fetches (tool-selection turn, final
+vocabulary, exercises, age, language). Each search turn adds another provider
+call, still inside the five-turn vocabulary cap and the shared 20-request
+budget. A transport retry or reviewer re-ask adds another provider attempt
+without changing revision limits.
 
 JSON bodies are limited to 16 KiB. `LLM_ATTEMPT_TIMEOUT_MS`,
 `WORKFLOW_TIMEOUT_MS`, and `MOVA_LAB_TIMEOUT_MS` must fit Node's timer range
@@ -182,8 +192,12 @@ result in place, and does not revise. Controllable clocks and fake operations
 cover jittered backoff, remaining-deadline checks, aborted calls, retry
 exhaustion, and the shared provider-call budget; a 503 or 429 transport retry
 does not consume a candidate version. They inspect
-`/api/chat` path, messages, `format`/`options`, completion, refusal, errors,
-aborts, and present or missing usage. Application attempt IDs are logged with step and prompt version; provider
+`/api/chat` path, messages, `tools`/`format`/`options`, completion, refusal, errors,
+aborts, and present or missing usage. Vocabulary tool tests script native
+`tool_calls`, argument objects, `tool_name` ordering (including repeated names),
+absence of invented call IDs, malicious retrieved text, tool errors, and
+exhaustion of the four-tool / five-turn cap including the final vocabulary call.
+Application attempt IDs are logged with step and prompt version; provider
 request IDs are not fabricated. Do not treat those fixtures as quality evidence.
 
 Seeded request cases live in `evals/corpus.json` (Р, Л, both, and a 12-exercise
@@ -214,6 +228,7 @@ npx biome ci .      # CI: lint, format, and import sorting
 npm run typecheck   # tsc --noEmit
 npm test            # node:test tests/**/*.test.ts (no Ollama)
 npm run smoke:local # optional live GPU/model smoke; never part of CI
+npm run smoke:tools # optional live native tool-call smoke with stub search; never part of CI
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
 ```
@@ -322,9 +337,9 @@ when `size_vram` is not exactly equal to `size` (partial CPU offload, including
 values that would round to 100%). HTTP `200` with `status: "FAILED"` is not a
 ready candidate: the report records workflow status, first-attempt readiness,
 revision-assisted recovery, and quality properties separately. First-attempt
-readiness requires passed checks, no content revision, and exactly four provider
-calls; a reviewer re-ask is extra provider work even when `revisionCount` stays
-0. Truncation is `true` when `PROVIDER_INCOMPLETE` is observed and `null` when
+readiness requires passed checks, no content revision, and five provider
+calls when the model does not search; extra provider work may be vocabulary
+tool turns or a reviewer re-ask even when `revisionCount` stays 0. Truncation is `true` when `PROVIDER_INCOMPLETE` is observed and `null` when
 truncation history is unobserved. Do not report unobserved history as `false`.
 Property failures
 (for example missing target letters) are recorded and do not fail the process.
@@ -335,13 +350,30 @@ version, wall times, GPU percent, measured `nvidia-smi` hardware, and whether
 4096 context / 2000 output sufficed in `evals/smoke-results.md`,
 `evals/smoke-report.json`, and `evals/runtime.json`. Historical single-call
 smoke results remain historical; recheck the current workflow's maximum-size
-and revision prompts when hardware is available. A first-pass success still
-makes four model calls (vocabulary, exercises, age, language). A content or
-review failure may add a revision call and a second pair of reviews, still
-serialized by `OLLAMA_NUM_PARALLEL=1`. Wall time is not comparable to earlier
+and revision prompts when hardware is available. A first-pass success with no
+search makes five model calls (vocabulary tool-selection, final vocabulary,
+exercises, age, language). A search turn, content failure, or review failure may
+add more calls, still serialized by `OLLAMA_NUM_PARALLEL=1`. Wall time is not comparable to earlier
 baselines without noting those extra calls. If more capacity is needed,
 measure 8192 context and a larger `num_predict`, then update this README and
 the architecture plan. Wording is stochastic; do not expect identical phrases.
+
+### Local tool-calling smoke
+
+Generation quality does not prove native tool selection. `npm run smoke:tools`
+talks to live Ollama and a stub search API; it is not part of CI and does not
+require Mova-Lab. It records whether the model emitted `message.tool_calls`
+with argument objects, whether results were appended as `role: tool` /
+`tool_name` messages in call order, and whether the final vocabulary call used
+`format` without tools. Simultaneous tools-plus-format support is not assumed.
+Record results in `evals/smoke-tools.md`. A run that never calls the search
+tool is not evidence that the dispatcher works.
+
+```sh
+docker compose --profile local-model up -d ollama
+docker compose exec ollama ollama pull qwen3:4b-instruct
+npm run smoke:tools
+```
 
 ### GPU prerequisites
 

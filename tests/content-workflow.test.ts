@@ -52,10 +52,10 @@ test('first-pass success stays version 1 with no revisions', async (t) => {
   assert.equal(body.candidateVersion, 1);
   assert.equal(body.revisionCount, 0);
   assert.equal(body.requiresHumanApproval, true);
-  assert.equal(chatCalls(ollama.calls).length, 4);
+  assert.equal(chatCalls(ollama.calls).length, 5);
   assert.equal(chatsOf(ollama.calls, 'revision').length, 0);
   assert.equal(workflowLog(logs).attempts, 1);
-  assert.equal(workflowLog(logs).usageCount, 4);
+  assert.equal(workflowLog(logs).usageCount, 5);
 });
 
 test('content failure revises once and can become ready for review', async (t) => {
@@ -78,7 +78,7 @@ test('content failure revises once and can become ready for review', async (t) =
   const content = body.checks.find((check) => check.name === 'content');
   assert.ok(content && content.status !== 'unavailable');
   assert.equal(content.issues[0]?.code, LETTER_PRESENCE_ISSUE.code);
-  assert.equal(chatCalls(ollama.calls).length, 5);
+  assert.equal(chatCalls(ollama.calls).length, 6);
   const revision = chatOf(ollama.calls, 'revision') as OllamaCall;
   const payload = userJson(revision) as {
     request: unknown;
@@ -101,8 +101,8 @@ test('content failure revises once and can become ready for review', async (t) =
     /Keep the original age, sounds, difficulty, theme/,
   );
   const completed = completedAttempts(logs);
-  assert.equal(completed[2]?.step, 'revision');
-  assert.equal(completed[2]?.promptVersion, REVISION_PROMPT_VERSION);
+  assert.equal(completed[3]?.step, 'revision');
+  assert.equal(completed[3]?.promptVersion, REVISION_PROMPT_VERSION);
   assert.equal(workflowLog(logs).attempts, 2);
   assert.equal(logs.includes('Риба пливе'), false);
 });
@@ -130,7 +130,7 @@ test('blocking age review revises with structured feedback and original requirem
   assert.equal(body.status, 'READY_FOR_REVIEW');
   assert.equal(body.candidateVersion, 2);
   assert.equal(body.revisionCount, 1);
-  assert.equal(chatCalls(ollama.calls).length, 7);
+  assert.equal(chatCalls(ollama.calls).length, 8);
   const revision = userJson(chatOf(ollama.calls, 'revision') as OllamaCall) as {
     request: unknown;
     feedback: { issues: Array<{ code: string; source: string }> };
@@ -275,7 +275,7 @@ test('generation refusal does not start a revision', async (t) => {
   });
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, 'MODEL_REFUSED');
-  assert.equal(chatCalls(ollama.calls).length, 2);
+  assert.equal(chatCalls(ollama.calls).length, 3);
   assert.equal(chatsOf(ollama.calls, 'revision').length, 0);
   assert.equal(workflowLog(logs).candidateVersion, 0);
   assert.equal(workflowLog(logs).revisionCount, 0);

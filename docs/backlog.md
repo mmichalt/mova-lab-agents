@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-013, AG-015, and AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-015, AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -22,7 +22,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, ask GPT-5.6-Sol high to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
+- After ticket is implemented, ask GPT-5.6-Sol medium to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
 
 ## Ticket index
 
@@ -45,7 +45,7 @@ are stable identifiers, not issue numbers from an external tracker.
 
 - [x] [AG-012 — Internal read APIs in Mova-Lab](#ag-012)
 - [x] [AG-013 — Validated Mova-Lab HTTP functions](#ag-013)
-- [ ] [AG-014 — Bounded model-selected tool calling](#ag-014)
+- [x] [AG-014 — Bounded model-selected tool calling](#ag-014)
 - [x] [AG-015 — SQLite persistence and migrations](#ag-015)
 - [ ] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
 - [ ] [AG-017 — Claims and interrupted-run recovery](#ag-017)
@@ -813,7 +813,7 @@ contract; ordinary `npm test` does not contact Mova-Lab.
 **Stage:** 6  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-013](#ag-013)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Build the first agent loop: the model chooses
 an allowed action, observes its result, and chooses whether more work is needed.
@@ -846,6 +846,17 @@ Assert dispatcher decisions without live inference; run the local tool smoke
 separately and record its results.
 
 **Out of scope:** MCP, parallel tool execution, a supervisor, and automatic API discovery.
+
+Recorded: `selectVocabulary` offers native `searchExistingExercises` for at most
+four tool-selection turns, then a separate `format` call without tools. The
+dispatcher allowlists the name, validates `q`/`limit` objects, rejects unknown
+tools and extra actor/URL fields without HTTP, and appends assistant `tool_calls`
+plus `role: tool` / `tool_name` messages in call order. Local audit IDs are
+logged; `call_id` is echoed only when the model supplied one. Search errors
+become `{"error":"<code>"}` observations. `npm test` (199), `npm run typecheck`,
+`npx biome ci .`, and `npm run build` pass without GPU, Ollama, or live
+inference. `npm run smoke:tools` is the live native-tool procedure with stub
+search; results belong in `evals/smoke-tools.md`.
 
 ### AG-015
 

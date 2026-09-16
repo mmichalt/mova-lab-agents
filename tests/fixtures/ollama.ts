@@ -82,6 +82,7 @@ export const chatFixtures = {
       tool_calls: [{ function: { name: 'x' } }],
     },
   }),
+  noToolCall: chatEnvelope({ message: { role: 'assistant', content: '' } }),
 };
 
 export const errorBodies = {

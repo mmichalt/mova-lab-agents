@@ -8,10 +8,12 @@ const maxProviderBodyBytes = 1024 * 1024;
 
 const envelopeSchema = z.object({
   model: z.string().min(1).optional(),
-  message: z.object({
-    content: z.string().optional(),
-    tool_calls: z.array(z.unknown()).optional(),
-  }),
+  message: z
+    .object({
+      content: z.string().optional(),
+      tool_calls: z.array(z.unknown()).optional(),
+    })
+    .passthrough(),
   done: z.boolean(),
   done_reason: z.string().optional(),
   load_duration: z.number().nonnegative().optional(),
@@ -22,8 +24,18 @@ const envelopeSchema = z.object({
 
 type ChatEnvelope = z.infer<typeof envelopeSchema>;
 
+export type ChatMessage = {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string;
+  tool_calls?: unknown[];
+  tool_name?: string;
+  tool_call_id?: string;
+};
+
 export type ChatAttempt = {
   content: string;
+  toolCalls: unknown[];
+  message: ChatMessage;
   model: string;
   modelDigest: string | null;
   ollamaVersion: string | null;
@@ -33,8 +45,10 @@ export type ChatAttempt = {
 
 export async function ollamaChat(options: {
   config: Config;
-  messages: Array<{ role: 'system' | 'user'; content: string }>;
-  format: unknown;
+  messages: ChatMessage[];
+  format?: unknown;
+  tools?: unknown[];
+  allowToolCalls?: boolean;
   temperature: number;
   signal: AbortSignal;
   workflowSignal: AbortSignal;
@@ -42,17 +56,18 @@ export async function ollamaChat(options: {
   usage?: LlmUsage[];
 }): Promise<ChatAttempt> {
   const { config, signal, workflowSignal } = options;
-  const payload = {
+  const payload: Record<string, unknown> = {
     model: config.ollamaModel,
     messages: options.messages,
     stream: false,
-    format: options.format,
     options: {
       temperature: options.temperature,
       num_ctx: config.ollamaNumCtx,
       num_predict: config.ollamaNumPredict,
     },
   };
+  if (options.format !== undefined) payload.format = options.format;
+  if (options.tools !== undefined) payload.tools = options.tools;
 
   const response = await requestOllama(
     ollamaUrl(config.ollamaBaseUrl, 'api/chat'),
@@ -81,7 +96,8 @@ export async function ollamaChat(options: {
   const model = envelope.model ?? config.ollamaModel;
   const usage = usageOf(model, envelope);
   options.usage?.push(usage);
-  if (envelope.message.tool_calls && envelope.message.tool_calls.length > 0) {
+  const toolCalls = envelope.message.tool_calls ?? [];
+  if (toolCalls.length > 0 && options.allowToolCalls !== true) {
     throw new AppError(
       502,
       'PROVIDER_UNEXPECTED_TOOL_CALL',
@@ -91,13 +107,21 @@ export async function ollamaChat(options: {
   if (!envelope.done || envelope.done_reason === 'length') {
     throw new AppError(502, 'PROVIDER_INCOMPLETE', 'The model output was incomplete.');
   }
-  if (typeof envelope.message.content !== 'string') {
+  if (toolCalls.length === 0 && typeof envelope.message.content !== 'string') {
     throw new AppError(502, 'PROVIDER_INVALID_OUTPUT', 'The model returned invalid output.');
   }
 
   const runtime = await readRuntime(config, model, signal, workflowSignal);
+  const content = typeof envelope.message.content === 'string' ? envelope.message.content : '';
   return {
-    content: envelope.message.content,
+    content,
+    toolCalls,
+    message: {
+      ...(envelope.message as ChatMessage),
+      role: 'assistant',
+      content,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    },
     model,
     modelDigest: runtime.digest,
     ollamaVersion: runtime.version,
