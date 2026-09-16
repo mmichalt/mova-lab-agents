@@ -285,7 +285,7 @@ async function executePersistedRun(
   claimedToken?: string,
 ) {
   const clock = options.clock ?? systemClock;
-  const fresh = run.status === 'PENDING';
+  const fresh = claimedToken === undefined;
   const claimToken =
     claimedToken ??
     options.store.claimRun({

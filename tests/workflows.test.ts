@@ -149,6 +149,46 @@ test('resume reuses a committed vocabulary checkpoint and remaining limits', asy
   assert.equal(store.getRun(run.id)?.leaseToken, null);
 });
 
+test('resume preserves limits for an unstarted pending run', async (t) => {
+  const store = tempStore(t);
+  const run = store.createRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'pending-resume-1',
+    normalizedInput: teacherRequest,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions: PROMPT_VERSIONS,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: null,
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600_000,
+      attemptTimeoutMs: 120_000,
+      deadlineAt: 1_500,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+  const ollama = await fakeOllama(t, sequentialReply());
+  const { url } = await startService(t, {
+    store,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+
+  const response = await fetch(`${url}/workflows/${run.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.error.code, 'WORKFLOW_TIMEOUT');
+  assert.equal(chatCalls(ollama.calls).length, 0);
+});
+
 function headers(actor = 'teacher-1', key = 'key-1') {
   return {
     authorization: 'Bearer test-token',
