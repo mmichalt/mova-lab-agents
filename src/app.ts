@@ -1,10 +1,18 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.ts';
+import {
+  actorIdFrom,
+  createContentGeneration,
+  getContentGeneration,
+  idempotencyKeyFrom,
+} from './content/runs.ts';
 import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
 import { type Clock, clientDisconnected } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
+import type { WorkflowStore } from './persist/store.ts';
+import { inspectReadiness } from './ready.ts';
 
 const jsonLimitBytes = 16 * 1024;
 
@@ -23,6 +31,7 @@ export function requireServiceToken(expected: string) {
 export function createApp(options: {
   config: Config;
   logger: Logger;
+  store?: WorkflowStore;
   testRoutes?: boolean;
   clock?: Clock;
   maxProviderRequests?: number;
@@ -39,37 +48,62 @@ export function createApp(options: {
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
+  app.get('/ready', async (_req, res, next) => {
+    try {
+      const readiness = await inspectReadiness({
+        config: options.config,
+        store: options.store,
+      });
+      res.status(readiness.status === 'ok' ? 200 : 503).json(readiness);
+    } catch (err) {
+      next(err);
+    }
+  });
   const json = express.json({ limit: jsonLimitBytes });
-  app.post(
-    '/content-drafts',
-    requireServiceToken(options.config.serviceToken),
-    json,
-    async (req, res, next) => {
-      const requestAbort = new AbortController();
-      const onClose = () => {
-        if (!res.writableEnded) requestAbort.abort(clientDisconnected());
-      };
-      res.on('close', onClose);
-      try {
-        const result = await generateContentDrafts({
+  const auth = requireServiceToken(options.config.serviceToken);
+  app.post('/content-drafts', auth, json, (req, res, next) => {
+    res.setHeader('deprecation', 'true');
+    void withRequestAbort(res, next, async (signal) => {
+      res.json(
+        await generateContentDrafts({
           config: options.config,
           logger: res.locals.log as Logger,
           requestId: res.locals.requestId as string,
           body: req.body,
           clock: options.clock,
           maxProviderRequests: options.maxProviderRequests,
-          signal: requestAbort.signal,
-        });
-        res.json(result);
-      } catch (err) {
-        next(err);
-      } finally {
-        res.off('close', onClose);
-      }
-    },
-  );
+          signal,
+        }),
+      );
+    });
+  });
+  app.post('/workflows/content-generation', auth, json, (req, res, next) => {
+    void withRequestAbort(res, next, async (signal) => {
+      const created = await createContentGeneration({
+        store: requireStore(options.store),
+        config: options.config,
+        logger: res.locals.log as Logger,
+        requestId: res.locals.requestId as string,
+        ownerId: actorIdFrom(req),
+        idempotencyKey: idempotencyKeyFrom(req),
+        body: req.body,
+        clock: options.clock,
+        maxProviderRequests: options.maxProviderRequests,
+        signal,
+      });
+      res.status(created.created ? 201 : 200).json(created.resource);
+    });
+  });
+  app.get('/workflows/:id', auth, (req, res, next) => {
+    try {
+      res.json(
+        getContentGeneration(requireStore(options.store), String(req.params.id), actorIdFrom(req)),
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
   if (options.testRoutes) {
-    const auth = requireServiceToken(options.config.serviceToken);
     let protectedHits = 0;
     app.post('/__test/protected', auth, (_req, res) => {
       protectedHits += 1;
@@ -111,13 +145,43 @@ function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunc
       code: mapped.code,
       message: mapped.message,
       requestId: res.locals.requestId,
+      ...(mapped.workflowId ? { workflowId: mapped.workflowId } : {}),
     },
   });
 }
 
+function withRequestAbort(
+  res: Response,
+  next: NextFunction,
+  work: (signal: AbortSignal) => Promise<void>,
+) {
+  const requestAbort = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) requestAbort.abort(clientDisconnected());
+  };
+  res.on('close', onClose);
+  return work(requestAbort.signal)
+    .catch(next)
+    .finally(() => {
+      res.off('close', onClose);
+    });
+}
+
+function requireStore(store: WorkflowStore | undefined) {
+  if (!store) {
+    throw new AppError(503, 'SQLITE_UNAVAILABLE', 'Workflow storage is unavailable.');
+  }
+  return store;
+}
+
 function mapError(err: unknown) {
   if (err instanceof AppError) {
-    return { status: err.status, code: err.code, message: err.message };
+    return {
+      status: err.status,
+      code: err.code,
+      message: err.message,
+      workflowId: err.workflowId,
+    };
   }
   const type = typeof err === 'object' && err !== null && 'type' in err ? String(err.type) : '';
   if (type === 'entity.too.large') {

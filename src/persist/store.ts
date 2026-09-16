@@ -144,11 +144,18 @@ export type CheckpointInput = {
   candidate?: Omit<CandidateRevisionRecord, 'id' | 'runId'>;
 };
 
+export type OpenedRun = {
+  run: PersistedRun;
+  created: boolean;
+};
+
 export type WorkflowStore = {
   path: string;
   createRun: (input: CreateRunInput) => PersistedRun;
+  openRun: (input: CreateRunInput) => OpenedRun;
   getRun: (id: string) => PersistedRun | undefined;
   getRunByIdempotency: (ownerId: string, idempotencyKey: string) => PersistedRun | undefined;
+  ping: () => void;
   listAttempts: (runId: string) => StepAttemptRecord[];
   listCandidates: (runId: string) => CandidateRevisionRecord[];
   getApproval: (runId: string) => ApprovalRecord | undefined;
@@ -340,6 +347,28 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     return run;
   };
 
+  const reused = (existing: PersistedRun, inputHash: string) => {
+    if (existing.inputHash !== inputHash) {
+      throw new PersistError('CONFLICT', 'Idempotency key was reused with a different request.');
+    }
+    return { run: existing, created: false };
+  };
+
+  const openRun = (input: CreateRunInput): OpenedRun => {
+    const inputHash = hashNormalizedInput(input.normalizedInput);
+    const existing = getByKeyStmt.get(input.ownerId, input.idempotencyKey) as RunRow | undefined;
+    if (existing) return reused(mapRun(existing), inputHash);
+    try {
+      return { run: createRun(input), created: true };
+    } catch (err) {
+      if (err instanceof PersistError && err.code === 'CONFLICT') {
+        const raced = getByKeyStmt.get(input.ownerId, input.idempotencyKey) as RunRow | undefined;
+        if (raced) return reused(mapRun(raced), inputHash);
+      }
+      throw err;
+    }
+  };
+
   const saveCheckpoint = (input: CheckpointInput) =>
     wrap(() => {
       const run = readRun(input.runId);
@@ -473,7 +502,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
   return {
     path,
     createRun,
+    openRun,
     getRun: readRun,
+    ping: () => {
+      db.prepare('SELECT 1').get();
+    },
     getRunByIdempotency: (ownerId, idempotencyKey) => {
       const row = getByKeyStmt.get(ownerId, idempotencyKey) as RunRow | undefined;
       return row ? mapRun(row) : undefined;

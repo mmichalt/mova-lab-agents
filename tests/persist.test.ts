@@ -122,6 +122,69 @@ test('duplicate owner and idempotency key conflict; another owner can reuse the 
   assert.equal(store.getRunByIdempotency('teacher-1', 'key-1')?.ownerId, 'teacher-1');
 });
 
+test('openRun returns the existing run for the same hash and conflicts on a different hash', (t) => {
+  const store = tempStore(t);
+  const created = store.openRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'key-1',
+    normalizedInput,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions,
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600000,
+      attemptTimeoutMs: 120000,
+      deadlineAt: 601_000,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+  assert.equal(created.created, true);
+  const again = store.openRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'key-1',
+    normalizedInput,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions,
+    limits: created.run.limits,
+    now: 1_100,
+  });
+  assert.equal(again.created, false);
+  assert.equal(again.run.id, created.run.id);
+  const other = openWorkflowStore(store.path);
+  t.after(() => other.close());
+  const raced = other.openRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: 'key-1',
+    normalizedInput,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions,
+    limits: created.run.limits,
+    now: 1_200,
+  });
+  assert.equal(raced.run.id, created.run.id);
+  assert.throws(
+    () =>
+      store.openRun({
+        ownerId: 'teacher-1',
+        idempotencyKey: 'key-1',
+        normalizedInput: { ...normalizedInput, theme: 'їжа' },
+        workflowVersion: WORKFLOW_VERSION,
+        constraintsVersion: CONSTRAINTS_VERSION,
+        promptVersions,
+        limits: created.run.limits,
+        now: 1_300,
+      }),
+    isPersist('CONFLICT'),
+  );
+  assert.deepEqual(store.getRun(created.run.id)?.normalizedInput, normalizedInput);
+});
+
 test('saveCheckpoint is synchronous and commits attempt, candidate, and status together', (t) => {
   const store = tempStore(t);
   const run = create(store);

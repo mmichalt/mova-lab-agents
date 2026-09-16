@@ -222,15 +222,38 @@ function stringField(value: unknown, key: string) {
   return typeof field === 'string' && field.length > 0 ? field : null;
 }
 
-function modelDigest(value: unknown, model: string) {
-  if (typeof value !== 'object' || value === null || !('models' in value)) return null;
-  if (!Array.isArray(value.models)) return null;
-  const found = value.models.find((entry) => {
+function listedModel(value: unknown, model: string) {
+  if (typeof value !== 'object' || value === null || !('models' in value)) return undefined;
+  if (!Array.isArray(value.models)) return undefined;
+  return value.models.find((entry) => {
     if (typeof entry !== 'object' || entry === null) return false;
     const item = entry as Record<string, unknown>;
     return item.name === model || item.model === model;
   }) as Record<string, unknown> | undefined;
+}
+
+function modelDigest(value: unknown, model: string) {
+  const found = listedModel(value, model);
   return typeof found?.digest === 'string' && found.digest.length > 0 ? found.digest : null;
+}
+
+export async function ollamaModelReady(
+  config: Config,
+  signal?: AbortSignal,
+): Promise<'ok' | 'missing' | 'unavailable'> {
+  const timeout = AbortSignal.timeout(2000);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  try {
+    const response = await fetch(ollamaUrl(config.ollamaBaseUrl, 'api/tags'), { signal: combined });
+    if (!response.ok) {
+      cancelBody(response);
+      return 'unavailable';
+    }
+    const json: unknown = JSON.parse(await readBody(response, combined, combined));
+    return listedModel(json, config.ollamaModel) ? 'ok' : 'missing';
+  } catch {
+    return 'unavailable';
+  }
 }
 
 function mapStatus(status: number, hint: string, retryAfterMs?: number) {

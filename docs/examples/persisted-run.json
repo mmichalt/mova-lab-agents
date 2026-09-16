@@ -1,0 +1,152 @@
+{
+  "id": "22222222-2222-4222-8222-222222222222",
+  "status": "AWAITING_APPROVAL",
+  "phase": "finished",
+  "stateVersion": 3,
+  "ownerId": "teacher-1",
+  "idempotencyKey": "content-generation:11111111-1111-4111-8111-111111111111",
+  "createdAt": 1710000000000,
+  "updatedAt": 1710000005000,
+  "schemaVersion": "recording-proposal/v1",
+  "workflowVersion": "content-drafts/v1",
+  "constraintsVersion": "recording-generation/v1",
+  "promptVersions": {
+    "vocabulary": "vocabulary/v2",
+    "exercises": "exercises/v1",
+    "revision": "revision/v1",
+    "age": "age/v1",
+    "language": "language/v1"
+  },
+  "modelTag": "qwen3:4b-instruct",
+  "modelDigest": "sha256:abc",
+  "limits": {
+    "maxProviderRequests": 20,
+    "maxRevisions": 2,
+    "workflowTimeoutMs": 600000,
+    "attemptTimeoutMs": 120000,
+    "deadlineAt": 1710000600000,
+    "ollamaNumCtx": 4096,
+    "ollamaNumPredict": 2000
+  },
+  "consumed": {
+    "providerRequests": 5,
+    "revisionCount": 0
+  },
+  "request": {
+    "ageYears": 7,
+    "targetSounds": ["р", "л"],
+    "difficulty": "easy",
+    "theme": "тварини",
+    "exerciseCount": 2,
+    "teacherInstructions": "Короткі слова та прості фрази."
+  },
+  "result": {
+    "status": "AWAITING_APPROVAL",
+    "candidateVersion": 1,
+    "revisionCount": 0,
+    "providerRequests": 5,
+    "requiresHumanApproval": true,
+    "checks": [
+      {
+        "status": "passed",
+        "name": "content",
+        "issues": [
+          {
+            "source": "content",
+            "code": "LETTER_PRESENCE_ONLY",
+            "severity": "warning",
+            "message": "Cyrillic letter presence is not phonetic, hard/soft, or therapeutic validation."
+          }
+        ]
+      },
+      {
+        "status": "passed",
+        "name": "age",
+        "issues": []
+      },
+      {
+        "status": "passed",
+        "name": "language",
+        "issues": []
+      }
+    ],
+    "proposals": [
+      {
+        "localId": "proposal-1",
+        "type": "recording",
+        "title": "Риба в річці",
+        "phrase": "Риба пливе в річці",
+        "childHint": "Скажи фразу повільно",
+        "teacherNote": "Повільний темп, наголос на першому складі.",
+        "targetSound": "р",
+        "difficulty": "easy"
+      },
+      {
+        "localId": "proposal-2",
+        "type": "recording",
+        "title": "Лис і ліс",
+        "phrase": "Лис біжить до лісу",
+        "childHint": "Повтори за зразком",
+        "teacherNote": "Короткі слова; не поспішати.",
+        "targetSound": "л",
+        "difficulty": "easy"
+      }
+    ],
+    "vocabulary": {
+      "items": [{ "word": "риба", "targetSound": "р" }, { "word": "ліс", "targetSound": "л" }]
+    },
+    "error": null
+  },
+  "candidates": [
+    {
+      "candidateVersion": 1,
+      "proposals": [
+        {
+          "localId": "proposal-1",
+          "type": "recording",
+          "title": "Риба в річці",
+          "phrase": "Риба пливе в річці",
+          "childHint": "Скажи фразу повільно",
+          "teacherNote": "Повільний темп, наголос на першому складі.",
+          "targetSound": "р",
+          "difficulty": "easy"
+        },
+        {
+          "localId": "proposal-2",
+          "type": "recording",
+          "title": "Лис і ліс",
+          "phrase": "Лис біжить до лісу",
+          "childHint": "Повтори за зразком",
+          "teacherNote": "Короткі слова; не поспішати.",
+          "targetSound": "л",
+          "difficulty": "easy"
+        }
+      ],
+      "checks": [
+        {
+          "status": "passed",
+          "name": "content",
+          "issues": [
+            {
+              "source": "content",
+              "code": "LETTER_PRESENCE_ONLY",
+              "severity": "warning",
+              "message": "Cyrillic letter presence is not phonetic, hard/soft, or therapeutic validation."
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "name": "age",
+          "issues": []
+        },
+        {
+          "status": "passed",
+          "name": "language",
+          "issues": []
+        }
+      ],
+      "createdAt": 1710000005000
+    }
+  ]
+}

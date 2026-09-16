@@ -32,7 +32,11 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `SQLITE_PATH` | `data/workflows.sqlite` | Local SQLite file for workflow artifacts (runs, attempts, candidate revisions, approvals, import receipts). Empty values use the default. `:memory:` is rejected. The Compose `agents` service always uses `/data/workflows.sqlite` on the `workflows` volume. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-It does not parse a request body. Process startup opens `SQLITE_PATH`, applies
+It does not parse a request body. `GET /ready` is also unauthenticated and
+checks SQLite plus local Ollama model presence with a bounded `GET /api/tags`
+request. It does not generate text, pull weights, or call `/api/chat`.
+Liveness stays independent of readiness: `/health` remains `200` when SQLite or
+Ollama is missing. Process startup opens `SQLITE_PATH`, applies
 SQL migrations, and enables WAL, foreign keys, and a 5000 ms busy timeout.
 Creating the Express app still does not open a port or a database. Persisted
 values are JSON-serializable and include workflow/constraint/prompt versions
@@ -40,8 +44,22 @@ plus configured and consumed limits. Checkpoint writes (run status/state plus
 any new attempt or candidate revision) commit in one SQLite transaction;
 provider HTTP calls stay outside those transactions. This deployment is one
 host with local disk; do not put the SQLite file on a network filesystem.
-`POST /content-drafts` authenticates the inbound service
-token before reading JSON (16 KiB limit), then loads Mova-Lab generation
+`POST /workflows/content-generation` authenticates the inbound service token
+before reading JSON (16 KiB limit), then requires trusted backend headers
+`X-Actor-Id` and `Idempotency-Key` (1–128 non-space characters). Actor identity
+comes from that authenticated backend context, not from the JSON body or
+model output. The key is scoped to the actor and this create operation.
+The service hashes the normalized request: the same actor, key, and input
+return the existing run (`200`); a different input under the same key returns
+`409 IDEMPOTENCY_CONFLICT` without changing the original. A new run executes
+synchronously, checkpoints vocabulary, candidates, and checks, and returns
+`201` with the persisted-run representation. Successful generation reaches
+`AWAITING_APPROVAL`; execution failure is stored as `FAILED` and returned on
+the same resource. `GET /workflows/:id` returns that representation for the
+owning actor and `404` for missing or inaccessible runs. Lease tokens are not
+serialized. `POST /content-drafts` remains a development-only synchronous
+endpoint during caller migration (`Deprecation: true`). It still authenticates
+the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
 constraints over native `fetch` (`GET /api/internal/content-generation/constraints`
 with `MOVA_LAB_SERVICE_TOKEN`). Constraint lookup failures, timeouts, and
 unsupported contracts stop the run; local schemas are not used as a silent
@@ -123,8 +141,9 @@ without changing revision limits.
 JSON bodies are limited to 16 KiB. `LLM_ATTEMPT_TIMEOUT_MS`,
 `WORKFLOW_TIMEOUT_MS`, and `MOVA_LAB_TIMEOUT_MS` must fit Node's timer range
 (`1`–`2147483647`).
-Public errors use `{ error: { code, message, requestId } }` and omit stacks and
-authorization values. Logs include the request ID, constraint version, step (`vocabulary`,
+Public errors use `{ error: { code, message, requestId, workflowId? } }` and omit stacks and
+authorization values. A conflicting idempotency key includes `workflowId` of the
+existing run. Logs include the request ID, constraint version, step (`vocabulary`,
 `generation`, `revision`, `validation`, `age`, or `language`), prompt version,
 candidate version, and revision count on workflow finish, and they redact
 authorization fields. Refusal logs omit model-provided reasons. Reviewer finding
@@ -172,7 +191,8 @@ Documented examples: `docs/examples/content-request.json`,
 `docs/examples/model-output.json`, `docs/examples/model-output.refused.json`,
 `docs/examples/review-output.json`, `docs/examples/review-output.failed.json`,
 `docs/examples/review-output.refused.json`,
-`docs/examples/generation-result.json`.
+`docs/examples/generation-result.json`,
+`docs/examples/persisted-run.json`.
 
 Schema cases, content-validation, provider-boundary, and Mova-Lab read tests run
 with `npm test` (no GPU, Ollama, live inference, or a running Mova-Lab).
@@ -207,6 +227,18 @@ letter, count, assigned sounds), not exact generated strings. Prompt, model,
 sampling, and hardware metadata are in `evals/runtime.json`.
 
 Optional live generation (Ollama must already have the model):
+
+```sh
+curl -sS http://127.0.0.1:3000/workflows/content-generation \
+  -H "Authorization: Bearer $SERVICE_TOKEN" \
+  -H "X-Actor-Id: teacher-1" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d @docs/examples/content-request.json
+```
+
+`POST /content-drafts` remains available for local migration checks and returns
+`Deprecation: true`:
 
 ```sh
 curl -sS http://127.0.0.1:3000/content-drafts \
@@ -253,6 +285,7 @@ volume at `/data/workflows.sqlite` (uid `node`). GPU access uses Compose
 ```sh
 docker compose up --build -d
 curl -sS http://127.0.0.1:3000/health
+curl -sS http://127.0.0.1:3000/ready
 docker compose exec agents id          # uid=1000(node)
 docker compose exec agents ls /app/.env  # must not exist
 ```
@@ -280,12 +313,16 @@ sqlite3 data/workflows.sqlite ".backup data/workflows.backup.sqlite"
 ```
 
 `VACUUM INTO` is the same snapshot used by store tests. `npm test` covers
-migration, constraints, checkpoint rollback, close/reopen, and backup/restore
-without GPU, Ollama, or live inference.
+migration, constraints, checkpoint rollback, close/reopen, backup/restore,
+duplicate and concurrent workflow creation, conflicting idempotency hashes,
+owner access, persisted failure, and `/ready` without GPU, Ollama, or live
+inference.
 
-`GET /health` is process liveness only. Ordinary CI does not need a GPU,
-Ollama, or an LLM API key. `POST /content-drafts` uses the configured local
-Ollama URL and model; it never pulls models or falls back to a cloud provider.
+`GET /health` is process liveness only. `GET /ready` additionally checks the
+open SQLite handle and `GET /api/tags` for the configured model. Ordinary CI
+does not need a GPU, Ollama, or an LLM API key. `POST /workflows/content-generation`
+and the development-only `POST /content-drafts` use the configured local
+Ollama URL and model; they never pull models or fall back to a cloud provider.
 
 ### Local Ollama (`local-model` profile)
 
