@@ -165,6 +165,26 @@ test('malformed, unauthorized, timeout, and abort fail closed', async (t) => {
       err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_INVALID_RESPONSE',
   );
 
+  const oversized = await fakeMovaLab(t, () => ({
+    status: 200,
+    json: {
+      version: GENERATION_CONTRACT_VERSION,
+      hasMore: false,
+      items: [searchHit, { ...searchHit, id: 'exercise-2' }, { ...searchHit, id: 'exercise-3' }],
+    },
+  }));
+  await assert.rejects(
+    () =>
+      searchRecordingExercises({
+        config: labConfig(oversized.url),
+        signal: new AbortController().signal,
+        q: 'риба',
+        limit: 2,
+      }),
+    (err: unknown) =>
+      err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_INVALID_RESPONSE',
+  );
+
   const unauthorized = await fakeMovaLab(t, () => ({ status: 401, json: { message: 'no' } }));
   await assert.rejects(
     () =>

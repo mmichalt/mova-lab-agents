@@ -20,7 +20,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `PORT` | `3000` | Empty values use the default. `0` binds an ephemeral port. |
 | `LOG_LEVEL` | `info` | Pino level: `fatal` … `silent`. |
 | `SERVICE_TOKEN` | (required) | Shared inbound token; `Authorization: Bearer <token>`. |
-| `MOVA_LAB_BASE_URL` | (required) | Trusted Mova-Lab origin for outbound reads (no path, query, fragment, or credentials). Host processes typically use `http://localhost:3000` when Nest is on 3000; run this service on another `PORT` if both listen on the host. The Compose `agents` service defaults to `http://host.docker.internal:3000`. Requests cannot choose a URL. |
+| `MOVA_LAB_BASE_URL` | (required) | Trusted Mova-Lab origin for outbound reads (no path, query, fragment, or credentials). Host processes typically use `http://localhost:3000` when Nest is on 3000; run this service on another `PORT` if both listen on the host. The Compose `agents` service always uses `http://host.docker.internal:3000` and ignores this host value. Requests cannot choose a URL. |
 | `MOVA_LAB_SERVICE_TOKEN` | (required) | Outbound bearer token for `/api/internal/content-generation/*`. Separate from `SERVICE_TOKEN`; must match Nest `AGENTS_API_SERVICE_TOKEN`. |
 | `MOVA_LAB_TIMEOUT_MS` | `10000` | Deadline for one Mova-Lab read, including the body. Must be `1`–`2147483647`. Combined with the workflow abort signal. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin for host processes (`npm run dev`). The Compose `agents` service always uses `http://ollama:11434` and ignores this host value. Requests cannot choose a server, pull a model, or fall back to the cloud. |

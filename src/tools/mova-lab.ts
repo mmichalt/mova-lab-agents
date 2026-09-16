@@ -142,10 +142,11 @@ export async function searchRecordingExercises(
     searchSchema,
     { q: parsed.data.q, limit: String(parsed.data.limit) },
   );
+  if (result.items.length > parsed.data.limit) throw invalidResponse();
   return {
     version: result.version,
     hasMore: result.hasMore,
-    items: result.items.slice(0, parsed.data.limit),
+    items: result.items,
   };
 }
 
