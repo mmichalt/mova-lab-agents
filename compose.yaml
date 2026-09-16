@@ -15,6 +15,9 @@ services:
       PORT: "3000"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SERVICE_TOKEN: ${SERVICE_TOKEN:?set SERVICE_TOKEN in .env}
+      MOVA_LAB_BASE_URL: ${MOVA_LAB_BASE_URL:-http://host.docker.internal:3000}
+      MOVA_LAB_SERVICE_TOKEN: ${MOVA_LAB_SERVICE_TOKEN:?set MOVA_LAB_SERVICE_TOKEN in .env}
+      MOVA_LAB_TIMEOUT_MS: ${MOVA_LAB_TIMEOUT_MS:-10000}
       # Host .env uses localhost for npm; that hostname is this container.
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}

@@ -10,6 +10,7 @@ import {
   chatsOf,
   completedAttempts,
   failedAttempts,
+  fakeMovaLab,
   fakeOllama,
   instantClock,
   listen,
@@ -17,6 +18,7 @@ import {
   scriptedChats,
   sequentialReply,
   teacherRequest,
+  testEnv,
   workflowLog,
 } from './drafts-harness.ts';
 import { chatEnvelope, chatFixtures, errorBodies, generatedContent } from './fixtures/ollama.ts';
@@ -101,12 +103,15 @@ test('client disconnect and forced shutdown stop later provider calls', async (t
     call.url === '/api/chat' ? { hang: true as const } : { status: 200, json: {} };
 
   const disconnectOllama = await fakeOllama(t, hangChat);
-  const config = loadConfig({
-    SERVICE_TOKEN: 'test-token',
-    OLLAMA_BASE_URL: disconnectOllama.url,
-    LLM_ATTEMPT_TIMEOUT_MS: '5000',
-    WORKFLOW_TIMEOUT_MS: '600000',
-  });
+  const movaLab = await fakeMovaLab(t);
+  const config = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: disconnectOllama.url,
+      MOVA_LAB_BASE_URL: movaLab.url,
+      LLM_ATTEMPT_TIMEOUT_MS: '5000',
+      WORKFLOW_TIMEOUT_MS: '600000',
+    }),
+  );
   const { server, url } = await listen(
     createApp({ config, logger: createLogger('silent'), clock: instantClock() }),
   );
@@ -128,12 +133,14 @@ test('client disconnect and forced shutdown stop later provider calls', async (t
   const shutdownOllama = await fakeOllama(t, hangChat);
   const shutdownApp = await listen(
     createApp({
-      config: loadConfig({
-        SERVICE_TOKEN: 'test-token',
-        OLLAMA_BASE_URL: shutdownOllama.url,
-        LLM_ATTEMPT_TIMEOUT_MS: '5000',
-        WORKFLOW_TIMEOUT_MS: '600000',
-      }),
+      config: loadConfig(
+        testEnv({
+          OLLAMA_BASE_URL: shutdownOllama.url,
+          MOVA_LAB_BASE_URL: movaLab.url,
+          LLM_ATTEMPT_TIMEOUT_MS: '5000',
+          WORKFLOW_TIMEOUT_MS: '600000',
+        }),
+      ),
       logger: createLogger('silent'),
       clock: instantClock(),
     }),

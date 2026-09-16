@@ -12,6 +12,7 @@ import {
   workflowTimeout,
 } from '../llm/execution.ts';
 import type { Logger } from '../logger.ts';
+import { readGenerationConstraints } from '../tools/mova-lab.ts';
 import { generateExercises, reviseExercises, selectVocabulary } from './generate.ts';
 import { reviewAge, reviewLanguage, settleReviews } from './review.ts';
 import {
@@ -75,6 +76,7 @@ export type GenerationState = {
   attemptTimeoutMs: number;
   maxProviderRequests: number;
   providerRequests: number;
+  constraintsVersion?: string;
   vocabulary?: Vocabulary;
   candidate?: GeneratedProposal[];
   checks: CheckResult[];
@@ -162,80 +164,95 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     usage: state.usage,
   };
   try {
-    const vocabulary = await selectVocabulary({ ...llm, request: options.request });
-    state.vocabulary = vocabulary;
+    if (expired(controller, limits, clock)) {
+      failExpired(state, controller);
+    } else {
+      state.constraintsVersion = (
+        await readGenerationConstraints({
+          config: options.config,
+          signal: controller.signal,
+        })
+      ).version;
+    }
+    if (state.status === 'RUNNING' && expired(controller, limits, clock)) {
+      failExpired(state, controller);
+    }
+    if (state.status === 'RUNNING') {
+      const vocabulary = await selectVocabulary({ ...llm, request: options.request });
+      state.vocabulary = vocabulary;
 
-    let feedback: readonly ValidationIssue[] | undefined;
-    const invalid = new Map<string, CheckResult[]>();
-    while (state.status === 'RUNNING') {
-      const produced = await nextCandidate(state, llm, vocabulary, feedback);
-      if (expired(controller, limits, clock)) {
-        failExpired(state, controller);
-        break;
-      }
-      if (produced.status === 'refused') {
-        record(state, 'refused', []);
-        fail(state, refusedError());
-        break;
-      }
-      if (produced.status === 'malformed') {
-        record(state, 'malformed', [schemaIssue.code]);
-        if (!tryRevise(state, options, [schemaIssue])) break;
-        feedback = [schemaIssue];
-        continue;
-      }
+      let feedback: readonly ValidationIssue[] | undefined;
+      const invalid = new Map<string, CheckResult[]>();
+      while (state.status === 'RUNNING') {
+        const produced = await nextCandidate(state, llm, vocabulary, feedback);
+        if (expired(controller, limits, clock)) {
+          failExpired(state, controller);
+          break;
+        }
+        if (produced.status === 'refused') {
+          record(state, 'refused', []);
+          fail(state, refusedError());
+          break;
+        }
+        if (produced.status === 'malformed') {
+          record(state, 'malformed', [schemaIssue.code]);
+          if (!tryRevise(state, options, [schemaIssue])) break;
+          feedback = [schemaIssue];
+          continue;
+        }
 
-      state.candidate = produced.proposals;
-      state.candidateVersion += 1;
-      const mark = fingerprint(produced.proposals);
-      const previousChecks = invalid.get(mark);
-      if (previousChecks) {
+        state.candidate = produced.proposals;
+        state.candidateVersion += 1;
+        const mark = fingerprint(produced.proposals);
+        const previousChecks = invalid.get(mark);
+        if (previousChecks) {
+          state.phase = 'checks';
+          state.checks = previousChecks;
+          record(state, 'identical', issueCodes(state.checks));
+          fail(
+            state,
+            new AppError(
+              422,
+              'IDENTICAL_INVALID_CANDIDATE',
+              'The model repeated an invalid candidate.',
+            ),
+          );
+          break;
+        }
+
         state.phase = 'checks';
-        state.checks = previousChecks;
-        record(state, 'identical', issueCodes(state.checks));
-        fail(
-          state,
-          new AppError(
-            422,
-            'IDENTICAL_INVALID_CANDIDATE',
-            'The model repeated an invalid candidate.',
-          ),
-        );
-        break;
-      }
+        state.checks = await runChecks(state, llm, vocabulary, produced.proposals);
+        if (expired(controller, limits, clock)) {
+          failExpired(state, controller);
+          break;
+        }
+        const decision = decide(state.checks);
+        if (decision === 'pass') {
+          record(state, 'passed', []);
+          state.status = 'READY_FOR_REVIEW';
+          state.phase = 'finished';
+          break;
+        }
+        if (decision === 'unavailable') {
+          record(state, 'failed', issueCodes(state.checks));
+          fail(state, new AppError(200, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.'));
+          break;
+        }
+        if (decision === 'refused') {
+          record(state, 'failed', issueCodes(state.checks));
+          fail(
+            state,
+            new AppError(200, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.'),
+          );
+          break;
+        }
 
-      state.phase = 'checks';
-      state.checks = await runChecks(state, llm, vocabulary, produced.proposals);
-      if (expired(controller, limits, clock)) {
-        failExpired(state, controller);
-        break;
-      }
-      const decision = decide(state.checks);
-      if (decision === 'pass') {
-        record(state, 'passed', []);
-        state.status = 'READY_FOR_REVIEW';
-        state.phase = 'finished';
-        break;
-      }
-      if (decision === 'unavailable') {
         record(state, 'failed', issueCodes(state.checks));
-        fail(state, new AppError(200, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.'));
-        break;
+        invalid.set(mark, state.checks);
+        const issues = blockingIssues(state.checks);
+        if (!tryRevise(state, options, issues)) break;
+        feedback = issues;
       }
-      if (decision === 'refused') {
-        record(state, 'failed', issueCodes(state.checks));
-        fail(
-          state,
-          new AppError(200, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.'),
-        );
-        break;
-      }
-
-      record(state, 'failed', issueCodes(state.checks));
-      invalid.set(mark, state.checks);
-      const issues = blockingIssues(state.checks);
-      if (!tryRevise(state, options, issues)) break;
-      feedback = issues;
     }
   } catch (err) {
     if (state.status === 'RUNNING') {
@@ -261,6 +278,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       attempts: state.history.length,
       providerRequests: state.providerRequests,
       usageCount: state.usage.length,
+      constraintsVersion: state.constraintsVersion,
       deadlineAt: state.deadlineAt,
       errorCode: state.error?.code,
       issueCodes: loggedCodes(issueCodes(state.checks)),

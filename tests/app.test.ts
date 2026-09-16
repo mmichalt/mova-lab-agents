@@ -7,8 +7,9 @@ import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
 import { createLogger } from '../src/logger.ts';
 import { shutDown } from '../src/server.ts';
+import { testEnv } from './drafts-harness.ts';
 
-const config = loadConfig({ SERVICE_TOKEN: 'test-token' });
+const config = loadConfig(testEnv());
 const logger = createLogger('silent');
 
 async function listen(app: ReturnType<typeof createApp>) {
@@ -153,9 +154,11 @@ test('logger redacts authorization values', () => {
     },
   });
   log.info({ headers: { authorization: 'Bearer leaked-token' } }, 'check');
+  log.info({ movaLabServiceToken: 'outbound-secret' }, 'outbound');
   const text = chunks.join('');
   assert.equal(text.includes('leaked-token'), false);
   assert.equal(text.includes('Bearer'), false);
+  assert.equal(text.includes('outbound-secret'), false);
 });
 
 test('shutdown stops new work and aborts remaining work after the drain period', async () => {

@@ -18,6 +18,7 @@ import {
   chatKind,
   chatOf,
   completedAttempts,
+  fakeMovaLab,
   instantClock,
   listen,
   type OllamaCall,
@@ -28,6 +29,7 @@ import {
   scriptedChats,
   sequentialReply,
   teacherRequest,
+  testEnv,
   userJson,
 } from './drafts-harness.ts';
 import {
@@ -212,10 +214,12 @@ test('invalid requests and missing tokens never call the provider', async (t) =>
   assert.equal(invalid.response.status, 400);
   assert.equal((await invalid.response.json()).error.code, 'VALIDATION_ERROR');
   assert.equal(invalid.ollama.calls.length, 0);
+  assert.equal(invalid.movaLab.calls.length, 0);
 
   const unauthorized = await postDrafts(t, { token: null });
   assert.equal(unauthorized.response.status, 401);
   assert.equal(unauthorized.ollama.calls.length, 0);
+  assert.equal(unauthorized.movaLab.calls.length, 0);
 });
 
 test('failed vocabulary selection does not generate exercises', async (t) => {
@@ -631,11 +635,14 @@ for (const { name, reply, status, code, timeoutMs } of outcomeCases) {
 }
 
 test('unreachable Ollama is unavailable', async (t) => {
-  const config = loadConfig({
-    SERVICE_TOKEN: 'test-token',
-    OLLAMA_BASE_URL: 'http://127.0.0.1:9',
-    LLM_ATTEMPT_TIMEOUT_MS: '200',
-  });
+  const movaLab = await fakeMovaLab(t);
+  const config = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: 'http://127.0.0.1:9',
+      MOVA_LAB_BASE_URL: movaLab.url,
+      LLM_ATTEMPT_TIMEOUT_MS: '200',
+    }),
+  );
   const { server, url } = await listen(
     createApp({ config, logger: createLogger('silent'), clock: instantClock() }),
   );

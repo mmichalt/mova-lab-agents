@@ -15,6 +15,8 @@ export function createLogger(level: Config['logLevel'], stream?: pino.Destinatio
           '*.authorization',
           'serviceToken',
           '*.serviceToken',
+          'movaLabServiceToken',
+          '*.movaLabServiceToken',
         ],
         remove: true,
       },
