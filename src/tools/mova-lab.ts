@@ -95,7 +95,7 @@ const searchSchema = z.strictObject({
   items: z.array(searchHitSchema).max(SEARCH_RESULT_LIMIT_MAX),
 });
 
-const searchArgsSchema = z.strictObject({
+export const searchArgsSchema = z.strictObject({
   q: nonempty(SEARCH_QUERY_MAX_LENGTH),
   limit: z.int().min(1).max(SEARCH_RESULT_LIMIT_MAX).default(SEARCH_RESULT_LIMIT_DEFAULT),
 });

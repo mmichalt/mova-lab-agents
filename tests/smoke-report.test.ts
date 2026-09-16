@@ -31,7 +31,7 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
     status: 'READY_FOR_REVIEW',
     candidateVersion: 1,
     revisionCount: 0,
-    providerRequests: 4,
+    providerRequests: 5,
     requiresHumanApproval: true,
     checks: passedChecks,
     proposals: [
@@ -48,8 +48,8 @@ test('smoke classification distinguishes HTTP, workflow, revision, and truncatio
       { status: 'unavailable', name: 'language', errorCode: 'PROVIDER_INCOMPLETE' },
     ],
   };
-  const revised = { ...ready, revisionCount: 1, providerRequests: 7 };
-  const reasked = { ...ready, revisionCount: 0, providerRequests: 5 };
+  const revised = { ...ready, revisionCount: 1, providerRequests: 8 };
+  const reasked = { ...ready, revisionCount: 0, providerRequests: 6 };
   const first = classifySmokeRun(request, {
     httpOk: true,
     status: 200,

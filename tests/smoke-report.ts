@@ -3,7 +3,7 @@ import { assessGeneration, type QualityFinding } from './properties.ts';
 
 export const SMOKE_META_TIMEOUT_MS = 5_000;
 export const SMOKE_UNLOAD_TIMEOUT_MS = 15_000;
-export const SMOKE_FIRST_PASS_PROVIDER_REQUESTS = 4;
+export const SMOKE_FIRST_PASS_PROVIDER_REQUESTS = 5;
 
 export type SmokeDraft = {
   httpOk: boolean;

@@ -9,7 +9,13 @@ import { shutDown } from '../src/server.ts';
 import { EXPECTED_CONSTRAINTS } from '../src/tools/mova-lab.ts';
 import { chatFixtures } from './fixtures/ollama.ts';
 
-export type ChatKind = 'vocabulary' | 'generation' | 'revision' | 'age' | 'language';
+export type ChatKind =
+  | 'vocabulary-tools'
+  | 'vocabulary'
+  | 'generation'
+  | 'revision'
+  | 'age'
+  | 'language';
 export type OllamaCall = { method: string; url: string; body: unknown };
 export type MovaLabCall = { method: string; url: string; authorization: string | undefined };
 export type OllamaReply =
@@ -193,8 +199,13 @@ export function userJson(call: OllamaCall) {
 }
 
 export function chatKind(call: OllamaCall): ChatKind | 'unknown' {
-  const system = (call.body as { messages: Array<{ content: string }> }).messages[0]?.content ?? '';
-  if (system.includes('Select Ukrainian vocabulary')) return 'vocabulary';
+  const payload = call.body as { tools?: unknown[]; messages: Array<{ content: string }> };
+  const system = payload.messages[0]?.content ?? '';
+  if (system.includes('Select Ukrainian vocabulary')) {
+    return Array.isArray(payload.tools) && payload.tools.length > 0
+      ? 'vocabulary-tools'
+      : 'vocabulary';
+  }
   if (system.includes('Revise Ukrainian recording-exercise')) return 'revision';
   if (system.includes('Produce Ukrainian recording-exercise')) return 'generation';
   if (system.includes('requested child age')) return 'age';
@@ -253,6 +264,7 @@ export function sequentialReply(
   return (call) => {
     if (call.method === 'POST' && call.url === '/api/chat') {
       const kind = chatKind(call);
+      if (kind === 'vocabulary-tools') return { status: 200, json: chatFixtures.noToolCall };
       if (kind === 'vocabulary') return { status: 200, json: vocabulary };
       if (kind === 'generation' || kind === 'revision') return { status: 200, json: generated };
       return { status: 200, json: review };
@@ -280,12 +292,12 @@ export function reviewReply(replies: {
 export function afterVocabulary(
   reply: OllamaReply | ((call: OllamaCall) => OllamaReply),
 ): (call: OllamaCall) => OllamaReply {
-  let chats = 0;
   const meta = runtimeReply(chatFixtures.vocabulary);
   return (call) => {
     if (call.method === 'POST' && call.url === '/api/chat') {
-      chats += 1;
-      if (chats === 1) return { status: 200, json: chatFixtures.vocabulary };
+      const kind = chatKind(call);
+      if (kind === 'vocabulary-tools') return { status: 200, json: chatFixtures.noToolCall };
+      if (kind === 'vocabulary') return { status: 200, json: chatFixtures.vocabulary };
       return typeof reply === 'function' ? reply(call) : reply;
     }
     return meta(call);

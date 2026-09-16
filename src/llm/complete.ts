@@ -10,7 +10,7 @@ import {
   type ExecutionLimits,
   withTransportRetry,
 } from './execution.ts';
-import { type ChatAttempt, ollamaChat } from './ollama.ts';
+import { type ChatAttempt, type ChatMessage, ollamaChat } from './ollama.ts';
 
 export const GENERATION_TEMPERATURE = 0.3;
 
@@ -26,29 +26,23 @@ export type LlmCall = {
   usage: LlmUsage[];
 };
 
+type ChatOptions = LlmCall & {
+  step: string;
+  promptVersion: string;
+  temperature: number;
+  format?: unknown;
+  tools?: unknown[];
+  allowToolCalls?: boolean;
+  messages?: ChatMessage[];
+  system?: string;
+  user?: unknown;
+};
+
 export async function completeStructured<T>(
   schema: z.ZodType<T>,
-  options: LlmCall & {
-    step: string;
-    promptVersion: string;
-    system: string;
-    user: unknown;
-    format: unknown;
-    temperature: number;
-  },
+  options: ChatOptions & { format: unknown },
 ): Promise<T> {
-  const attempt = await withTransportRetry(
-    {
-      limits: options.limits,
-      clock: options.clock,
-      signal: options.signal,
-      logger: options.logger,
-      requestId: options.requestId,
-      step: options.step,
-    },
-    () => chatOnce(options),
-  );
-
+  const attempt = await completeChat({ ...options, allowToolCalls: false, tools: undefined });
   let outputJson: unknown;
   try {
     outputJson = JSON.parse(attempt.content);
@@ -62,26 +56,35 @@ export async function completeStructured<T>(
   return output.data;
 }
 
-async function chatOnce(
-  options: LlmCall & {
-    step: string;
-    promptVersion: string;
-    format: unknown;
-    temperature: number;
-    system: string;
-    user: unknown;
-  },
-): Promise<ChatAttempt> {
+export async function completeChat(options: ChatOptions): Promise<ChatAttempt> {
+  return withTransportRetry(
+    {
+      limits: options.limits,
+      clock: options.clock,
+      signal: options.signal,
+      logger: options.logger,
+      requestId: options.requestId,
+      step: options.step,
+    },
+    () => chatOnce(options),
+  );
+}
+
+async function chatOnce(options: ChatOptions): Promise<ChatAttempt> {
   const attemptId = randomUUID();
   const started = options.clock.now();
   try {
     const attempt = await ollamaChat({
       config: options.config,
-      messages: [
-        { role: 'system', content: options.system },
-        { role: 'user', content: JSON.stringify(options.user) },
-      ],
+      messages:
+        options.messages ??
+        ([
+          { role: 'system', content: options.system ?? '' },
+          { role: 'user', content: JSON.stringify(options.user) },
+        ] satisfies ChatMessage[]),
       format: options.format,
+      tools: options.tools,
+      allowToolCalls: options.allowToolCalls,
       temperature: options.temperature,
       signal: attemptSignal(options.limits, options.signal, options.clock.now()),
       workflowSignal: options.signal,

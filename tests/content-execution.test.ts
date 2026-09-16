@@ -30,7 +30,7 @@ test('transport retry of generation does not consume a candidate version', async
   assert.equal(body.revisionCount, 0);
   assert.equal(chatsOf(ollama.calls, 'generation').length, 2);
   assert.equal(chatsOf(ollama.calls, 'revision').length, 0);
-  assert.equal(workflowLog(logs).providerRequests, 5);
+  assert.equal(workflowLog(logs).providerRequests, 6);
   assert.match(logs, /llm transport retry/);
 });
 
@@ -81,7 +81,7 @@ test('malformed reviewer output is re-asked once', async (t) => {
   const recoveredBody = generationResultSchema.parse(await recovered.response.json());
   assert.equal(recoveredBody.status, 'READY_FOR_REVIEW');
   assert.equal(recoveredBody.revisionCount, 0);
-  assert.equal(recoveredBody.providerRequests, 5);
+  assert.equal(recoveredBody.providerRequests, 6);
   assert.equal(chatsOf(recovered.ollama.calls, 'age').length, 2);
   assert.equal(chatsOf(recovered.ollama.calls, 'revision').length, 0);
   assert.match(recovered.logs, /review re-ask/);
@@ -116,7 +116,7 @@ test('schema-valid refusals are not retried and do not revise', async (t) => {
   });
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, 'MODEL_REFUSED');
-  assert.equal(chatCalls(ollama.calls).length, 2);
+  assert.equal(chatCalls(ollama.calls).length, 3);
   assert.equal(chatsOf(ollama.calls, 'generation').length, 1);
 });
 
@@ -290,6 +290,6 @@ test('each transport attempt is logged and successful usage is retained', async 
   assert.equal(failed.length, 1);
   assert.equal(completed.length, 1);
   assert.notEqual(failed[0]?.attemptId, completed[0]?.attemptId);
-  assert.equal(workflowLog(logs).usageCount, 4);
-  assert.equal(workflowLog(logs).providerRequests, 5);
+  assert.equal(workflowLog(logs).usageCount, 5);
+  assert.equal(workflowLog(logs).providerRequests, 6);
 });

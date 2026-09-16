@@ -51,7 +51,7 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal(body.status, 'READY_FOR_REVIEW');
   assert.equal(body.candidateVersion, 1);
   assert.equal(body.revisionCount, 0);
-  assert.equal(body.providerRequests, 4);
+  assert.equal(body.providerRequests, 5);
   assert.equal(body.requestId, response.headers.get('x-request-id'));
   assert.deepEqual(body.checks, [
     { status: 'passed', name: 'content', issues: [LETTER_PRESENCE_ISSUE] },
@@ -64,11 +64,13 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.equal('id' in body.proposals[0], false);
 
   const chats = chatCalls(ollama.calls);
-  assert.equal(chats.length, 4);
+  assert.equal(chats.length, 5);
+  const vocabTools = chatOf(ollama.calls, 'vocabulary-tools');
   const vocabChat = chatOf(ollama.calls, 'vocabulary');
   const exerciseChat = chatOf(ollama.calls, 'generation');
   const ageChat = chatOf(ollama.calls, 'age');
   const languageChat = chatOf(ollama.calls, 'language');
+  assert.ok(vocabTools);
   assert.ok(vocabChat);
   assert.ok(exerciseChat);
   assert.ok(ageChat);
@@ -76,6 +78,7 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   const selected = JSON.parse(vocabularyContent) as { items: unknown };
   const vocabulary = vocabularySchema.parse({ items: selected.items });
   const generated = JSON.parse(generatedContent) as { proposals: unknown };
+  assert.deepEqual(userJson(vocabTools), teacherRequest);
   assert.deepEqual(userJson(vocabChat), teacherRequest);
   assert.deepEqual(userJson(exerciseChat), { request: teacherRequest, vocabulary });
   assert.deepEqual(userJson(ageChat), { request: teacherRequest, proposals: generated.proposals });
@@ -108,16 +111,25 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
     assert.equal(payload.stream, false);
     assert.equal('id' in payload, false);
     assert.equal('request_id' in payload, false);
-    const format = payload.format as { oneOf: unknown[] };
-    assert.equal(
-      format.oneOf.length,
-      chatKind(chat) === 'age' || chatKind(chat) === 'language' ? 3 : 2,
-    );
     assert.deepEqual(payload.options, {
       temperature: GENERATION_TEMPERATURE,
       num_ctx: 4096,
       num_predict: 2000,
     });
+    if (chatKind(chat) === 'vocabulary-tools') {
+      assert.equal('format' in payload, false);
+      assert.deepEqual(
+        (payload.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name),
+        ['searchExistingExercises'],
+      );
+      continue;
+    }
+    assert.equal('tools' in payload, false);
+    const format = payload.format as { oneOf: unknown[] };
+    assert.equal(
+      format.oneOf.length,
+      chatKind(chat) === 'age' || chatKind(chat) === 'language' ? 3 : 2,
+    );
   }
   const vocabFormat = (
     vocabChat.body as { format: { oneOf: Array<{ properties: Record<string, unknown> }> } }
@@ -133,11 +145,13 @@ test('POST /content-drafts maps a generated envelope to approved proposals', asy
   assert.ok('issues' in ageFormat.oneOf[0].properties);
 
   const completed = completedAttempts(logs);
-  assert.equal(completed.length, 4);
+  assert.equal(completed.length, 5);
   assert.equal(completed[0].step, 'vocabulary');
   assert.equal(completed[0].promptVersion, VOCABULARY_PROMPT_VERSION);
-  assert.equal(completed[1].step, 'generation');
-  assert.equal(completed[1].promptVersion, EXERCISES_PROMPT_VERSION);
+  assert.equal(completed[1].step, 'vocabulary');
+  assert.equal(completed[1].promptVersion, VOCABULARY_PROMPT_VERSION);
+  assert.equal(completed[2].step, 'generation');
+  assert.equal(completed[2].promptVersion, EXERCISES_PROMPT_VERSION);
   const reviewLogs = completed.filter(
     (logged) => logged.step === 'age' || logged.step === 'language',
   );
@@ -180,7 +194,7 @@ test('missing usage and runtime metadata stay null', async (t) => {
       if (call.url === '/api/chat') {
         const kind = chatKind(call);
         const json =
-          kind === 'vocabulary'
+          kind === 'vocabulary-tools' || kind === 'vocabulary'
             ? chatFixtures.vocabularyMissingUsage
             : kind === 'generation'
               ? chatFixtures.generatedMissingUsage
@@ -192,7 +206,7 @@ test('missing usage and runtime metadata stay null', async (t) => {
   });
   assert.equal(response.status, 200);
   const completed = completedAttempts(logs);
-  assert.equal(completed.length, 4);
+  assert.equal(completed.length, 5);
   for (const logged of completed) {
     assert.equal(logged.modelDigest, null);
     assert.equal(logged.ollamaVersion, null);
@@ -285,7 +299,7 @@ test('failed vocabulary selection does not generate exercises', async (t) => {
     const { response, ollama } = await postDrafts(t, { reply: runtimeReply(reply) });
     assert.equal(response.status, status);
     assert.equal((await response.json()).error.code, code);
-    assert.equal(chatCalls(ollama.calls).length, 1);
+    assert.equal(chatCalls(ollama.calls).length, 2);
   }
 });
 
@@ -307,7 +321,7 @@ test('generation receives the validated vocabulary, not the raw model string', a
   });
   assert.equal(response.status, 200);
   const chats = chatCalls(ollama.calls);
-  assert.equal(chats.length, 4);
+  assert.equal(chats.length, 5);
   assert.deepEqual(userJson(chatOf(ollama.calls, 'generation') as OllamaCall), {
     request: teacherRequest,
     vocabulary: {
@@ -333,9 +347,9 @@ test('invalid generated content skips semantic review and stops on a repeated ca
   });
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, 'IDENTICAL_INVALID_CANDIDATE');
-  assert.equal(chatCalls(ollama.calls).length, 3);
-  assert.equal(chatKind(chatCalls(ollama.calls)[1] as OllamaCall), 'generation');
-  assert.equal(chatKind(chatCalls(ollama.calls)[2] as OllamaCall), 'revision');
+  assert.equal(chatCalls(ollama.calls).length, 4);
+  assert.equal(chatKind(chatCalls(ollama.calls)[2] as OllamaCall), 'generation');
+  assert.equal(chatKind(chatCalls(ollama.calls)[3] as OllamaCall), 'revision');
   assert.equal(
     chatCalls(ollama.calls).some((call) => chatKind(call) === 'age'),
     false,
@@ -454,7 +468,7 @@ test('generation-step refusal still maps after successful vocabulary', async (t)
   });
   assert.equal(response.status, 422);
   assert.equal((await response.json()).error.code, 'MODEL_REFUSED');
-  assert.equal(chatCalls(ollama.calls).length, 2);
+  assert.equal(chatCalls(ollama.calls).length, 3);
   const refused = JSON.parse(
     logs.split('\n').find((line) => line.includes('model refused')) ?? '{}',
   );
@@ -471,7 +485,7 @@ test('generation-step provider failure still maps after successful vocabulary', 
   });
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, 'PROVIDER_UNAVAILABLE');
-  assert.equal(chatCalls(ollama.calls).length, 3);
+  assert.equal(chatCalls(ollama.calls).length, 4);
   const failed = JSON.parse(
     logs.split('\n').find((line) => line.includes('llm attempt failed')) ?? '{}',
   );
@@ -603,7 +617,7 @@ const outcomeCases: Array<{
     name: 'unexpected tool call',
     reply: { status: 200, json: chatFixtures.toolCall },
     status: 502,
-    code: 'PROVIDER_UNEXPECTED_TOOL_CALL',
+    code: 'PROVIDER_INVALID_OUTPUT',
   },
   {
     name: 'missing model',

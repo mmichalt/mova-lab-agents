@@ -1,5 +1,5 @@
 {
-  "vocabularyPromptVersion": "vocabulary/v1",
+  "vocabularyPromptVersion": "vocabulary/v2",
   "exercisesPromptVersion": "exercises/v1",
   "revisionPromptVersion": "revision/v1",
   "cases": [
