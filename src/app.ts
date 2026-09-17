@@ -3,9 +3,11 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { Config } from './config.ts';
 import {
   actorIdFrom,
+  approveContentGeneration,
   createContentGeneration,
   getContentGeneration,
   idempotencyKeyFrom,
+  rejectContentGeneration,
   resumeContentGeneration,
 } from './content/runs.ts';
 import { generateContentDrafts } from './content/workflow.ts';
@@ -109,6 +111,40 @@ export function createApp(options: {
       next(err);
     }
   });
+  app.post('/workflows/:id/approve', auth, requireContentAdmin, json, (req, res, next) => {
+    void withRequestAbort(res, next, async (signal) => {
+      res.json(
+        await approveContentGeneration({
+          store: requireStore(options.store),
+          config: options.config,
+          logger: res.locals.log as Logger,
+          requestId: res.locals.requestId as string,
+          ownerId: actorIdFrom(req),
+          id: String(req.params.id),
+          body: req.body,
+          clock: options.clock,
+          signal,
+        }),
+      );
+    });
+  });
+  app.post('/workflows/:id/reject', auth, requireContentAdmin, json, (req, res, next) => {
+    void withRequestAbort(res, next, async (signal) => {
+      res.json(
+        await rejectContentGeneration({
+          store: requireStore(options.store),
+          config: options.config,
+          logger: res.locals.log as Logger,
+          requestId: res.locals.requestId as string,
+          ownerId: actorIdFrom(req),
+          id: String(req.params.id),
+          body: req.body,
+          clock: options.clock,
+          signal,
+        }),
+      );
+    });
+  });
   app.post('/workflows/:id/resume', auth, (req, res, next) => {
     void withRequestAbort(res, next, async (signal) => {
       const resource = await resumeContentGeneration({
@@ -144,6 +180,18 @@ export function createApp(options: {
   });
   app.use(errorHandler);
   return app;
+}
+
+function requireContentAdmin(req: Request, _res: Response, next: NextFunction) {
+  try {
+    actorIdFrom(req);
+    if (req.get('x-content-admin')?.trim().toLowerCase() !== 'true') {
+      throw new AppError(403, 'FORBIDDEN', 'Content Admin authority is required.');
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 function equalToken(actual: string, expected: string) {
