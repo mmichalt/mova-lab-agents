@@ -234,7 +234,21 @@ test('malformed, unauthorized, timeout, and abort fail closed', async (t) => {
         signal: new AbortController().signal,
       }),
     (err: unknown) =>
-      err instanceof AppError && err.status === 503 && err.code === 'MOVA_LAB_UNAVAILABLE',
+      err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_AUTH_FAILED',
+  );
+
+  const serviceForbidden = await fakeMovaLab(t, () => ({
+    status: 403,
+    json: { message: 'service role is not allowed' },
+  }));
+  await assert.rejects(
+    () =>
+      readGenerationConstraints({
+        config: labConfig(serviceForbidden.url),
+        signal: new AbortController().signal,
+      }),
+    (err: unknown) =>
+      err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_AUTH_FAILED',
   );
 
   const hung = await fakeMovaLab(t, () => ({ hang: true }));
@@ -284,4 +298,53 @@ test('required constraint failures stop the workflow without provider calls', as
   assert.equal(workflowLog(ready.logs).constraintsVersion, GENERATION_CONTRACT_VERSION);
   assert.equal(ready.movaLab.calls[0]?.authorization, 'Bearer mova-lab-token');
   assert.equal(ready.movaLab.calls[0]?.url, '/api/internal/content-generation/constraints');
+});
+
+test('draft import keeps service auth, actor 403, conflict, rejection, and transport distinct', async (t) => {
+  const proposal = {
+    localId: 'proposal-1',
+    type: 'recording' as const,
+    title: 'Повтори звук Р',
+    phrase: 'Риба пливе',
+    childHint: 'Повтори',
+    teacherNote: 'Нотатка',
+    targetSound: 'р' as const,
+    difficulty: 'easy' as const,
+  };
+  const importOnce = async (status: number, code: string, httpStatus: number) => {
+    const movaLab = await fakeMovaLab(t, () => ({ status, json: { message: 'no' } }));
+    await assert.rejects(
+      () =>
+        importRecordingDraft({
+          config: labConfig(movaLab.url),
+          signal: new AbortController().signal,
+          actorId: 'admin-1',
+          sourceImportKey: 'run-1:proposal-1',
+          payloadHash: 'payload-hash',
+          categoryId: 'cat-1',
+          proposal,
+        }),
+      (err: unknown) => err instanceof AppError && err.status === httpStatus && err.code === code,
+    );
+  };
+  await importOnce(401, 'MOVA_LAB_AUTH_FAILED', 502);
+  await importOnce(403, 'MOVA_LAB_FORBIDDEN', 403);
+  await importOnce(409, 'MOVA_LAB_IMPORT_CONFLICT', 409);
+  await importOnce(400, 'MOVA_LAB_IMPORT_REJECTED', 502);
+
+  const down = await fakeMovaLab(t, () => ({ status: 503, json: { error: 'down' } }));
+  await assert.rejects(
+    () =>
+      importRecordingDraft({
+        config: labConfig(down.url),
+        signal: new AbortController().signal,
+        actorId: 'admin-1',
+        sourceImportKey: 'run-1:proposal-1',
+        payloadHash: 'payload-hash',
+        categoryId: 'cat-1',
+        proposal,
+      }),
+    (err: unknown) =>
+      err instanceof AppError && err.status === 503 && err.code === 'MOVA_LAB_UNAVAILABLE',
+  );
 });

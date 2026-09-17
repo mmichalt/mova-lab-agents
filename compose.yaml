@@ -10,7 +10,7 @@ services:
     image: mova-lab-agents
     stop_grace_period: 15s
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${AGENTS_HOST_PORT:-3001}:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:

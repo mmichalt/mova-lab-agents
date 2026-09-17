@@ -8,9 +8,9 @@ export const GENERATION_CONTRACT_VERSION = 'recording-generation/v1';
 export const SEARCH_QUERY_MAX_LENGTH = 120;
 export const SEARCH_RESULT_LIMIT_MAX = 20;
 export const SEARCH_RESULT_LIMIT_DEFAULT = 10;
-export const CATEGORY_RESULT_LIMIT_MAX = 200;
+export const CATEGORY_RESULT_LIMIT_MAX = 500;
 
-const maxBodyBytes = 64 * 1024;
+export const MOVA_LAB_RESPONSE_MAX_BYTES = 256 * 1024;
 
 export const EXPECTED_CONSTRAINTS = {
   version: GENERATION_CONTRACT_VERSION,
@@ -130,7 +130,7 @@ export async function listGenerationCategories(
     'api/internal/content-generation/categories',
     categoriesSchema,
   );
-  return { version: result.version, items: result.items.slice(0, CATEGORY_RESULT_LIMIT_MAX) };
+  return { version: result.version, items: result.items };
 }
 
 export async function searchRecordingExercises(
@@ -270,7 +270,11 @@ function parseJson<T>(raw: string, schema: z.ZodType<T>): T {
 
 function mapStatus(status: number) {
   if (status === 401 || status === 403) {
-    return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab rejected the service credentials.');
+    return new AppError(
+      502,
+      'MOVA_LAB_AUTH_FAILED',
+      'Mova-Lab rejected service authentication or authorization.',
+    );
   }
   if (status === 429 || status >= 500) {
     return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab is unavailable.');
@@ -279,8 +283,11 @@ function mapStatus(status: number) {
 }
 
 function mapPostStatus(status: number) {
-  if (status === 401 || status === 403) {
-    return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab rejected the service credentials.');
+  if (status === 401) {
+    return new AppError(502, 'MOVA_LAB_AUTH_FAILED', 'Mova-Lab rejected service authentication.');
+  }
+  if (status === 403) {
+    return new AppError(403, 'MOVA_LAB_FORBIDDEN', 'The current actor cannot import this draft.');
   }
   if (status === 409) {
     return new AppError(409, 'MOVA_LAB_IMPORT_CONFLICT', 'Mova-Lab rejected the import key.');
@@ -313,7 +320,7 @@ async function readBody(response: Response, signal: AbortSignal, workflowSignal:
       if (result.done) break;
       if (result.value) {
         size += result.value.byteLength;
-        if (size > maxBodyBytes) throw invalidResponse();
+        if (size > MOVA_LAB_RESPONSE_MAX_BYTES) throw invalidResponse();
         chunks.push(result.value);
       }
     }

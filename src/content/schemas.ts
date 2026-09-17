@@ -170,6 +170,90 @@ export const generationResultSchema = z
     error: 'Must match READY_FOR_REVIEW',
   });
 
+const importReceiptSchema = z.strictObject({
+  proposalLocalId: z.string().min(1),
+  importKey: z.string().min(1),
+  payloadHash: z.string().min(1),
+  contentId: z.string().min(1).nullable(),
+  status: z.enum(['pending', 'imported', 'failed']),
+  createdAt: z.int().nonnegative(),
+});
+
+export const workflowResourceSchema = z.strictObject({
+  id: z.string().min(1),
+  status: z.enum(['PENDING', 'RUNNING', 'AWAITING_APPROVAL', 'REJECTED', 'COMPLETED', 'FAILED']),
+  phase: z.enum(['vocabulary', 'generation', 'checks', 'revision', 'finished', 'import']),
+  stateVersion: z.int().nonnegative(),
+  ownerId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  createdAt: z.int().nonnegative(),
+  updatedAt: z.int().nonnegative(),
+  resumable: z.boolean(),
+  schemaVersion: z.string().min(1),
+  workflowVersion: z.string().min(1),
+  constraintsVersion: z.string().min(1),
+  promptVersions: z.record(z.string(), z.string().min(1)),
+  modelTag: z.string().min(1).nullable(),
+  modelDigest: z.string().min(1).nullable(),
+  limits: z.strictObject({
+    maxProviderRequests: z.int().positive(),
+    maxRevisions: z.int().nonnegative(),
+    workflowTimeoutMs: z.int().positive(),
+    attemptTimeoutMs: z.int().positive(),
+    deadlineAt: z.int().nonnegative(),
+    ollamaNumCtx: z.int().positive(),
+    ollamaNumPredict: z.int().positive(),
+  }),
+  consumed: z.strictObject({
+    providerRequests: z.int().nonnegative(),
+    revisionCount: z.int().nonnegative(),
+  }),
+  request: contentRequestSchema,
+  result: z.strictObject({
+    status: z.enum(['PENDING', 'RUNNING', 'AWAITING_APPROVAL', 'REJECTED', 'COMPLETED', 'FAILED']),
+    candidateVersion: z.int().nonnegative(),
+    revisionCount: z.int().nonnegative(),
+    providerRequests: z.int().nonnegative(),
+    requiresHumanApproval: z.boolean(),
+    checks: z.array(checkResultSchema),
+    proposals: z.array(recordingProposalSchema),
+    vocabulary: z.unknown(),
+    error: z
+      .strictObject({
+        code: z.string().min(1),
+        message: z.string().min(1),
+        retryable: z.boolean(),
+      })
+      .nullable(),
+  }),
+  approval: z
+    .strictObject({
+      actorId: z.string().min(1),
+      candidateVersion: z.int().positive(),
+      categoryId: z.string().min(1).nullable(),
+      payloadHash: z.string().min(1),
+      decision: z.enum(['approved', 'rejected']),
+      frozenPayload: z.unknown(),
+      decidedAt: z.int().nonnegative(),
+    })
+    .nullable(),
+  candidates: z.array(
+    z.strictObject({
+      candidateVersion: z.int().positive(),
+      proposals: z.unknown(),
+      checks: z.unknown(),
+      createdAt: z.int().nonnegative(),
+    }),
+  ),
+  importProgress: z.strictObject({
+    status: z.enum(['not_started', 'running', 'failed', 'completed']),
+    total: z.int().nonnegative(),
+    imported: z.int().nonnegative(),
+    receipts: z.array(importReceiptSchema),
+  }),
+  imports: z.array(importReceiptSchema),
+});
+
 export type ContentRequest = z.infer<typeof contentRequestSchema>;
 export type VocabularyItem = z.infer<typeof vocabularyItemSchema>;
 export type Vocabulary = z.infer<typeof vocabularySchema>;

@@ -224,6 +224,43 @@ test('withTransportRetry stops at two attempts, deadline, abort, and budget', as
   assert.equal(budgetCalls, 0);
 });
 
+test('withTransportRetry reserves an attempt before I/O and keeps each reservation', async () => {
+  const reserved: Array<{ step: string; startedAt: number }> = [];
+  const budget = limits();
+  await assert.rejects(
+    () =>
+      withTransportRetry(
+        {
+          limits: budget,
+          clock: clock(),
+          signal: new AbortController().signal,
+          logger,
+          requestId: 'req',
+          step: 'generation',
+          attempts: {
+            reserve: (input) => {
+              reserved.push({ step: input.step, startedAt: input.startedAt });
+              return { id: `attempt-${reserved.length}`, executionAttempt: reserved.length };
+            },
+            finish() {},
+          },
+        },
+        async (reservation) => {
+          assert.ok(reservation);
+          assert.equal(reserved.length >= 1, true);
+          throw retryable(0);
+        },
+      ),
+    (err: AppError) => err.code === 'PROVIDER_UNAVAILABLE',
+  );
+  assert.equal(reserved.length, 2);
+  assert.equal(budget.providerRequests, 2);
+  assert.deepEqual(
+    reserved.map((item) => item.step),
+    ['generation', 'generation'],
+  );
+});
+
 test('withTransportRetry does not start a retry after remaining time is consumed', async () => {
   let attempts = 0;
   await assert.rejects(

@@ -2,6 +2,7 @@ import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import type { LlmCall } from '../llm/complete.ts';
 import {
+  type AttemptRecorder,
   abortError,
   type Clock,
   createLimits,
@@ -85,6 +86,7 @@ export type GenerationState = {
   usage: LlmUsage[];
   modelTag: string | null;
   modelDigest: string | null;
+  ollamaVersion: string | null;
   error?: WorkflowError;
 };
 
@@ -101,6 +103,7 @@ export type WorkflowResume = {
   constraintsVersion: string;
   modelTag: string | null;
   modelDigest: string | null;
+  ollamaVersion: string | null;
   invalidCandidates: Array<{ proposals: GeneratedProposal[]; checks: CheckResult[] }>;
 };
 
@@ -114,6 +117,7 @@ type RunOptions = {
   maxRevisions?: number;
   signal?: AbortSignal;
   resume?: WorkflowResume;
+  attempts?: AttemptRecorder;
   onCheckpoint?: (state: GenerationState) => void;
 };
 
@@ -199,6 +203,9 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     usage: Array.isArray(checkpointState.usage) ? (checkpointState.usage as LlmUsage[]) : [],
     modelTag: resume?.modelTag ?? config.ollamaModel,
     modelDigest: resume?.modelDigest ?? null,
+    ollamaVersion:
+      resume?.ollamaVersion ??
+      (typeof checkpointState.ollamaVersion === 'string' ? checkpointState.ollamaVersion : null),
     vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
     candidate: Array.isArray(checkpointState.candidate)
       ? (checkpointState.candidate as GeneratedProposal[])
@@ -212,7 +219,12 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     signal: controller.signal,
     clock,
     usage: state.usage,
-    observed: { modelTag: config.ollamaModel, modelDigest: null },
+    attempts: options.attempts,
+    observed: {
+      modelTag: state.modelTag,
+      modelDigest: state.modelDigest,
+      ollamaVersion: state.ollamaVersion,
+    },
     expectedModelTag: resume?.modelTag,
     expectedModelDigest: resume?.modelDigest,
   };
@@ -245,54 +257,59 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       }
 
       let feedback: readonly ValidationIssue[] | undefined =
-        resume && state.candidate && state.revisionCount > 0
-          ? blockingIssues(state.checks)
-          : undefined;
+        resume && state.phase === 'revision' ? blockingIssues(state.checks) : undefined;
       const invalid = new Map<string, CheckResult[]>(
         resume?.invalidCandidates.map((item) => [fingerprint(item.proposals), item.checks]),
       );
-      if (resume && state.candidate && state.checks.length > 0) {
-        invalid.set(fingerprint(state.candidate), state.checks);
-      }
       while (state.status === 'RUNNING') {
-        const produced = await nextCandidate(state, llm, vocabulary, feedback);
-        if (expired(controller, limits, clock)) {
-          failExpired(state, controller);
-          break;
-        }
-        if (produced.status === 'refused') {
-          record(state, 'refused', []);
-          fail(state, refusedError());
-          break;
-        }
-        if (produced.status === 'malformed') {
-          record(state, 'malformed', [schemaIssue.code]);
-          if (!tryRevise(state, options, [schemaIssue])) break;
-          feedback = [schemaIssue];
-          continue;
-        }
+        let mark: string | undefined;
+        if (state.phase === 'checks' && state.candidate) {
+          mark = fingerprint(state.candidate);
+          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
+        } else {
+          const produced = await nextCandidate(state, llm, vocabulary, feedback);
+          if (expired(controller, limits, clock)) {
+            failExpired(state, controller);
+            break;
+          }
+          if (produced.status === 'refused') {
+            record(state, 'refused', []);
+            fail(state, refusedError());
+            break;
+          }
+          if (produced.status === 'malformed') {
+            record(state, 'malformed', [schemaIssue.code]);
+            if (!state.candidate) {
+              state.checks = [{ status: 'failed', name: 'content', issues: [schemaIssue] }];
+            }
+            if (!tryRevise(state, options, [schemaIssue])) break;
+            checkpoint(state, limits, options, llm);
+            feedback = [schemaIssue];
+            continue;
+          }
 
-        state.candidate = produced.proposals;
-        state.candidateVersion += 1;
-        const mark = fingerprint(produced.proposals);
-        const previousChecks = invalid.get(mark);
-        if (previousChecks) {
+          state.candidate = produced.proposals;
+          state.candidateVersion += 1;
           state.phase = 'checks';
-          state.checks = previousChecks;
-          record(state, 'identical', issueCodes(state.checks));
-          fail(
-            state,
-            new AppError(
-              422,
-              'IDENTICAL_INVALID_CANDIDATE',
-              'The model repeated an invalid candidate.',
-            ),
-          );
-          break;
+          state.checks = [];
+          checkpoint(state, limits, options, llm);
+          mark = fingerprint(produced.proposals);
+          const previousChecks = invalid.get(mark);
+          if (previousChecks) {
+            state.checks = previousChecks;
+            record(state, 'identical', issueCodes(state.checks));
+            fail(
+              state,
+              new AppError(
+                422,
+                'IDENTICAL_INVALID_CANDIDATE',
+                'The model repeated an invalid candidate.',
+              ),
+            );
+            break;
+          }
+          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
         }
-
-        state.phase = 'checks';
-        state.checks = await runChecks(state, llm, vocabulary, produced.proposals);
         if (expired(controller, limits, clock)) {
           failExpired(state, controller);
           break;
@@ -319,7 +336,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         }
 
         record(state, 'failed', issueCodes(state.checks));
-        invalid.set(mark, state.checks);
+        if (mark) invalid.set(mark, state.checks);
         const issues = blockingIssues(state.checks);
         if (!tryRevise(state, options, issues)) break;
         checkpoint(state, limits, options, llm);
@@ -341,6 +358,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     state.providerRequests = limits.providerRequests;
     state.modelTag = llm.observed?.modelTag ?? state.modelTag;
     state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
+    state.ollamaVersion = llm.observed?.ollamaVersion ?? state.ollamaVersion;
   }
 
   options.logger.info(
@@ -375,6 +393,7 @@ async function nextCandidate(
 > {
   const call = {
     ...llm,
+    candidateVersion: state.candidateVersion,
     request: state.request,
     vocabulary,
   };
@@ -404,6 +423,8 @@ async function runChecks(
   llm: LlmCall,
   vocabulary: Vocabulary,
   proposals: GeneratedProposal[],
+  options: RunOptions,
+  limits: ExecutionLimits,
 ): Promise<CheckResult[]> {
   const content = validateCandidate(state.request, vocabulary, proposals);
   if (content.status === 'failed') {
@@ -420,12 +441,29 @@ async function runChecks(
     );
     return [content];
   }
+  const existing = new Map(
+    state.checks
+      .filter((check) => check.name === 'age' || check.name === 'language')
+      .map((check) => [check.name, check]),
+  );
+  const remember = (check: CheckResult) => {
+    existing.set(check.name, check);
+    state.checks = [content, ...existing.values()];
+    checkpoint(state, limits, options, llm);
+    return check;
+  };
   const review = {
     ...llm,
+    candidateVersion: state.candidateVersion,
     request: state.request,
     proposals,
   };
-  const [age, language] = await settleReviews(reviewAge(review), reviewLanguage(review));
+  const agePromise = existing.get('age') ?? reviewAge(review).then(remember);
+  const languagePromise = existing.get('language') ?? reviewLanguage(review).then(remember);
+  const [age, language] = await settleReviews(
+    Promise.resolve(agePromise),
+    Promise.resolve(languagePromise),
+  );
   return [content, age, language];
 }
 
@@ -446,6 +484,7 @@ function tryRevise(
     return false;
   }
   state.revisionCount += 1;
+  state.phase = 'revision';
   options.logger.info(
     {
       requestId: options.requestId,
@@ -522,12 +561,13 @@ function checkpoint(
   state.providerRequests = limits.providerRequests;
   state.modelTag = llm.observed?.modelTag ?? state.modelTag;
   state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
+  state.ollamaVersion = llm.observed?.ollamaVersion ?? state.ollamaVersion;
   options.onCheckpoint?.(state);
 }
 
 function fail(state: GenerationState, err: AppError) {
   state.status = 'FAILED';
-  state.phase = 'finished';
+  if (!err.retryable) state.phase = 'finished';
   state.error = {
     code: err.code,
     message: err.message,

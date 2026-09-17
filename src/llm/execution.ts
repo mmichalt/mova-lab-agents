@@ -26,6 +26,32 @@ export type ExecutionLimits = {
   providerRequests: number;
 };
 
+export type AttemptReservation = {
+  id: string;
+  executionAttempt: number;
+};
+
+export type AttemptRecorder = {
+  reserve: (input: {
+    step: string;
+    candidateVersion: number | null;
+    operationKey: string;
+    startedAt: number;
+  }) => AttemptReservation;
+  finish: (
+    reservation: AttemptReservation,
+    result: {
+      outcome: string;
+      finishedAt: number;
+      usage: unknown;
+      error: unknown;
+      modelTag?: string | null;
+      modelDigest?: string | null;
+      ollamaVersion?: string | null;
+    },
+  ) => void;
+};
+
 export function createLimits(
   config: Config,
   now: number,
@@ -52,7 +78,7 @@ export function providerTimeout() {
 }
 
 export function clientDisconnected() {
-  return new AppError(499, 'CLIENT_DISCONNECTED', 'The client disconnected.');
+  return new AppError(499, 'CLIENT_DISCONNECTED', 'The client disconnected.', { retryable: true });
 }
 
 export function abortError(signal: AbortSignal) {
@@ -126,8 +152,11 @@ export async function withTransportRetry<T>(
     logger: Logger;
     requestId: string;
     step: string;
+    candidateVersion?: number | null;
+    operationKey?: string;
+    attempts?: AttemptRecorder;
   },
-  operation: () => Promise<T>,
+  operation: (reservation?: AttemptReservation) => Promise<T>,
 ): Promise<T> {
   let last: unknown;
   for (let attempt = 1; attempt <= MAX_TRANSPORT_ATTEMPTS; attempt += 1) {
@@ -136,9 +165,15 @@ export async function withTransportRetry<T>(
     if (options.limits.providerRequests >= options.limits.maxProviderRequests) {
       throw budgetExhausted();
     }
+    const reservation = options.attempts?.reserve({
+      step: options.step,
+      candidateVersion: options.candidateVersion ?? null,
+      operationKey: options.operationKey ?? options.step,
+      startedAt: options.clock.now(),
+    });
     options.limits.providerRequests += 1;
     try {
-      return await operation();
+      return await operation(reservation);
     } catch (err) {
       last = err;
       if (!isRetryable(err) || attempt === MAX_TRANSPORT_ATTEMPTS) throw err;

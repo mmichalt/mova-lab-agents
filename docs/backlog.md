@@ -1,6 +1,9 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-019, AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-020 and AG-029 are marked complete. AG-021 has
+implementation awaiting acceptance. AG-030 agents-repo follow-up is in progress
+in this working tree; sibling `mova-lab` findings remain. Remaining tickets are
+unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -52,7 +55,8 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
 - [x] [AG-019 — Durable approval and rejection](#ag-019)
 - [x] [AG-020 — Approved draft import and partial recovery](#ag-020)
-- [ ] [AG-021 — Generation and review UI in Mova-Lab](#ag-021)
+- [x] [AG-021 — Generation and review UI in Mova-Lab](#ag-021)
+- [ ] [AG-030 — Milestone 2 review follow-up: import safety, recovery, and integration](#ag-030)
 
 ### Milestone 3 — Asynchronous execution
 
@@ -1118,7 +1122,7 @@ progress, receipt persistence, and resume without repeated generation.
 **Stage:** 7, product integration  
 **Repository:** `mova-lab` — companion backend and client work  
 **Dependencies:** [AG-020](#ag-020)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Make the human checkpoint usable while keeping
 the browser behind Mova-Lab's existing authentication and authorization boundary.
@@ -1143,6 +1147,338 @@ failure display, and safe text rendering.
 
 **Out of scope:** A new design system, patient selection/data transfer, publication
 automation, streaming, and WebSockets.
+
+### AG-030
+
+**Title:** Milestone 2 review follow-up: import safety, recovery, authorization, and integration
+
+**Stage:** 6–7, Milestone 2 follow-up
+
+**Repositories:** `mova-lab-agents` and `mova-lab` — separate changes per repository
+
+**Dependencies:** [AG-020](#ag-020), existing [AG-021](#ag-021) implementation
+
+**Status:** In progress — agents-repo follow-up is in the working tree; sibling
+`mova-lab` CMS uniqueness, Nest proxy byte limits, UI resume persistence, and
+Nest audit identities remain outside this repository.
+
+**Priority:** High; resolve P1 findings before relying on durable approval/import
+or treating Milestone 2 as accepted.
+
+**Problem and learning objective:** Review of both repositories found gaps between
+passing isolated tests and the architecture's end-to-end guarantees. Make the
+existing implementation satisfy the stage-6/7 contracts before building queue
+execution on top. This is one consolidated remediation ticket; AG-030 preserves
+the existing ticket numbers.
+
+**Review scope:** Reviewed on 2026-09-17 at `mova-lab-agents` commit `23eda1d`
+and `mova-lab` commit `addde80`: AG-012–AG-020, the already-present AG-021
+proxy/UI, related Content Studio/CMS behavior, deployment configuration, and
+security/recovery requirements in `architecture-plan.md`. AG-021 is still marked
+Unstarted despite having code; its presence is not evidence of acceptance.
+Existing unrelated sibling working-tree edits were left untouched. Paths below
+include the repository name; line numbers refer to the reviewed implementation.
+P1 means high priority, P2 normal priority, and P3 low priority.
+
+**Review findings:**
+
+1. **P1 — Receiver-side draft imports are not durably idempotent.**
+   `mova-lab/apps/server/src/content-studio/cms-exercises.service.ts:115` always
+   creates first and looks up the source key only after an error. The only
+   uniqueness declaration is `unique: true` in
+   `mova-lab/apps/cms/src/api/exercise/content-types/exercise/schema.json:124`.
+   In the installed Strapi implementation, draft validation explicitly skips
+   unique checks (`@strapi/core/dist/services/entity-validator/validators.js:243`),
+   and compiling this attribute with Strapi's actual SQL schema compiler produces
+   **no unique index**. There is no companion source-key migration or transactional
+   import endpoint. Consequently a repeated/concurrent draft create need not fail,
+   so the recovery lookup and payload-conflict check can be bypassed by another
+   successful create. Existing CMS tests inject a uniqueness error instead of
+   proving one exists. Enforce the source key and immutable import hash atomically
+   with content creation in real CMS persistence. Account for Strapi's separate
+   draft/published rows, and replay the original receipt even after Content Studio
+   edits; comparing the retry against mutable current content is insufficient.
+   Verify simultaneous duplicates, changed payloads, lost responses, edit/publish
+   after import, and later retries against the real database.
+
+2. **P1 — Stale import executors can overwrite newer receipts.**
+   `mova-lab-agents/src/persist/store.ts:543,563` inserts/updates receipts without
+   a claim token or lease-expiry condition. The import failure handler at
+   `src/content/runs.ts:509` can mark its pending receipt failed even after losing
+   the lease. A two-owner probe claimed an expired run, saved an imported receipt,
+   then successfully erased its content ID with an unfenced failed update.
+   Run checkpoints are protected, but receipt writes are not; even a completed
+   run can end up with missing confirmation. Fence all receipt mutations with
+   the current claim and prevent regression of confirmed imports. Commit local
+   receipt/state changes consistently and verify `COMPLETED` against all frozen
+   proposal receipts. Test lease expiry during a remote call and old-executor
+   success/error arriving after a new executor has finished.
+
+3. **P1 — Run visibility and decision authority disagree; ordinary teachers have
+   no usable Content Admin handoff.**
+   `mova-lab-agents/src/content/runs.ts:253` and `:177` restrict retrieval/resume
+   to the owner, while `decideContentGeneration` at `:309` never applies that
+   access check and presents the response using the stored owner's identity.
+   A probe showed an actor rejected by GET can reject the same run and receive
+   its full resource, including request/candidate data. HTTP still requires the
+   service token and Content Admin context; this is not an unauthenticated
+   bypass. In the product flow, a non-admin teacher can create a run but cannot
+   decide it, and a different admin cannot open it for review. Define the permitted
+   reviewer scope and apply it consistently to GET, approve, reject, replay, and
+   resume, using trusted Nest authorization context. Support the intended admin
+   review handoff without exposing other runs by merely knowing their IDs; test
+   owner/non-owner teacher and permitted/non-permitted admin combinations.
+
+4. **P1 — Provider attempts and consumed budgets are not durably recorded at the
+   execution boundary.**
+   `mova-lab-agents/src/llm/execution.ts:139` increments only memory;
+   `src/content/runs.ts:841` checkpoints counters only when the workflow calls
+   its sparse checkpoint callback. A successful five-call run produced **zero**
+   `step_attempts` rows; the persisted request count observed during those outgoing
+   calls was `[0, 0, 2, 2, 2]`. Crashes can therefore repeatedly discard consumed
+   attempts/retries and revisions, exceeding the recorded allowances within the
+   original deadline. Wire the existing attempt table into execution, reserve
+   allowances before I/O, and persist outcome/timing/available usage/sanitized
+   errors. Preserve unknown outcomes after a crash. The documented possibility
+   of repeating a call whose response was not saved does not justify resetting
+   its budget reservation. Test crash/reopen before send, during transport retry,
+   after response, and during malformed-output revision.
+
+5. **P1 — Recovery does not implement the promised step checkpoints or resume
+   from the recorded phase.**
+   `mova-lab-agents/src/content/workflow.ts:244,258,325` checkpoints vocabulary
+   and failed-candidate revision transitions, but not generated output before
+   reviews or each successful review. Recovery always calls `nextCandidate` and
+   treats all stored candidate revisions as invalid. Seeding a legitimate passed
+   candidate/checkpoint through the existing store API made resume regenerate
+   it and fail with `IDENTICAL_INVALID_CANDIDATE`. This seeded probe tests the
+   recovery logic; current execution does not itself emit that intermediate
+   successful checkpoint, which is part of the gap. Persist validated step outputs
+   and their transitions atomically, resume the next unfinished operation, and
+   put only failed candidates in the repetition guard. Prove restart behavior
+   at every actual checkpoint, including one completed parallel review, without
+   regenerating committed successful work or changing candidate/check identity.
+
+6. **P1 — The default proxy timeout permanently strands accepted generation.**
+   `mova-lab/apps/server/src/content-studio/content-generation-proxy.client.ts:133`
+   defaults to 30 seconds, versus a 120-second model attempt and 600-second
+   workflow in the agent service. The proxy abort closes the synchronous agent
+   connection; `withRequestAbort` passes `CLIENT_DISCONNECTED` into generation,
+   which persists it as nonretryable. A disconnect probe returned durable
+   `FAILED`, `CLIENT_DISCONNECTED`, `resumable: false`. Browser/proxy interruption
+   should remain an explicitly recoverable stage-7 interruption within the saved
+   deadline and budgets. Align/document proxy deadlines for synchronous work and
+   preserve the run locator on submission failure. Do not silently introduce
+   background execution or reset the generation deadline to repair this.
+
+7. **P2 — Unavailable checks cannot cross the proxy/UI contract.**
+   The real check union in `mova-lab-agents/src/content/schemas.ts:131` represents
+   an unavailable review with `errorCode` and no `issues` array. Both
+   `mova-lab/apps/server/src/content-studio/content-generation-proxy.client.ts:23`
+   and `apps/client/src/services/content-generation.service.ts:112` require that
+   array. A resource with an unavailable review was rejected by the real proxy
+   parser with 502; ordinary passed checks were accepted. Implement the actual
+   discriminated check union and render unavailable reviews as operational
+   failures with their code. Add contract fixtures produced by the agent service
+   for passed, failed, refused, and unavailable checks; empty-check proxy fixtures
+   currently miss this mismatch.
+
+8. **P2 — Confirmed import progress and draft links disappear in the UI.**
+   `mova-lab-agents/src/content/runs.ts:253` emits `importProgress.receipts`,
+   whereas the sibling proxy, client parser, and
+   `apps/client/src/modules/content-studio/content-generation-page.tsx:321`
+   expect a top-level `imports` array. The client drops the real receipts, so
+   partial successes and per-draft links are hidden; completed runs only show
+   generic success text. Agree on one wire representation, validate/map it at
+   the boundary, and verify a real-shaped partially imported and completed run
+   displays every confirmed draft with the correct Content Studio link.
+
+9. **P2 — The UI cannot recover interrupted runs or pending submissions after
+   reload.**
+   The agent resource exposes `resumable` for expired `RUNNING` and `PENDING`
+   runs, but the sibling client drops it and the page at `:216` offers resume
+   only for retryable `FAILED`. Its query keeps polling interrupted `RUNNING`
+   indefinitely. The pending idempotency key is also only a component ref
+   (`:50,94`); reloading before receiving a run ID loses it and the next submit
+   creates a new run. Preserve the pending submission identity across reload,
+   surface an authorized resume action from the server's eligibility flag, and
+   stop presenting an expired lease as active progress. Test lost create response,
+   reload, expired claim, and reopening a partially imported run.
+
+10. **P2 — Import permission failures are misreported as transient service outages.**
+    `mova-lab-agents/src/tools/mova-lab.ts:281` maps both 401 and 403 to
+    `MOVA_LAB_UNAVAILABLE` with a service-credentials message. The receiver uses
+    403 for a revoked/non-admin actor, and `importError` turns the resulting 503
+    into a retryable outage. An administrator loses the actionable reason an
+    approved import stopped. Keep service authentication, current actor authority,
+    payload conflict, invalid category/constraints, and transport failure distinct;
+    expose safe codes and a deliberate recovery policy. Revocation must continue
+    to prevent new CMS writes, and no recovery may regenerate approved content.
+
+11. **P2 — Recorded model identity can misdescribe a fresh run, and import recovery
+    skips workflow compatibility checks.**
+    `mova-lab-agents/src/llm/complete.ts:100–106` compares the digest only when an
+    expected recovery digest exists, then retains the first observed digest.
+    A probe changed the tag's digest after the first call; the fresh run still
+    reached `AWAITING_APPROVAL`, recorded only the first digest, and accepted later responses with different
+    digest metadata.
+    Establish and enforce the observed model identity throughout a run. Persist
+    the runtime/version/settings evidence required by stage 7 rather than leaving
+    it solely in logs. Separately, `resumeContentGeneration` at
+    `src/content/runs.ts:188` bypasses schema/workflow compatibility validation
+    for approved imports. Validate the recorded import/checkpoint format and
+    supported workflow version without requiring Ollama for deterministic imports.
+
+12. **P2 — Rejected model tool names leak raw content into ordinary logs.**
+    `mova-lab-agents/src/content/generate.ts:172` logs `rejected.name`, an
+    unrestricted string from the model. A synthetic private-text marker supplied
+    as an unknown tool name appeared verbatim in normal logs. Log an application
+    classification/allowlisted name and local audit ID instead. Extend the existing
+    tool-log redaction test to rejected names and oversized arbitrary name values;
+    successful search-result redaction alone does not cover this path.
+
+13. **P2 — The new Nest proxy has unbounded upstream body handling and forwards
+    unknown response fields.**
+    `mova-lab/apps/server/src/content-studio/content-generation-proxy.client.ts:170,178`
+    calls `response.json()` for both success and errors without a byte limit;
+    `.passthrough()` then forwards unknown fields. A probe added a 2 MiB extra
+    field to a valid response and the proxy accepted/returned it. Bound streamed
+    success/error bodies before parsing, project the supported public resource,
+    and preserve safe timeout/error codes. Test oversized and stalled success/error
+    streams; an elapsed-time limit alone does not bound memory consumption.
+
+14. **P2 — Category contracts disagree on result bounds.**
+    `mova-lab/apps/server/src/content-studio/content-generation-read.service.ts:37`
+    returns all taxonomy pages, while the agent's `categoriesSchema` at
+    `src/tools/mova-lab.ts:76` rejects more than 200 items and its transport caps
+    the body at 64 KiB. A valid 201-category response failed the entire lookup,
+    preventing approval even when the selected category exists. Define compatible
+    bounds/pagination or a selected-category validation contract, with no silent
+    truncation that makes a displayed category unapprovable. Cover page/count and
+    encoded-byte boundaries in both repositories.
+
+15. **P2 — The default Compose topology conflicts with the companion API.**
+    `mova-lab-agents/compose.yaml:13` binds host port 3000 while `:21` sends
+    Mova-Lab requests back to host port 3000. The sibling's example Nest config
+    also binds 3000 and its agent proxy defaults to `http://localhost:3001`.
+    These defaults cannot run together: the ports collide or outbound requests
+    reach the wrong service. Choose/document compatible agent/Nest host ports
+    and container addresses, allow the necessary configuration override, and
+    verify proxy → agent → Nest against the documented topology. Updating only
+    the host `PORT` environment variable does not change the hard-coded Compose
+    mapping/container configuration.
+
+16. **P2 — Workflow admission has no process-level capacity bound.**
+    `mova-lab-agents/src/app.ts` starts every new distinct workflow and resume
+    immediately. Claims deduplicate a particular run but do not bound concurrent
+    runs. `OLLAMA_NUM_PARALLEL=1` limits inference, not the number of open HTTP
+    workflows, queued calls, SQLite artifacts, or waiting timers. Teacher access
+    now exposes this path through the proxy. Add a small explicit in-flight
+    limit with an actionable busy response, covering create/resume and the legacy
+    endpoint; duplicate-key reads must still work. Verify concurrent distinct
+    requests cannot exceed it. Distributed rate limiting and queues remain outside
+    this ticket.
+
+17. **P2 — Approval/rejection audit records identify workflows as CMS exercises.**
+    `mova-lab/apps/server/src/content-studio/content-studio.controller.ts:118,134`
+    decorates decisions as `content.created`/`content.updated` on `content_exercise`
+    with the workflow route ID as the target. The interceptor records a success
+    for a returned resource even if its status is `FAILED` after import; the
+    internal importer separately audits actual CMS exercise IDs. Record workflow
+    decisions under an accurate identity/action and content creation at the actual
+    import boundary. Do not report a rejected workflow, failed import, or replay
+    as creation/update of a nonexistent CMS exercise. Cover replay and partial
+    failure in audit assertions.
+
+18. **P2 — Milestone completion lacks the required integration evidence.**
+    `mova-lab-agents/evals/smoke-tools.md` explicitly says the AG-014 native-tool
+    smoke has not run although that ticket is Complete. AG-018's verification
+    requires real receiver persistence/concurrency, but its tests mock CMS
+    responses (including the assumed uniqueness failure). AG-021 has a page and
+    proxy, but no dedicated generation-page/client-service tests; the existing
+    proxy fixtures use empty checks and omit real import progress. Reconcile
+    ticket status and recorded evidence after remediation. Add shared real-shaped
+    contract fixtures, authorization/UI cases, crash/lease tests, and real CMS
+    import tests; record the separately invoked live native-tool smoke when the
+    runtime is available. Historical generation smoke is not tool-reliability
+    evidence or proof of therapeutic suitability.
+
+**Implementation scope:** Repair these boundaries in the existing modules, add
+focused permanent regressions, and update contracts/setup documentation in both
+repositories. Keep the receipt importer deterministic, keep approvals tied to
+immutable revisions, and preserve Content Studio's independent publication rules.
+Make AG-030 a prerequisite for accepting Milestone 2 and proceeding with AG-022.
+Do not build a new workflow framework or duplicate the main application's catalog.
+
+**Acceptance criteria:**
+
+- Each finding has a fix with a regression check, or an evidence-backed documented
+  resolution; review findings against the current code before changing it.
+- Repeated/concurrent/lost-response imports create one logical CMS draft per source
+  key; changed payloads conflict, and ordinary edit/publication remains usable.
+- Expired owners cannot change receipts or state. Completion requires confirmations
+  for the entire frozen payload, including after cross-process failure injection.
+- Attempt reservations, versions, deadlines, candidate/check identity, and outcomes
+  survive crashes. Resume skips committed work and never resets allowances.
+- Authorized teacher → Content Admin review works end to end; inaccessible runs
+  remain inaccessible for reads, mutations, replays, and error paths. Current
+  Content Admin permission is still checked before every new remote import.
+- Real agent resources render success, unavailable reviews, partial imports,
+  interruption, and rejection correctly; confirmed drafts are linked, untrusted
+  text is rendered as text, and service credentials remain backend-only.
+- HTTP bodies, workflow admission, and logs enforce their documented bounds;
+  metadata-only logging and accurate audit identities hold on failure paths.
+- Both repositories' applicable quality gates pass. Document a working deployment
+  topology and record actual CMS/integration and optional live-smoke evidence.
+
+**Verification recorded during review (2026-09-17):**
+
+- `mova-lab-agents`: all **221** existing tests passed with localhost fake servers;
+  `npm run typecheck`, `npm run lint`, and `npm run build` passed. The initial
+  sandbox run could not bind localhost; the permitted rerun passed. After explicit
+  approval, `npm audit --json` reported **zero known vulnerabilities** across
+  production/development dependencies; this is not proof of overall security.
+- `mova-lab`: the full Content Studio Jest selection passed **73 tests in 13
+  suites** (`jest --runInBand --testPathPattern content-studio`); server, client,
+  and CMS `tsc --noEmit --incremental false` passed. The existing Content Studio query
+  UI test passed (**1 test**); it does not exercise the new generation page.
+- Temporary offline probes used actual modules, real temporary SQLite databases,
+  fake provider responses, and the installed Strapi schema compiler. They confirmed
+  the missing SQL unique index, unfenced receipt overwrite, decision/read scope
+  mismatch, empty attempt table, unreserved counters, phase-recovery failure,
+  nonresumable disconnect, unavailable-review parser failure, mixed-digest success,
+  rejected-tool-name log leak, oversized proxy response, and category-bound mismatch.
+  These probes assert current defects; permanent tests must assert the fixes.
+- A clean production dependency install in `/tmp` with `--ignore-scripts` successfully
+  opened SQLite. No missing-native-binding finding is asserted for the pinned
+  `better-sqlite3` version, which ships prebuilt bindings.
+- Docker is not usable in this WSL distro, so no image rebuild, live CMS/database
+  concurrency test, real two-service deployment, browser end-to-end run, or image
+  vulnerability scan was performed. No live Ollama inference, model pull, GPU
+  measurement, or clinical evaluation was performed. The sibling's full monorepo
+  gates and dependency advisory audit were not run; the results above are scoped
+  checks, not a blanket clean bill of health.
+
+**Agents-repo remediation notes (working tree, not Milestone 2 acceptance):**
+
+- Findings owned here (2–6, 8, 10–12, 15, 16, 18 as agents-side tests/docs) are
+  implemented in the existing modules with localhost fake-server regressions.
+  Finding 1 (CMS uniqueness), 7/9/13/14/17 (Nest proxy, UI, category paging,
+  audit identities) stay with `mova-lab`.
+- Ordinary `npm test` still does not invoke live Ollama, GPU, or cloud
+  credentials. `docs/examples/persisted-run.json` is parsed by
+  `tests/content-schemas.test.ts`. `npm run smoke:tools` remains the separately
+  invoked native-tool smoke; [evals/smoke-tools.md](../evals/smoke-tools.md) is
+  still "not yet run" until that command is executed against a local model.
+- Documented topology: Nest host `3000`, agents host `3001`
+  (`AGENTS_HOST_PORT`), container Mova-Lab URL `http://host.docker.internal:3000`.
+  Docker image rebuild was not performed in this WSL distro.
+
+**Out of scope:** Implementing remediation during this review, Milestone 3 queues,
+publication automation, new clinical claims, cloud fallback, broad unrelated
+refactors, and the tracing/evaluation/retention implementation already assigned to
+AG-026/AG-027. Pending-review and idempotency retention requirements remain in force
+when that scheduled work is implemented.
 
 ## Milestone 3: asynchronous execution
 

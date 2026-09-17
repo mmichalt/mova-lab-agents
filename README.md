@@ -17,10 +17,11 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `PORT` | `3000` | Empty values use the default. `0` binds an ephemeral port. |
+| `PORT` | `3001` in `.env.example`; code default `3000` | Host listen port for `npm run dev` / `npm start`. Use `3001` so Mova-Lab's Nest API can keep host port `3000`. Empty values use `3000`, which collides with Nest. `0` binds an ephemeral port. Compose ignores this for publishing: the container always listens on `3000`, and the host mapping is `AGENTS_HOST_PORT` (default `3001`). |
+| `AGENTS_HOST_PORT` | `3001` | Compose-only host publish port (`127.0.0.1:${AGENTS_HOST_PORT:-3001}:3000`). Changing only `PORT` does not move the published Compose port. |
 | `LOG_LEVEL` | `info` | Pino level: `fatal` … `silent`. |
 | `SERVICE_TOKEN` | (required) | Shared inbound token; `Authorization: Bearer <token>`. |
-| `MOVA_LAB_BASE_URL` | (required) | Trusted Mova-Lab origin for outbound reads (no path, query, fragment, or credentials). Host processes typically use `http://localhost:3000` when Nest is on 3000; run this service on another `PORT` if both listen on the host. The Compose `agents` service always uses `http://host.docker.internal:3000` and ignores this host value. Requests cannot choose a URL. |
+| `MOVA_LAB_BASE_URL` | (required) | Trusted Mova-Lab origin for outbound reads (no path, query, fragment, or credentials). The documented two-service topology uses Nest on host `3000` and agents on host `3001`. Compose agents use `http://host.docker.internal:3000`; requests cannot choose a URL. |
 | `MOVA_LAB_SERVICE_TOKEN` | (required) | Outbound bearer token for `/api/internal/content-generation/*`. Separate from `SERVICE_TOKEN`; must match Nest `AGENTS_API_SERVICE_TOKEN`. |
 | `MOVA_LAB_TIMEOUT_MS` | `10000` | Deadline for one Mova-Lab read, including the body. Must be `1`–`2147483647`. Combined with the workflow abort signal. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Trusted local Ollama origin for host processes (`npm run dev`). The Compose `agents` service always uses `http://ollama:11434` and ignores this host value. Requests cannot choose a server, pull a model, or fall back to the cloud. |
@@ -42,8 +43,12 @@ Creating the Express app still does not open a port or a database. Persisted
 values are JSON-serializable and include workflow/constraint/prompt versions
 plus configured and consumed limits. Checkpoint writes (run status/state plus
 any new attempt or candidate revision) commit in one SQLite transaction;
-provider HTTP calls stay outside those transactions. This deployment is one
-host with local disk; do not put the SQLite file on a network filesystem.
+provider HTTP calls stay outside those transactions. Each provider request
+reserves one durable budget unit and attempt row before I/O; a crash leaves an
+`unknown` outcome and resume never resets it. Candidate and review checkpoints
+are written before reviews and after each review, so recovery skips committed
+work. This deployment is one host with local disk; do not put the SQLite file
+on a network filesystem.
 `POST /workflows/content-generation` authenticates the inbound service token
 before reading JSON (16 KiB limit), then requires trusted backend headers
 `X-Actor-Id` and `Idempotency-Key` (1–128 non-space characters). Actor identity
@@ -56,12 +61,15 @@ synchronously, checkpoints vocabulary, candidates, and checks, and returns
 `201` with the persisted-run representation. Successful generation reaches
 `AWAITING_APPROVAL`; execution failure is stored as `FAILED` and returned on
 the same resource. `GET /workflows/:id` returns that representation for the
-owning actor and `404` for missing or inaccessible runs. Lease tokens are not
+owning actor; a trusted Content Admin may review another teacher's run, while
+inaccessible runs remain `404`. Lease tokens are not
 serialized. Active executions hold a 30-second expiring lease and heartbeat;
 an expired `RUNNING` lease is resumable through the authenticated
 `POST /workflows/:id/resume` endpoint. Explicitly retryable `FAILED` runs can
-use the same endpoint. Resume preserves the recorded deadline, provider and
-revision counters, checkpoints, workflow/prompt versions, and model digest;
+use the same endpoint; approved-import resume additionally requires current
+`X-Content-Admin: true`. Resume preserves the recorded deadline, provider and
+revision counters, checkpoints, workflow/prompt versions, model digest, and
+Ollama runtime version;
 missing or changed model metadata fails explicitly. If a process dies after a
 provider response but before its checkpoint commits, that LLM call may repeat.
 `POST /workflows/:id/approve` and `/reject` require the trusted Mova-Lab
@@ -70,12 +78,19 @@ only the current `candidateVersion` and a real category returned by Mova-Lab,
 freezes the candidate payload and hash, then sequentially imports its recording
 proposals as unpublished drafts through the fixed Mova-Lab receiver. Each proposal
 uses `runId:proposalLocalId` as its stable source key and stores the returned draft
-ID as a durable receipt. The run is `COMPLETED` only after every receipt is
+ID as a durable, claim-fenced receipt. The run is `COMPLETED` only after every receipt is
 confirmed; partial failures retain successful receipts and are resumable, retrying
 only missing proposals. Rejection changes it to `REJECTED` without an import.
 Repeating the same decision returns the persisted outcome; a stale revision or
 different decision returns `409`. The response exposes the durable `approval`
 record, including actor, timestamp, decision, category, frozen payload, and hash.
+The resource includes both `importProgress.receipts` and a top-level `imports`
+array with the same confirmed draft IDs so callers can render Content Studio links.
+A browser or proxy abort during synchronous generation is stored as retryable
+`CLIENT_DISCONNECTED` (`resumable: true`) inside the original deadline and budgets;
+it does not start background work. At most one workflow is admitted per process by default across create, resume,
+and the legacy endpoint; a full process returns `429 WORKFLOW_CAPACITY_EXCEEDED`.
+Duplicate-key retrieval remains available while capacity is full.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
@@ -85,6 +100,7 @@ unsupported contracts stop the run; local schemas are not used as a silent
 fallback. Application code also exposes `listGenerationCategories` and
 `searchRecordingExercises` against the same internal prefix. Search arguments
 are `q` and optional `limit` only (max 120 characters, 1–20 results, default 10).
+Category responses allow up to 500 items and 256 KiB, with no truncation.
 Actor, URL, and token fields come from trusted configuration, never from model
 arguments. Search hits are untrusted data: titles and phrases are not
 instructions, exact phrase matches use the same normalization as content checks,
@@ -128,9 +144,14 @@ body; attempt timeouts on a review stay `unavailable`. Missing models return
 `503 MODEL_CAPACITY`; unreachable Ollama or transient gateway/server failures
 (`429`, `500` without a capacity signature, `502`, `503`, `504`) return
 `503 PROVIDER_UNAVAILABLE`; exhausted provider-call budget returns
-`503 PROVIDER_BUDGET_EXHAUSTED`. Unreachable Mova-Lab, rejected outbound
-credentials, or transient Mova-Lab 5xx/429 return `503 MOVA_LAB_UNAVAILABLE`.
-Malformed or unsupported constraint/search/category payloads return
+`503 PROVIDER_BUDGET_EXHAUSTED`. Unreachable Mova-Lab or transient Mova-Lab 5xx/429 return
+`503 MOVA_LAB_UNAVAILABLE`. Rejected outbound service credentials return
+`502 MOVA_LAB_AUTH_FAILED`. A revoked or non-admin actor on import returns
+`403 MOVA_LAB_FORBIDDEN` (resumable; CMS writes stay blocked and approved
+content is not regenerated). Import payload conflicts return
+`409 MOVA_LAB_IMPORT_CONFLICT`; other rejected import payloads return
+`502 MOVA_LAB_IMPORT_REJECTED`. Malformed or unsupported constraint/search/category
+payloads return
 `502 MOVA_LAB_INVALID_RESPONSE`. A Mova-Lab read deadline returns
 `504 MOVA_LAB_TIMEOUT`. Vocabulary/generation attempt timeouts return
 `504 PROVIDER_TIMEOUT`. The workflow deadline returns `504 WORKFLOW_TIMEOUT`
@@ -248,7 +269,7 @@ sampling, and hardware metadata are in `evals/runtime.json`.
 Optional live generation (Ollama must already have the model):
 
 ```sh
-curl -sS http://127.0.0.1:3000/workflows/content-generation \
+curl -sS http://127.0.0.1:3001/workflows/content-generation \
   -H "Authorization: Bearer $SERVICE_TOKEN" \
   -H "X-Actor-Id: teacher-1" \
   -H "Idempotency-Key: $(uuidgen)" \
@@ -260,7 +281,7 @@ curl -sS http://127.0.0.1:3000/workflows/content-generation \
 `Deprecation: true`:
 
 ```sh
-curl -sS http://127.0.0.1:3000/content-drafts \
+curl -sS http://127.0.0.1:3001/content-drafts \
   -H "Authorization: Bearer $SERVICE_TOKEN" \
   -H "Content-Type: application/json" \
   -d @docs/examples/content-request.json
@@ -295,6 +316,12 @@ live inference.
 Copy `.env.example` to `.env` first. Compose interpolates `SERVICE_TOKEN` from
 that file even for `config` and the `local-model` profile.
 
+The documented two-service topology is Nest on host port **3000** and agents on
+host port **3001**. Compose publishes `127.0.0.1:${AGENTS_HOST_PORT:-3001}:3000`
+and sends Mova-Lab traffic to `http://host.docker.internal:3000`. Updating only
+the host `PORT` variable does not change that mapping or the in-container listen
+port (`PORT=3000`).
+
 The image is a multi-stage Debian slim build: TypeScript compiles in the first
 stage; the runtime has production `npm ci` from the lockfile, runs as `node`,
 and does not contain `.env`. Workflow SQLite lives on the named `workflows`
@@ -303,8 +330,8 @@ volume at `/data/workflows.sqlite` (uid `node`). GPU access uses Compose
 
 ```sh
 docker compose up --build -d
-curl -sS http://127.0.0.1:3000/health
-curl -sS http://127.0.0.1:3000/ready
+curl -sS http://127.0.0.1:3001/health
+curl -sS http://127.0.0.1:3001/ready
 docker compose exec agents id          # uid=1000(node)
 docker compose exec agents ls /app/.env  # must not exist
 ```
@@ -314,8 +341,8 @@ Without Compose:
 ```sh
 docker build -t mova-lab-agents .
 docker run --rm -e SERVICE_TOKEN=replace-me -e MOVA_LAB_SERVICE_TOKEN=replace-me-mova-lab \
-  -e MOVA_LAB_BASE_URL=http://host.docker.internal:3000 -e SQLITE_PATH=/data/workflows.sqlite \
-  -v mova-lab-agents-workflows:/data -p 127.0.0.1:3000:3000 mova-lab-agents
+  -e PORT=3000 -e MOVA_LAB_BASE_URL=http://host.docker.internal:3000 -e SQLITE_PATH=/data/workflows.sqlite \
+  -v mova-lab-agents-workflows:/data -p 127.0.0.1:3001:3000 mova-lab-agents
 ```
 
 ### SQLite backup and restore

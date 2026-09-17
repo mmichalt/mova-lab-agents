@@ -12,7 +12,7 @@ export {
 } from './schema.ts';
 
 export class PersistError extends Error {
-  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'CONSTRAINT';
+  readonly code: 'NOT_FOUND' | 'CONFLICT' | 'CONSTRAINT' | 'BUDGET';
 
   constructor(code: PersistError['code'], message: string) {
     super(message);
@@ -61,6 +61,7 @@ export type PersistedRun = {
   promptVersions: Record<string, string>;
   modelTag: string | null;
   modelDigest: string | null;
+  ollamaVersion: string | null;
   limits: PersistedLimits;
   consumed: PersistedConsumed;
   state: unknown;
@@ -83,6 +84,11 @@ export type StepAttemptRecord = {
   finishedAt: number | null;
   usage: unknown;
   error: unknown;
+};
+
+export type AttemptReservation = {
+  id: string;
+  executionAttempt: number;
 };
 
 export type CandidateRevisionRecord = {
@@ -125,6 +131,7 @@ export type CreateRunInput = {
   promptVersions: Record<string, string>;
   modelTag?: string | null;
   modelDigest?: string | null;
+  ollamaVersion?: string | null;
   limits: PersistedLimits;
   now: number;
 };
@@ -140,6 +147,7 @@ export type CheckpointInput = {
   claimToken?: string;
   modelTag?: string | null;
   modelDigest?: string | null;
+  ollamaVersion?: string | null;
   attempt?: Omit<StepAttemptRecord, 'id' | 'runId'>;
   candidate?: Omit<CandidateRevisionRecord, 'id' | 'runId'>;
 };
@@ -170,6 +178,26 @@ export type WorkflowStore = {
   saveCheckpoint: (input: CheckpointInput) => PersistedRun;
   claimRun: (input: ClaimInput) => string | undefined;
   heartbeatRun: (input: ClaimInput & { claimToken: string }) => boolean;
+  reserveAttempt: (input: {
+    runId: string;
+    claimToken: string;
+    step: string;
+    candidateVersion: number | null;
+    operationKey: string;
+    startedAt: number;
+  }) => AttemptReservation;
+  finishAttempt: (input: {
+    runId: string;
+    claimToken: string;
+    reservation: AttemptReservation;
+    finishedAt: number;
+    outcome: string;
+    usage: unknown;
+    error: unknown;
+    modelTag?: string | null;
+    modelDigest?: string | null;
+    ollamaVersion?: string | null;
+  }) => void;
   recordApproval: (
     input: {
       runId: string;
@@ -184,7 +212,11 @@ export type WorkflowStore = {
     ),
   ) => ApprovalRecord;
   saveImportReceipt: (
-    input: Omit<ImportReceiptRecord, 'id'> & { id?: string },
+    input: Omit<ImportReceiptRecord, 'id'> & {
+      id?: string;
+      claimToken: string;
+      now: number;
+    },
   ) => ImportReceiptRecord;
   updateImportReceipt: (input: {
     runId: string;
@@ -192,7 +224,16 @@ export type WorkflowStore = {
     payloadHash: string;
     contentId: string | null;
     status: ImportReceiptRecord['status'];
+    claimToken: string;
+    now: number;
   }) => ImportReceiptRecord;
+  completeImport: (input: {
+    runId: string;
+    claimToken: string;
+    now: number;
+    consumed: PersistedConsumed;
+    state: unknown;
+  }) => PersistedRun;
   backupTo: (destinationPath: string) => string;
   sqliteSettings: () => { journalMode: string; foreignKeys: number; busyTimeout: number };
   close: () => void;
@@ -213,6 +254,7 @@ type RunRow = {
   prompt_versions: string;
   model_tag: string | null;
   model_digest: string | null;
+  ollama_version: string | null;
   limits: string;
   consumed: string;
   state: string;
@@ -241,11 +283,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     INSERT INTO runs (
       id, owner_id, idempotency_key, input_hash, normalized_input, status, phase,
       state_version, schema_version, workflow_version, constraints_version, prompt_versions,
-      model_tag, model_digest, limits, consumed, state, created_at, updated_at
+      model_tag, model_digest, ollama_version, limits, consumed, state, created_at, updated_at
     ) VALUES (
       @id, @ownerId, @idempotencyKey, @inputHash, @normalizedInput, 'PENDING', 'vocabulary',
       0, @schemaVersion, @workflowVersion, @constraintsVersion, @promptVersions,
-      @modelTag, @modelDigest, @limits, @consumed, @state, @now, @now
+      @modelTag, @modelDigest, @ollamaVersion, @limits, @consumed, @state, @now, @now
     )
   `);
   const updateCheckpointStmt = db.prepare(`
@@ -257,6 +299,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       state = @state,
       model_tag = COALESCE(@modelTag, model_tag),
       model_digest = COALESCE(@modelDigest, model_digest),
+      ollama_version = COALESCE(@ollamaVersion, ollama_version),
       lease_owner = CASE
         WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
         ELSE lease_owner
@@ -322,10 +365,52 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       @outcome, @startedAt, @finishedAt, @usage, @error
     )
   `);
+  const nextAttemptStmt = db.prepare(
+    'SELECT COALESCE(MAX(execution_attempt), 0) + 1 AS next_attempt FROM step_attempts WHERE run_id = ? AND operation_key = ?',
+  );
+  const reserveAttemptRunStmt = db.prepare(`
+    UPDATE runs SET
+      consumed = json_set(consumed, '$.providerRequests', json_extract(consumed, '$.providerRequests') + 1),
+      updated_at = @startedAt
+    WHERE id = @runId
+      AND lease_token = @claimToken
+      AND lease_expires_at > @startedAt
+      AND status = 'RUNNING'
+      AND json_extract(consumed, '$.providerRequests') < json_extract(limits, '$.maxProviderRequests')
+  `);
+  const finishAttemptStmt = db.prepare(`
+    UPDATE step_attempts SET
+      outcome = @outcome,
+      finished_at = @finishedAt,
+      usage = @usage,
+      error = @error
+    WHERE id = @id
+      AND run_id = @runId
+      AND outcome = 'unknown'
+      AND EXISTS (
+        SELECT 1 FROM runs
+        WHERE runs.id = @runId
+          AND runs.lease_token = @claimToken
+          AND runs.lease_expires_at > @finishedAt
+      )
+  `);
+  const finishAttemptRunStmt = db.prepare(`
+    UPDATE runs SET
+      model_tag = COALESCE(@modelTag, model_tag),
+      model_digest = COALESCE(@modelDigest, model_digest),
+      ollama_version = COALESCE(@ollamaVersion, ollama_version),
+      updated_at = @finishedAt
+    WHERE id = @runId
+      AND lease_token = @claimToken
+      AND lease_expires_at > @finishedAt
+  `);
   const insertCandidateStmt = db.prepare(`
     INSERT INTO candidate_revisions (
       id, run_id, candidate_version, proposals, checks, created_at
     ) VALUES (@id, @runId, @candidateVersion, @proposals, @checks, @createdAt)
+    ON CONFLICT (run_id, candidate_version) DO UPDATE SET
+      checks = excluded.checks
+    WHERE candidate_revisions.proposals = excluded.proposals
   `);
   const insertApprovalStmt = db.prepare(`
     INSERT INTO approvals (
@@ -375,6 +460,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         promptVersions: jsonText(input.promptVersions),
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
         limits: jsonText(input.limits),
         consumed: jsonText({ providerRequests: 0, revisionCount: 0 }),
         state: jsonText({}),
@@ -435,9 +521,15 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       if (run.modelDigest && input.modelDigest && run.modelDigest !== input.modelDigest) {
         throw new PersistError('CONSTRAINT', 'Run model digest changed.');
       }
+      if (run.ollamaVersion && input.ollamaVersion && run.ollamaVersion !== input.ollamaVersion) {
+        throw new PersistError('CONSTRAINT', 'Run Ollama version changed.');
+      }
       assertConsumed(run.consumed, input.consumed, run.limits);
       if (input.attempt && !(input.modelTag ?? run.modelTag)) {
         throw new PersistError('CONSTRAINT', 'A model-derived checkpoint needs a model tag.');
+      }
+      if (input.attempt && !(input.modelDigest ?? run.modelDigest)) {
+        throw new PersistError('CONSTRAINT', 'A model-derived checkpoint needs a model digest.');
       }
       if (input.attempt) {
         insertAttemptStmt.run({
@@ -455,7 +547,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         });
       }
       if (input.candidate) {
-        insertCandidateStmt.run({
+        const candidate = insertCandidateStmt.run({
           id: randomUUID(),
           runId: input.runId,
           candidateVersion: input.candidate.candidateVersion,
@@ -463,6 +555,9 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
           checks: jsonText(input.candidate.checks),
           createdAt: input.candidate.createdAt,
         });
+        if (candidate.changes !== 1) {
+          throw new PersistError('CONSTRAINT', 'Candidate revision could not be saved.');
+        }
       }
       const updated = updateCheckpointStmt.run({
         id: input.runId,
@@ -473,6 +568,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         state: jsonText(input.state),
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
         claimToken: input.claimToken ?? null,
         now: input.now,
       });
@@ -540,35 +636,67 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       return approval;
     });
 
-  const saveImportReceipt: WorkflowStore['saveImportReceipt'] = (input) => {
-    const id = input.id ?? randomUUID();
-    try {
-      insertReceiptStmt.run({
-        id,
-        runId: input.runId,
-        proposalLocalId: input.proposalLocalId,
-        importKey: input.importKey,
-        payloadHash: input.payloadHash,
-        contentId: input.contentId,
-        status: input.status,
-        createdAt: input.createdAt,
-      });
-    } catch (err) {
-      mapped(err);
-    }
-    const row = db.prepare('SELECT * FROM import_receipts WHERE id = ?').get(id) as ReceiptRow;
-    return mapReceipt(row);
-  };
+  const saveImportReceipt: WorkflowStore['saveImportReceipt'] = (input) =>
+    wrap(() => {
+      const run = readRun(input.runId);
+      if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+      assertClaim(run, input.claimToken, input.now);
+      const existing = db
+        .prepare('SELECT * FROM import_receipts WHERE run_id = ? AND proposal_local_id = ?')
+        .get(input.runId, input.proposalLocalId) as ReceiptRow | undefined;
+      if (existing) {
+        if (
+          existing.import_key === input.importKey &&
+          existing.payload_hash === input.payloadHash
+        ) {
+          return mapReceipt(existing);
+        }
+        throw new PersistError('CONFLICT', 'Import receipt does not match the approved payload.');
+      }
+      const id = input.id ?? randomUUID();
+      try {
+        insertReceiptStmt.run({
+          id,
+          runId: input.runId,
+          proposalLocalId: input.proposalLocalId,
+          importKey: input.importKey,
+          payloadHash: input.payloadHash,
+          contentId: input.contentId,
+          status: input.status,
+          createdAt: input.createdAt,
+        });
+      } catch (err) {
+        mapped(err);
+      }
+      const row = db.prepare('SELECT * FROM import_receipts WHERE id = ?').get(id) as ReceiptRow;
+      return mapReceipt(row);
+    });
 
   const updateImportReceipt: WorkflowStore['updateImportReceipt'] = (input) =>
     wrap(() => {
+      const run = readRun(input.runId);
+      if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+      assertClaim(run, input.claimToken, input.now);
+      const existing = db
+        .prepare('SELECT * FROM import_receipts WHERE run_id = ? AND proposal_local_id = ?')
+        .get(input.runId, input.proposalLocalId) as ReceiptRow | undefined;
+      if (!existing || existing.payload_hash !== input.payloadHash) {
+        throw new PersistError('CONFLICT', 'Import receipt does not match the approved payload.');
+      }
+      if (existing.status === 'imported') {
+        if (input.status === 'imported' && input.contentId === existing.content_id) {
+          return mapReceipt(existing);
+        }
+        throw new PersistError('CONFLICT', 'An imported receipt cannot regress or change.');
+      }
       const updated = db
         .prepare(
           `UPDATE import_receipts
            SET content_id = @contentId, status = @status
            WHERE run_id = @runId
              AND proposal_local_id = @proposalLocalId
-             AND payload_hash = @payloadHash`,
+             AND payload_hash = @payloadHash
+             AND status != 'imported'`,
         )
         .run({
           runId: input.runId,
@@ -578,7 +706,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
           status: input.status,
         });
       if (updated.changes !== 1) {
-        throw new PersistError('CONFLICT', 'Import receipt does not match the approved payload.');
+        throw new PersistError('CONFLICT', 'Import receipt is no longer mutable.');
       }
       const row = db
         .prepare('SELECT * FROM import_receipts WHERE run_id = ? AND proposal_local_id = ?')
@@ -586,10 +714,139 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       return mapReceipt(row);
     });
 
+  const reserveAttempt: WorkflowStore['reserveAttempt'] = (input) =>
+    wrap(() => {
+      const result = reserveAttemptRunStmt.run({
+        runId: input.runId,
+        claimToken: input.claimToken,
+        startedAt: input.startedAt,
+      });
+      if (result.changes !== 1) {
+        const run = readRun(input.runId);
+        if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+        assertClaim(run, input.claimToken, input.startedAt);
+        throw new PersistError('BUDGET', 'Provider request budget exhausted.');
+      }
+      const executionAttempt = Number(
+        (nextAttemptStmt.get(input.runId, input.operationKey) as { next_attempt: number })
+          .next_attempt,
+      );
+      const id = randomUUID();
+      insertAttemptStmt.run({
+        id,
+        runId: input.runId,
+        step: input.step,
+        candidateVersion: input.candidateVersion,
+        operationKey: input.operationKey,
+        executionAttempt,
+        outcome: 'unknown',
+        startedAt: input.startedAt,
+        finishedAt: null,
+        usage: null,
+        error: null,
+      });
+      return { id, executionAttempt };
+    });
+
+  const completeImport: WorkflowStore['completeImport'] = (input) =>
+    wrap(() => {
+      const run = readRun(input.runId);
+      if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+      assertClaim(run, input.claimToken, input.now);
+      if (run.status !== 'RUNNING' || run.phase !== 'import') {
+        throw new PersistError('CONFLICT', 'Run cannot complete this import.');
+      }
+      const approval = getApprovalStmt.get(input.runId) as ApprovalRow | undefined;
+      if (approval?.decision !== 'approved' || approval.frozen_payload == null) {
+        throw new PersistError('CONFLICT', 'Run has no approved import payload.');
+      }
+      assertConsumed(run.consumed, input.consumed, run.limits);
+      const receipts = new Map(
+        (listReceiptsStmt.all(input.runId) as ReceiptRow[]).map((row) => [
+          row.proposal_local_id,
+          row,
+        ]),
+      );
+      for (const localId of frozenProposalIds(unpack(approval.frozen_payload))) {
+        const receipt = receipts.get(localId);
+        if (
+          receipt?.status !== 'imported' ||
+          receipt.content_id == null ||
+          receipt.payload_hash !== approval.payload_hash ||
+          receipt.import_key !== `${input.runId}:${localId}`
+        ) {
+          throw new PersistError('CONSTRAINT', 'Approved import is not fully confirmed.');
+        }
+      }
+      const updated = updateCheckpointStmt.run({
+        id: input.runId,
+        expectedStateVersion: run.stateVersion,
+        status: 'COMPLETED',
+        phase: 'import',
+        consumed: jsonText(input.consumed),
+        state: jsonText(input.state),
+        modelTag: null,
+        modelDigest: null,
+        ollamaVersion: null,
+        claimToken: input.claimToken,
+        now: input.now,
+      });
+      if (updated.changes !== 1) {
+        throw new PersistError('CONFLICT', 'Run state version does not match.');
+      }
+      const next = readRun(input.runId);
+      if (!next) throw new PersistError('NOT_FOUND', 'Run not found.');
+      return next;
+    });
+
+  const finishAttempt: WorkflowStore['finishAttempt'] = (input) =>
+    wrap(() => {
+      const updated = finishAttemptStmt.run({
+        id: input.reservation.id,
+        runId: input.runId,
+        claimToken: input.claimToken,
+        finishedAt: input.finishedAt,
+        outcome: input.outcome,
+        usage: jsonTextNullable(input.usage),
+        error: jsonTextNullable(input.error),
+      });
+      if (updated.changes !== 1) {
+        throw new PersistError('CONFLICT', 'Attempt is no longer owned by this run executor.');
+      }
+      if (!input.modelTag && !input.modelDigest && !input.ollamaVersion) return;
+      const run = readRun(input.runId);
+      if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+      if (run.modelTag && input.modelTag && run.modelTag !== input.modelTag) {
+        throw new PersistError('CONSTRAINT', 'Run model tag changed.');
+      }
+      if (run.modelDigest && input.modelDigest && run.modelDigest !== input.modelDigest) {
+        throw new PersistError('CONSTRAINT', 'Run model digest changed.');
+      }
+      if (run.ollamaVersion && input.ollamaVersion && run.ollamaVersion !== input.ollamaVersion) {
+        throw new PersistError('CONSTRAINT', 'Run Ollama version changed.');
+      }
+      const identity = finishAttemptRunStmt.run({
+        runId: input.runId,
+        claimToken: input.claimToken,
+        finishedAt: input.finishedAt,
+        modelTag: input.modelTag ?? null,
+        modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
+      });
+      if (identity.changes !== 1) {
+        throw new PersistError('CONFLICT', 'Attempt is no longer owned by this run executor.');
+      }
+    });
+
   const checkpointTx = db.transaction(saveCheckpoint);
   const claimTx = db.transaction(claimRun);
   const heartbeatTx = db.transaction(heartbeatRun);
   const approvalTx = db.transaction(recordApproval);
+  const receiptSaveTx = db.transaction(saveImportReceipt);
+  const receiptUpdateTx = db.transaction(updateImportReceipt);
+  const attemptReserveTx = db.transaction(reserveAttempt);
+  const attemptFinishTx = db.transaction(finishAttempt);
+  const importCompleteTx = db.transaction(completeImport);
 
   return {
     path,
@@ -613,9 +870,12 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     saveCheckpoint: (input) => checkpointTx(input),
     claimRun: (input) => claimTx(input),
     heartbeatRun: (input) => heartbeatTx(input),
+    reserveAttempt: (input) => attemptReserveTx(input),
+    finishAttempt: (input) => attemptFinishTx(input),
     recordApproval: (input) => approvalTx(input),
-    saveImportReceipt,
-    updateImportReceipt,
+    saveImportReceipt: (input) => receiptSaveTx(input),
+    updateImportReceipt: (input) => receiptUpdateTx(input),
+    completeImport: (input) => importCompleteTx(input),
     backupTo: (destinationPath) => {
       const dest = resolve(destinationPath);
       mkdirSync(dirname(dest), { recursive: true });
@@ -746,8 +1006,37 @@ function checkpointAllowed(from: RunStatus, to: RunStatus, phase: RunPhase) {
   if (from !== 'PENDING' && from !== 'RUNNING') return false;
   if (to === 'RUNNING') return phase !== 'finished';
   if (to === 'AWAITING_APPROVAL' || to === 'FAILED') return phase === 'finished';
-  if (to === 'COMPLETED') return from === 'RUNNING' && phase === 'import';
   return false;
+}
+
+function frozenProposalIds(payload: unknown): string[] {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new PersistError('CONSTRAINT', 'Approved payload is invalid.');
+  }
+  const proposals = (payload as { proposals?: unknown }).proposals;
+  if (!Array.isArray(proposals) || proposals.length < 1) {
+    throw new PersistError('CONSTRAINT', 'Approved payload is invalid.');
+  }
+  const ids = proposals.map((item) => {
+    const localId =
+      typeof item === 'object' && item !== null && !Array.isArray(item)
+        ? (item as { localId?: unknown }).localId
+        : undefined;
+    if (typeof localId !== 'string' || localId.length === 0) {
+      throw new PersistError('CONSTRAINT', 'Approved payload is invalid.');
+    }
+    return localId;
+  });
+  if (new Set(ids).size !== ids.length) {
+    throw new PersistError('CONSTRAINT', 'Approved payload is invalid.');
+  }
+  return ids;
+}
+
+function assertClaim(run: PersistedRun, claimToken: string, now: number) {
+  if (run.leaseToken !== claimToken || (run.leaseExpiresAt ?? 0) <= now) {
+    throw new PersistError('CONFLICT', 'Run claim token does not match.');
+  }
 }
 
 function assertReadableSqlite(sqlitePath: string) {
@@ -816,6 +1105,7 @@ function mapRun(row: RunRow): PersistedRun {
     promptVersions: unpack(row.prompt_versions) as Record<string, string>,
     modelTag: row.model_tag,
     modelDigest: row.model_digest,
+    ollamaVersion: row.ollama_version,
     limits: unpack(row.limits) as PersistedLimits,
     consumed: unpack(row.consumed) as PersistedConsumed,
     state: unpack(row.state),

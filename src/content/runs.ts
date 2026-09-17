@@ -2,7 +2,13 @@ import type { Request } from 'express';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
-import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '../llm/execution.ts';
+import {
+  type AttemptRecorder,
+  type Clock,
+  createLimits,
+  MAX_PROVIDER_REQUESTS,
+  systemClock,
+} from '../llm/execution.ts';
 import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
@@ -28,6 +34,7 @@ import { AGE_PROMPT_VERSION, LANGUAGE_PROMPT_VERSION } from './review.ts';
 import {
   type CheckResult,
   type ContentRequest,
+  checkResultSchema,
   contentRequestSchema,
   type GeneratedProposal,
   recordingProposalSchema,
@@ -41,6 +48,10 @@ import {
 
 export const RUN_LEASE_MS = 30_000;
 const RUN_HEARTBEAT_MS = RUN_LEASE_MS / 3;
+
+export type WorkflowAdmission = {
+  tryAcquire: () => (() => void) | undefined;
+};
 
 type ExecutionOptions = Omit<
   Parameters<typeof createContentGeneration>[0],
@@ -80,7 +91,7 @@ export type WorkflowResource = {
     revisionCount: number;
     providerRequests: number;
     requiresHumanApproval: boolean;
-    checks: unknown;
+    checks: CheckResult[];
     proposals: ReturnType<typeof withLocalIds>;
     vocabulary: unknown;
     error: { code: string; message: string; retryable: boolean } | null;
@@ -113,6 +124,7 @@ export type WorkflowResource = {
       createdAt: number;
     }>;
   };
+  imports: WorkflowResource['importProgress']['receipts'];
 };
 
 const approveRequestSchema = z.strictObject({
@@ -143,41 +155,64 @@ export async function createContentGeneration(options: {
   clock?: Clock;
   maxProviderRequests?: number;
   signal?: AbortSignal;
+  canReview?: boolean;
+  admission?: WorkflowAdmission;
 }): Promise<{ created: boolean; resource: WorkflowResource }> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
     throw new AppError(400, 'VALIDATION_ERROR', 'Invalid content request.');
   }
-  const opened = openPersistedRun(options, parsed.data);
-  if (!opened.created) {
+  const existing = options.store.getRunByIdempotency(options.ownerId, options.idempotencyKey);
+  const release = existing ? undefined : options.admission?.tryAcquire();
+  if (options.admission && !existing && !release) {
+    const raced = options.store.getRunByIdempotency(options.ownerId, options.idempotencyKey);
+    if (raced) {
+      return {
+        created: false,
+        resource: presentRun(
+          options.store,
+          raced,
+          options.ownerId,
+          (options.clock ?? systemClock).now(),
+        ),
+      };
+    }
+    throw new AppError(429, 'WORKFLOW_CAPACITY_EXCEEDED', 'Workflow capacity is currently full.');
+  }
+  try {
+    const opened = openPersistedRun(options, parsed.data);
+    if (!opened.created) {
+      return {
+        created: false,
+        resource: presentRun(
+          options.store,
+          opened.run,
+          options.ownerId,
+          (options.clock ?? systemClock).now(),
+        ),
+      };
+    }
+    await executePersistedRun(options, opened.run, parsed.data);
+    const latest = options.store.getRun(opened.run.id);
+    if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
     return {
-      created: false,
+      created: true,
       resource: presentRun(
         options.store,
-        opened.run,
+        latest,
         options.ownerId,
         (options.clock ?? systemClock).now(),
       ),
     };
+  } finally {
+    release?.();
   }
-  await executePersistedRun(options, opened.run, parsed.data);
-  const latest = options.store.getRun(opened.run.id);
-  if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  return {
-    created: true,
-    resource: presentRun(
-      options.store,
-      latest,
-      options.ownerId,
-      (options.clock ?? systemClock).now(),
-    ),
-  };
 }
 
 export async function resumeContentGeneration(options: ExecutionOptions & { id: string }) {
   const clock = options.clock ?? systemClock;
   const run = options.store.getRun(options.id);
-  if (!run || run.ownerId !== options.ownerId) {
+  if (!run || !canAccess(run, options.ownerId, options.canReview)) {
     throw new AppError(404, 'NOT_FOUND', 'Not found.');
   }
   if (!isResumable(run, clock.now())) {
@@ -185,6 +220,10 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
   }
   const importing = isApprovedImport(options.store, run);
   if (importing) {
+    if (!options.canReview) {
+      throw new AppError(403, 'FORBIDDEN', 'Content Admin authority is required.');
+    }
+    assertImportRecoveryCompatible(options.store, run);
     await executeApprovedImport(options, run);
   } else {
     await assertRecoveryCompatible(options.config, options.signal, run);
@@ -209,7 +248,7 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
   }
   const latest = options.store.getRun(run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  return presentRun(options.store, latest, options.ownerId, clock.now());
+  return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);
 }
 
 export async function approveContentGeneration(
@@ -244,10 +283,11 @@ export function getContentGeneration(
   id: string,
   actorId: string,
   now = Date.now(),
+  canReview = false,
 ) {
   const run = store.getRun(id);
   if (!run) throw new AppError(404, 'NOT_FOUND', 'Not found.');
-  return presentRun(store, run, actorId, now);
+  return presentRun(store, run, actorId, now, canReview);
 }
 
 export function presentRun(
@@ -255,8 +295,9 @@ export function presentRun(
   run: PersistedRun,
   actorId: string,
   now = Date.now(),
+  canReview = false,
 ): WorkflowResource {
-  if (run.ownerId !== actorId) {
+  if (!canAccess(run, actorId, canReview)) {
     throw new AppError(404, 'NOT_FOUND', 'Not found.');
   }
   const state = asState(run.state);
@@ -265,6 +306,8 @@ export function presentRun(
   const proposals = Array.isArray(state.candidate)
     ? withLocalIds(state.candidate as GeneratedProposal[])
     : [];
+  const checks = z.array(checkResultSchema).safeParse(state.checks).data ?? [];
+  const importProgress = importProgressOf(run, approval, receipts);
   return {
     id: run.id,
     status: run.status,
@@ -290,7 +333,7 @@ export function presentRun(
       revisionCount: asCount(state.revisionCount),
       providerRequests: run.consumed.providerRequests,
       requiresHumanApproval: run.status === 'AWAITING_APPROVAL',
-      checks: Array.isArray(state.checks) ? state.checks : [],
+      checks,
       proposals,
       vocabulary: state.vocabulary ?? null,
       error: errorOf(state.error),
@@ -302,7 +345,8 @@ export function presentRun(
       checks: row.checks,
       createdAt: row.createdAt,
     })),
-    importProgress: importProgressOf(run, approval, receipts),
+    importProgress,
+    imports: importProgress.receipts,
   };
 }
 
@@ -314,7 +358,12 @@ async function decideContentGeneration(
 ) {
   const clock = options.clock ?? systemClock;
   const run = options.store.getRun(options.id);
-  if (!run) throw new AppError(404, 'NOT_FOUND', 'Not found.');
+  if (!run || !canAccess(run, options.ownerId, options.canReview)) {
+    throw new AppError(404, 'NOT_FOUND', 'Not found.');
+  }
+  if (!options.canReview) {
+    throw new AppError(403, 'FORBIDDEN', 'Content Admin authority is required.');
+  }
 
   const candidate = approvalCandidate(options.store, run, decision.candidateVersion);
   const frozenPayload = {
@@ -328,7 +377,7 @@ async function decideContentGeneration(
     if (sameDecision(existing, decision, payloadHash)) {
       const latest = options.store.getRun(run.id);
       if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-      return presentRun(options.store, latest, latest.ownerId, clock.now());
+      return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);
     }
     throw approvalConflict();
   }
@@ -363,7 +412,7 @@ async function decideContentGeneration(
     if (raced && sameDecision(raced, decision, payloadHash)) {
       const latest = options.store.getRun(run.id);
       if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-      return presentRun(options.store, latest, latest.ownerId, clock.now());
+      return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);
     }
     if (err instanceof PersistError && err.code === 'CONFLICT') throw approvalConflict();
     throw sqliteUnavailable(err);
@@ -375,7 +424,7 @@ async function decideContentGeneration(
   }
   const imported = options.store.getRun(run.id);
   if (!imported) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  return presentRun(options.store, imported, imported.ownerId, clock.now());
+  return presentRun(options.store, imported, options.ownerId, clock.now(), options.canReview);
 }
 
 const frozenApprovalSchema = z.strictObject({
@@ -458,6 +507,8 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
             payloadHash: approval.payloadHash,
             contentId: null,
             status: 'pending',
+            claimToken,
+            now: clock.now(),
           })
         : options.store.saveImportReceipt({
             runId: run.id,
@@ -467,6 +518,8 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
             contentId: null,
             status: 'pending',
             createdAt: clock.now(),
+            claimToken,
+            now: clock.now(),
           });
       const imported = await importRecordingDraft({
         config: options.config,
@@ -484,6 +537,8 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
         payloadHash: approval.payloadHash,
         contentId: imported.id,
         status: 'imported',
+        claimToken,
+        now: clock.now(),
       });
       activeReceipt = undefined;
       latest = saveImportCheckpoint(
@@ -496,17 +551,36 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
       );
     }
     if (lost) throw claimLostError();
-    latest = saveImportCheckpoint(
-      options.store,
-      latest,
+    if (
+      approved.proposals.some((proposal) => {
+        const receipt = options.store
+          .listImportReceipts(run.id)
+          .find((item) => item.proposalLocalId === proposal.localId);
+        return (
+          receipt?.status !== 'imported' ||
+          receipt.contentId === null ||
+          receipt.importKey !== `${run.id}:${proposal.localId}` ||
+          receipt.payloadHash !== approval.payloadHash
+        );
+      })
+    ) {
+      throw new AppError(409, 'IMPORT_INCOMPLETE', 'The approved import is not fully confirmed.');
+    }
+    latest = options.store.completeImport({
+      runId: latest.id,
       claimToken,
-      'COMPLETED',
-      null,
-      clock.now(),
-    );
+      now: clock.now(),
+      consumed: latest.consumed,
+      state: {
+        ...asState(latest.state),
+        status: 'COMPLETED',
+        phase: 'finished',
+        error: null,
+      },
+    });
     return latest;
   } catch (err) {
-    if (activeReceipt?.status === 'pending') {
+    if (!lost && activeReceipt?.status === 'pending') {
       try {
         options.store.updateImportReceipt({
           runId: run.id,
@@ -514,6 +588,8 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
           payloadHash: activeReceipt.payloadHash,
           contentId: null,
           status: 'failed',
+          claimToken,
+          now: clock.now(),
         });
       } catch {
         // The run checkpoint remains the recovery source if this receipt update races a crash.
@@ -532,7 +608,7 @@ function saveImportCheckpoint(
   store: WorkflowStore,
   run: PersistedRun,
   claimToken: string,
-  status: 'RUNNING' | 'FAILED' | 'COMPLETED',
+  status: 'RUNNING' | 'FAILED',
   error: { code: string; message: string; retryable: boolean } | null,
   now: number,
 ) {
@@ -578,18 +654,43 @@ function frozenPayloadHash(payload: FrozenApproval) {
 }
 
 function importError(err: AppError) {
+  const permanent = new Set(['MOVA_LAB_IMPORT_CONFLICT', 'MOVA_LAB_IMPORT_REJECTED']);
   return {
     code: err.code,
     message: err.message,
     retryable:
-      err.retryable ||
-      err.code === 'CLIENT_DISCONNECTED' ||
-      (err.status >= 500 && !['MOVA_LAB_IMPORT_REJECTED'].includes(err.code)),
+      !permanent.has(err.code) &&
+      (err.retryable ||
+        err.code === 'CLIENT_DISCONNECTED' ||
+        err.code === 'MOVA_LAB_FORBIDDEN' ||
+        err.status >= 500),
   };
 }
 
 function isApprovedImport(store: WorkflowStore, run: PersistedRun) {
   return store.getApproval(run.id)?.decision === 'approved';
+}
+
+function canAccess(run: PersistedRun, actorId: string, canReview = false) {
+  return run.ownerId === actorId || canReview;
+}
+
+function assertImportRecoveryCompatible(store: WorkflowStore, run: PersistedRun) {
+  if (run.schemaVersion !== SCHEMA_VERSION || run.workflowVersion !== WORKFLOW_VERSION) {
+    throw new AppError(
+      409,
+      'WORKFLOW_VERSION_UNSUPPORTED',
+      'The recorded workflow version is not supported.',
+    );
+  }
+  if (run.constraintsVersion !== CONSTRAINTS_VERSION) {
+    throw new AppError(
+      409,
+      'CONSTRAINTS_VERSION_CHANGED',
+      'The recorded generation constraints are no longer available.',
+    );
+  }
+  approvedPayload(store.getApproval(run.id));
 }
 
 function importProgressOf(
@@ -737,7 +838,6 @@ async function executePersistedRun(
     throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being executed.');
   }
   const previousCandidates = options.store.listCandidates(run.id);
-  const saved = new Set(previousCandidates.map((item) => item.candidateVersion));
   const loaded = options.store.getRun(run.id);
   if (!loaded) throw new AppError(404, 'NOT_FOUND', 'Not found.');
   let current = loaded;
@@ -763,6 +863,38 @@ async function executePersistedRun(
     }
   }, RUN_HEARTBEAT_MS);
   heartbeat.unref();
+  const attempts: AttemptRecorder = {
+    reserve: (input) => {
+      try {
+        return options.store.reserveAttempt({
+          runId: run.id,
+          claimToken,
+          ...input,
+        });
+      } catch (err) {
+        if (err instanceof PersistError && err.code === 'BUDGET') {
+          throw new AppError(
+            503,
+            'PROVIDER_BUDGET_EXHAUSTED',
+            'The provider request budget was exhausted.',
+          );
+        }
+        throw checkpointError(err);
+      }
+    },
+    finish: (reservation, result) => {
+      try {
+        options.store.finishAttempt({
+          runId: run.id,
+          claimToken,
+          reservation,
+          ...result,
+        });
+      } catch (err) {
+        throw checkpointError(err);
+      }
+    },
+  };
   const write = (input: {
     status: PersistedRun['status'];
     phase: RunPhase;
@@ -770,6 +902,7 @@ async function executePersistedRun(
     consumed: PersistedRun['consumed'];
     modelTag?: string | null;
     modelDigest?: string | null;
+    ollamaVersion?: string | null;
     candidate?: {
       candidateVersion: number;
       proposals: unknown;
@@ -784,6 +917,7 @@ async function executePersistedRun(
         now: clock.now(),
         modelTag: input.modelTag ?? options.config.ollamaModel,
         modelDigest: input.modelDigest,
+        ollamaVersion: input.ollamaVersion,
         status: input.status,
         phase: input.phase,
         state: input.state,
@@ -791,7 +925,6 @@ async function executePersistedRun(
         claimToken,
         candidate: input.candidate,
       });
-      if (input.candidate) saved.add(input.candidate.candidateVersion);
     } catch (err) {
       throw checkpointError(err);
     }
@@ -811,6 +944,7 @@ async function executePersistedRun(
       requestId: options.requestId,
       request,
       clock,
+      attempts,
       maxProviderRequests: current.limits.maxProviderRequests,
       maxRevisions: current.limits.maxRevisions,
       signal: AbortSignal.any(
@@ -833,10 +967,13 @@ async function executePersistedRun(
             constraintsVersion: current.constraintsVersion,
             modelTag: current.modelTag,
             modelDigest: current.modelDigest,
-            invalidCandidates: previousCandidates.map((item) => ({
-              proposals: item.proposals as GeneratedProposal[],
-              checks: Array.isArray(item.checks) ? (item.checks as CheckResult[]) : [],
-            })),
+            ollamaVersion: current.ollamaVersion,
+            invalidCandidates: previousCandidates
+              .filter((item) => hasBlockingCheck(item.checks))
+              .map((item) => ({
+                proposals: item.proposals as GeneratedProposal[],
+                checks: Array.isArray(item.checks) ? (item.checks as CheckResult[]) : [],
+              })),
           },
       onCheckpoint: (next) => {
         write({
@@ -846,7 +983,8 @@ async function executePersistedRun(
           state: snapshot(next),
           modelTag: next.modelTag,
           modelDigest: next.modelDigest,
-          candidate: candidateRow(next, saved, clock.now()),
+          ollamaVersion: next.ollamaVersion,
+          candidate: candidateRow(next, clock.now()),
         });
       },
     });
@@ -858,7 +996,8 @@ async function executePersistedRun(
       state: snapshot(state),
       modelTag: state.modelTag,
       modelDigest: state.modelDigest,
-      candidate: candidateRow(state, saved, clock.now()),
+      ollamaVersion: state.ollamaVersion,
+      candidate: candidateRow(state, clock.now()),
     });
   } finally {
     clearInterval(heartbeat);
@@ -882,11 +1021,12 @@ function snapshot(state: GenerationState) {
     providerRequests: state.providerRequests,
     modelTag: state.modelTag,
     modelDigest: state.modelDigest,
+    ollamaVersion: state.ollamaVersion,
   };
 }
 
-function candidateRow(state: GenerationState, saved: Set<number>, createdAt: number) {
-  if (!state.candidate || state.candidateVersion < 1 || saved.has(state.candidateVersion)) {
+function candidateRow(state: GenerationState, createdAt: number) {
+  if (!state.candidate || state.candidateVersion < 1) {
     return undefined;
   }
   return {
@@ -895,6 +1035,10 @@ function candidateRow(state: GenerationState, saved: Set<number>, createdAt: num
     checks: state.checks,
     createdAt,
   };
+}
+
+function hasBlockingCheck(value: unknown) {
+  return Array.isArray(value) && value.some((check) => check?.status === 'failed');
 }
 
 function consumedOf(state: GenerationState) {
@@ -967,16 +1111,17 @@ async function assertRecoveryCompatible(
   if (model.status !== 'ok') {
     throw new AppError(503, 'MODEL_UNAVAILABLE', 'The recorded model is not available.');
   }
-  if (!run.modelDigest) {
-    if (run.consumed.providerRequests > 0) {
-      throw new AppError(409, 'MODEL_DIGEST_UNRECORDED', 'The run has no recorded model digest.');
-    }
-    return;
-  }
   if (!model.digest) {
     throw new AppError(409, 'MODEL_DIGEST_UNAVAILABLE', 'The current model digest is unavailable.');
   }
-  if (model.digest !== run.modelDigest) {
+  if (run.consumed.providerRequests > 0 && !run.modelDigest) {
+    throw new AppError(
+      409,
+      'MODEL_DIGEST_UNAVAILABLE',
+      'The recorded model digest is unavailable.',
+    );
+  }
+  if (run.modelDigest && model.digest !== run.modelDigest) {
     throw new AppError(409, 'MODEL_DIGEST_CHANGED', 'The recorded model digest changed.');
   }
 }
