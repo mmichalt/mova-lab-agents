@@ -902,6 +902,7 @@ async function executePersistedRun(
     consumed: PersistedRun['consumed'];
     modelTag?: string | null;
     modelDigest?: string | null;
+    ollamaVersion?: string | null;
     candidate?: {
       candidateVersion: number;
       proposals: unknown;
@@ -916,6 +917,7 @@ async function executePersistedRun(
         now: clock.now(),
         modelTag: input.modelTag ?? options.config.ollamaModel,
         modelDigest: input.modelDigest,
+        ollamaVersion: input.ollamaVersion,
         status: input.status,
         phase: input.phase,
         state: input.state,
@@ -965,6 +967,7 @@ async function executePersistedRun(
             constraintsVersion: current.constraintsVersion,
             modelTag: current.modelTag,
             modelDigest: current.modelDigest,
+            ollamaVersion: current.ollamaVersion,
             invalidCandidates: previousCandidates
               .filter((item) => hasBlockingCheck(item.checks))
               .map((item) => ({
@@ -980,6 +983,7 @@ async function executePersistedRun(
           state: snapshot(next),
           modelTag: next.modelTag,
           modelDigest: next.modelDigest,
+          ollamaVersion: next.ollamaVersion,
           candidate: candidateRow(next, clock.now()),
         });
       },
@@ -992,6 +996,7 @@ async function executePersistedRun(
       state: snapshot(state),
       modelTag: state.modelTag,
       modelDigest: state.modelDigest,
+      ollamaVersion: state.ollamaVersion,
       candidate: candidateRow(state, clock.now()),
     });
   } finally {

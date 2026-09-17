@@ -88,7 +88,7 @@ async function structuredOnce<T>(
   } catch (err) {
     const mapped =
       err instanceof AppError ? err : invalidOutput(options, 'The model returned invalid output.');
-    failAttempt(options, reservation, mapped);
+    failAttempt(options, reservation, mapped, attempt);
     throw mapped;
   }
   finishAttempt(options, reservation, attempt);
@@ -219,13 +219,23 @@ function failAttempt(
   options: ChatOptions,
   reservation: AttemptReservation | undefined,
   err: unknown,
+  attempt?: ChatAttempt,
 ) {
   if (!reservation) return;
   options.attempts?.finish(reservation, {
     outcome: 'failed',
     finishedAt: options.clock.now(),
-    usage: null,
+    usage: attempt
+      ? {
+          ...attempt.usage,
+          modelDigest: attempt.modelDigest,
+          ollamaVersion: attempt.ollamaVersion,
+        }
+      : null,
     error: attemptError(err),
+    modelTag: attempt?.model,
+    modelDigest: attempt?.modelDigest,
+    ollamaVersion: attempt?.ollamaVersion,
   });
 }
 

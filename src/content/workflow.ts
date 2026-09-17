@@ -103,6 +103,7 @@ export type WorkflowResume = {
   constraintsVersion: string;
   modelTag: string | null;
   modelDigest: string | null;
+  ollamaVersion: string | null;
   invalidCandidates: Array<{ proposals: GeneratedProposal[]; checks: CheckResult[] }>;
 };
 
@@ -203,7 +204,8 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     modelTag: resume?.modelTag ?? config.ollamaModel,
     modelDigest: resume?.modelDigest ?? null,
     ollamaVersion:
-      typeof checkpointState.ollamaVersion === 'string' ? checkpointState.ollamaVersion : null,
+      resume?.ollamaVersion ??
+      (typeof checkpointState.ollamaVersion === 'string' ? checkpointState.ollamaVersion : null),
     vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
     candidate: Array.isArray(checkpointState.candidate)
       ? (checkpointState.candidate as GeneratedProposal[])

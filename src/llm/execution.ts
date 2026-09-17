@@ -47,6 +47,7 @@ export type AttemptRecorder = {
       error: unknown;
       modelTag?: string | null;
       modelDigest?: string | null;
+      ollamaVersion?: string | null;
     },
   ) => void;
 };

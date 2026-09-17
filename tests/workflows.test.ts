@@ -1117,6 +1117,80 @@ test('resume fails when model work has no recorded digest', async (t) => {
   assert.equal((await response.json()).error.code, 'MODEL_DIGEST_UNAVAILABLE');
 });
 
+test('resume detects an Ollama version change recorded before a crash checkpoint', async (t) => {
+  const store = tempStore(t);
+  const run = seedInterrupted(
+    store,
+    'version-attempt-boundary',
+    { phase: 'generation', vocabulary: JSON.parse(vocabularyContent) },
+    { phase: 'generation', consumed: { providerRequests: 1, revisionCount: 0 } },
+  );
+  const claimToken = store.getRun(run.id)?.leaseToken;
+  assert.ok(claimToken);
+  const reservation = store.reserveAttempt({
+    runId: run.id,
+    claimToken,
+    step: 'generation',
+    candidateVersion: 1,
+    operationKey: 'generation:1',
+    startedAt: 1_060,
+  });
+  store.finishAttempt({
+    runId: run.id,
+    claimToken,
+    reservation,
+    finishedAt: 1_070,
+    outcome: 'completed',
+    usage: {
+      model: 'qwen3:4b-instruct',
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 20,
+      estimatedCostUsd: null,
+      modelDigest: 'sha256:abc',
+      ollamaVersion: '0.33.3',
+    },
+    error: null,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: 'sha256:abc',
+    ollamaVersion: '0.33.3',
+  });
+  assert.equal(store.getRun(run.id)?.ollamaVersion, '0.33.3');
+
+  const sqlitePath = store.path;
+  store.close();
+  const reopened = openWorkflowStore(sqlitePath);
+  t.after(() => reopened.close());
+  const ollama = await fakeOllama(t, (call) => {
+    if (call.method === 'POST' && call.url === '/api/chat') {
+      return { status: 200, json: chatFixtures.generated };
+    }
+    if (call.method === 'GET' && call.url === '/api/version') {
+      return { status: 200, json: { version: '0.33.4' } };
+    }
+    if (call.method === 'GET' && call.url === '/api/tags') {
+      return {
+        status: 200,
+        json: { models: [{ name: 'qwen3:4b-instruct', digest: 'sha256:abc' }] },
+      };
+    }
+    return { status: 404, json: { error: 'unknown endpoint' } };
+  });
+  const { url } = await startService(t, {
+    store: reopened,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+  const response = await fetch(`${url}/workflows/${run.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.error.code, 'OLLAMA_VERSION_CHANGED');
+});
+
 test('malformed structured output finishes the persisted attempt as failed', async (t) => {
   const { url, store } = await startService(t, {
     reply: scriptedChats({
@@ -1132,6 +1206,15 @@ test('malformed structured output finishes the persisted attempt as failed', asy
   assert.equal(generation.length, 1);
   assert.equal(generation[0]?.outcome, 'failed');
   assert.equal((generation[0]?.error as { code?: string } | null)?.code, 'PROVIDER_INVALID_OUTPUT');
+  assert.deepEqual(generation[0]?.usage, {
+    model: 'qwen3:4b-instruct',
+    inputTokens: 10,
+    cachedInputTokens: 2,
+    outputTokens: 20,
+    estimatedCostUsd: null,
+    modelDigest: 'sha256:abc',
+    ollamaVersion: '0.33.3',
+  });
   assert.equal(
     attempts
       .filter((item) => item.step === 'revision')

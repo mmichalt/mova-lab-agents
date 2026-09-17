@@ -269,11 +269,12 @@ function parseJson<T>(raw: string, schema: z.ZodType<T>): T {
 }
 
 function mapStatus(status: number) {
-  if (status === 401) {
-    return new AppError(502, 'MOVA_LAB_AUTH_FAILED', 'Mova-Lab rejected service authentication.');
-  }
-  if (status === 403) {
-    return new AppError(403, 'MOVA_LAB_FORBIDDEN', 'The current actor cannot import this draft.');
+  if (status === 401 || status === 403) {
+    return new AppError(
+      502,
+      'MOVA_LAB_AUTH_FAILED',
+      'Mova-Lab rejected service authentication or authorization.',
+    );
   }
   if (status === 429 || status >= 500) {
     return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab is unavailable.');

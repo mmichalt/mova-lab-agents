@@ -130,7 +130,10 @@ test('opens WAL files with foreign keys, busy timeout, and idempotent migrations
   const names = raw.prepare('SELECT name FROM schema_migrations ORDER BY id').all() as {
     name: string;
   }[];
-  assert.deepEqual(names, [{ name: '001_workflow_persistence' }]);
+  assert.deepEqual(names, [
+    { name: '001_workflow_persistence' },
+    { name: '002_run_ollama_version' },
+  ]);
 });
 
 test('createRun stores serializable versions and consumed limits', (t) => {

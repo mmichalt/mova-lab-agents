@@ -237,6 +237,20 @@ test('malformed, unauthorized, timeout, and abort fail closed', async (t) => {
       err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_AUTH_FAILED',
   );
 
+  const serviceForbidden = await fakeMovaLab(t, () => ({
+    status: 403,
+    json: { message: 'service role is not allowed' },
+  }));
+  await assert.rejects(
+    () =>
+      readGenerationConstraints({
+        config: labConfig(serviceForbidden.url),
+        signal: new AbortController().signal,
+      }),
+    (err: unknown) =>
+      err instanceof AppError && err.status === 502 && err.code === 'MOVA_LAB_AUTH_FAILED',
+  );
+
   const hung = await fakeMovaLab(t, () => ({ hang: true }));
   await assert.rejects(
     () =>

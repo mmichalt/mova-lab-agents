@@ -61,6 +61,7 @@ export type PersistedRun = {
   promptVersions: Record<string, string>;
   modelTag: string | null;
   modelDigest: string | null;
+  ollamaVersion: string | null;
   limits: PersistedLimits;
   consumed: PersistedConsumed;
   state: unknown;
@@ -130,6 +131,7 @@ export type CreateRunInput = {
   promptVersions: Record<string, string>;
   modelTag?: string | null;
   modelDigest?: string | null;
+  ollamaVersion?: string | null;
   limits: PersistedLimits;
   now: number;
 };
@@ -145,6 +147,7 @@ export type CheckpointInput = {
   claimToken?: string;
   modelTag?: string | null;
   modelDigest?: string | null;
+  ollamaVersion?: string | null;
   attempt?: Omit<StepAttemptRecord, 'id' | 'runId'>;
   candidate?: Omit<CandidateRevisionRecord, 'id' | 'runId'>;
 };
@@ -193,6 +196,7 @@ export type WorkflowStore = {
     error: unknown;
     modelTag?: string | null;
     modelDigest?: string | null;
+    ollamaVersion?: string | null;
   }) => void;
   recordApproval: (
     input: {
@@ -250,6 +254,7 @@ type RunRow = {
   prompt_versions: string;
   model_tag: string | null;
   model_digest: string | null;
+  ollama_version: string | null;
   limits: string;
   consumed: string;
   state: string;
@@ -278,11 +283,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     INSERT INTO runs (
       id, owner_id, idempotency_key, input_hash, normalized_input, status, phase,
       state_version, schema_version, workflow_version, constraints_version, prompt_versions,
-      model_tag, model_digest, limits, consumed, state, created_at, updated_at
+      model_tag, model_digest, ollama_version, limits, consumed, state, created_at, updated_at
     ) VALUES (
       @id, @ownerId, @idempotencyKey, @inputHash, @normalizedInput, 'PENDING', 'vocabulary',
       0, @schemaVersion, @workflowVersion, @constraintsVersion, @promptVersions,
-      @modelTag, @modelDigest, @limits, @consumed, @state, @now, @now
+      @modelTag, @modelDigest, @ollamaVersion, @limits, @consumed, @state, @now, @now
     )
   `);
   const updateCheckpointStmt = db.prepare(`
@@ -294,6 +299,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       state = @state,
       model_tag = COALESCE(@modelTag, model_tag),
       model_digest = COALESCE(@modelDigest, model_digest),
+      ollama_version = COALESCE(@ollamaVersion, ollama_version),
       lease_owner = CASE
         WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
         ELSE lease_owner
@@ -392,6 +398,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     UPDATE runs SET
       model_tag = COALESCE(@modelTag, model_tag),
       model_digest = COALESCE(@modelDigest, model_digest),
+      ollama_version = COALESCE(@ollamaVersion, ollama_version),
       updated_at = @finishedAt
     WHERE id = @runId
       AND lease_token = @claimToken
@@ -453,6 +460,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         promptVersions: jsonText(input.promptVersions),
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
         limits: jsonText(input.limits),
         consumed: jsonText({ providerRequests: 0, revisionCount: 0 }),
         state: jsonText({}),
@@ -513,6 +521,9 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       if (run.modelDigest && input.modelDigest && run.modelDigest !== input.modelDigest) {
         throw new PersistError('CONSTRAINT', 'Run model digest changed.');
       }
+      if (run.ollamaVersion && input.ollamaVersion && run.ollamaVersion !== input.ollamaVersion) {
+        throw new PersistError('CONSTRAINT', 'Run Ollama version changed.');
+      }
       assertConsumed(run.consumed, input.consumed, run.limits);
       if (input.attempt && !(input.modelTag ?? run.modelTag)) {
         throw new PersistError('CONSTRAINT', 'A model-derived checkpoint needs a model tag.');
@@ -557,6 +568,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         state: jsonText(input.state),
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
         claimToken: input.claimToken ?? null,
         now: input.now,
       });
@@ -775,6 +787,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         state: jsonText(input.state),
         modelTag: null,
         modelDigest: null,
+        ollamaVersion: null,
         claimToken: input.claimToken,
         now: input.now,
       });
@@ -800,7 +813,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       if (updated.changes !== 1) {
         throw new PersistError('CONFLICT', 'Attempt is no longer owned by this run executor.');
       }
-      if (!input.modelTag && !input.modelDigest) return;
+      if (!input.modelTag && !input.modelDigest && !input.ollamaVersion) return;
       const run = readRun(input.runId);
       if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
       if (run.modelTag && input.modelTag && run.modelTag !== input.modelTag) {
@@ -809,12 +822,16 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       if (run.modelDigest && input.modelDigest && run.modelDigest !== input.modelDigest) {
         throw new PersistError('CONSTRAINT', 'Run model digest changed.');
       }
+      if (run.ollamaVersion && input.ollamaVersion && run.ollamaVersion !== input.ollamaVersion) {
+        throw new PersistError('CONSTRAINT', 'Run Ollama version changed.');
+      }
       const identity = finishAttemptRunStmt.run({
         runId: input.runId,
         claimToken: input.claimToken,
         finishedAt: input.finishedAt,
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
+        ollamaVersion: input.ollamaVersion ?? null,
       });
       if (identity.changes !== 1) {
         throw new PersistError('CONFLICT', 'Attempt is no longer owned by this run executor.');
@@ -1088,6 +1105,7 @@ function mapRun(row: RunRow): PersistedRun {
     promptVersions: unpack(row.prompt_versions) as Record<string, string>,
     modelTag: row.model_tag,
     modelDigest: row.model_digest,
+    ollamaVersion: row.ollama_version,
     limits: unpack(row.limits) as PersistedLimits,
     consumed: unpack(row.consumed) as PersistedConsumed,
     state: unpack(row.state),

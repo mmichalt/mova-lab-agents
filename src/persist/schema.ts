@@ -102,4 +102,11 @@ CREATE TABLE import_receipts (
 );
 `,
   },
+  {
+    id: 2,
+    name: '002_run_ollama_version',
+    sql: `
+ALTER TABLE runs ADD COLUMN ollama_version TEXT;
+`,
+  },
 ] as const;
