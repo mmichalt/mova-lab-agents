@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-016, AG-029 are complete. Remaining tickets are unstarted.
+**Status:** AG-001 through AG-019, AG-029 are complete. Remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -49,8 +49,8 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-015 — SQLite persistence and migrations](#ag-015)
 - [x] [AG-016 — Persisted workflow creation and retrieval](#ag-016)
 - [x] [AG-017 — Claims and interrupted-run recovery](#ag-017)
-- [ ] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
-- [ ] [AG-019 — Durable approval and rejection](#ag-019)
+- [x] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
+- [x] [AG-019 — Durable approval and rejection](#ag-019)
 - [ ] [AG-020 — Approved draft import and partial recovery](#ag-020)
 - [ ] [AG-021 — Generation and review UI in Mova-Lab](#ag-021)
 
@@ -1004,7 +1004,7 @@ permission in this sandbox.
 **Stage:** 7  
 **Repository:** `mova-lab` — companion backend/CMS work  
 **Dependencies:** [AG-012](#ag-012), [AG-015](#ag-015)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand why receiver-side idempotency must
 cover content creation, not just the caller's record of a request.
@@ -1037,7 +1037,7 @@ auto-publication, and agent access to the CMS database.
 **Stage:** 7  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-017](#ag-017)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Build a human checkpoint that remains correct
 under simultaneous requests, delayed review, and changing candidate versions.
@@ -1060,6 +1060,17 @@ approval, stale revisions, payload mutation, and persistence across restart.
 
 **Out of scope:** Publication, editing approved content, a new user identity store,
 and executing imports before AG-020.
+
+Recorded: `POST /workflows/:id/approve` and `/reject` require the service token,
+`X-Actor-Id`, and trusted `X-Content-Admin: true` context. Approval validates the
+current candidate revision and selected category against Mova-Lab, hashes and
+freezes `{ candidateVersion, categoryId, proposals }`, and atomically records the
+decision before moving the run to `RUNNING`/`import`. Rejection records the exact
+candidate hash and moves the run to `REJECTED`. Identical decisions are replayable;
+stale or conflicting decisions return `409`. Concurrent decisions have one
+winner, and generation is never called by either endpoint. `npm test`,
+`npm run typecheck`, `npx biome ci .`, and `npm run build` pass without live
+inference.
 
 ### AG-020
 

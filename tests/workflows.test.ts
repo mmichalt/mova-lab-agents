@@ -11,17 +11,21 @@ import type { Clock } from '../src/llm/execution.ts';
 import { createLogger } from '../src/logger.ts';
 import {
   CONSTRAINTS_VERSION,
+  hashNormalizedInput,
   openWorkflowStore,
   WORKFLOW_VERSION,
   type WorkflowStore,
 } from '../src/persist/store.ts';
 import { shutDown } from '../src/server.ts';
+import { EXPECTED_CONSTRAINTS } from '../src/tools/mova-lab.ts';
 import {
   chatCalls,
   fakeMovaLab,
   fakeOllama,
   instantClock,
   listen,
+  type MovaLabCall,
+  type OllamaReply,
   runtimeReply,
   scriptedChats,
   sequentialReply,
@@ -51,6 +55,7 @@ async function startService(
   options: {
     store?: WorkflowStore;
     reply?: Parameters<typeof fakeOllama>[1];
+    movaLabReply?: Parameters<typeof fakeMovaLab>[1];
     ollamaUrl?: string;
     clock?: Clock;
   } = {},
@@ -60,7 +65,7 @@ async function startService(
     options.ollamaUrl === undefined
       ? await fakeOllama(t, options.reply ?? sequentialReply())
       : undefined;
-  const movaLab = await fakeMovaLab(t);
+  const movaLab = await fakeMovaLab(t, options.movaLabReply);
   const config = loadConfig(
     testEnv({
       OLLAMA_BASE_URL: options.ollamaUrl ?? ollama?.url ?? 'http://127.0.0.1:9',
@@ -71,7 +76,7 @@ async function startService(
     createApp({ config, logger, store, clock: options.clock ?? instantClock() }),
   );
   t.after(() => shutDown(server, 50));
-  return { store, url, ollama, config };
+  return { store, url, ollama, movaLab, config };
 }
 
 test('resume reuses a committed vocabulary checkpoint and remaining limits', async (t) => {
@@ -216,6 +221,31 @@ function assertSafe(body: Record<string, unknown>) {
   assert.equal(JSON.stringify(body).includes('test-token'), false);
 }
 
+function adminHeaders(actor = 'admin-1') {
+  return {
+    authorization: 'Bearer test-token',
+    'content-type': 'application/json',
+    'x-actor-id': actor,
+    'x-content-admin': 'true',
+  };
+}
+
+function categoriesReply(call: MovaLabCall): OllamaReply | undefined {
+  return call.url === '/api/internal/content-generation/categories'
+    ? {
+        status: 200,
+        json: {
+          version: CONSTRAINTS_VERSION,
+          items: [{ id: 'cat-1', name: 'Артикуляція' }],
+        },
+      }
+    : undefined;
+}
+
+function categoryReply(call: MovaLabCall): OllamaReply {
+  return categoriesReply(call) ?? { status: 200, json: EXPECTED_CONSTRAINTS };
+}
+
 test('POST /content-drafts stays available and is marked development-only', async (t) => {
   const { url } = await startService(t);
   const response = await fetch(`${url}/content-drafts`, {
@@ -252,6 +282,126 @@ test('creating a persisted run reaches AWAITING_APPROVAL and is retrievable', as
   assert.equal(again.id, body.id);
   assert.equal(again.status, 'AWAITING_APPROVAL');
   assert.equal(store.getRun(body.id)?.status, 'AWAITING_APPROVAL');
+});
+
+test('Content Admin approval freezes the exact candidate and survives retrieval', async (t) => {
+  const { url, ollama, movaLab } = await startService(t, {
+    movaLabReply: categoryReply,
+  });
+  const created = await (await createRun(url)).json();
+  const response = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  const frozenPayload = {
+    candidateVersion: 1,
+    categoryId: 'cat-1',
+    proposals: created.result.proposals,
+  };
+  assert.equal(body.status, 'RUNNING');
+  assert.equal(body.phase, 'import');
+  assert.equal(body.resumable, false);
+  assert.deepEqual(body.approval.frozenPayload, frozenPayload);
+  assert.equal(body.approval.actorId, 'admin-1');
+  assert.equal(body.approval.payloadHash, hashNormalizedInput(frozenPayload));
+  assert.equal(chatCalls(ollama?.calls ?? []).length, 5);
+  assert.equal(movaLab.calls.filter((call) => call.url.endsWith('/categories')).length, 1);
+
+  const fetched = await fetch(`${url}/workflows/${created.id}`, {
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal((await fetched.json()).approval.payloadHash, body.approval.payloadHash);
+});
+
+test('rejection is durable, idempotent, and cannot be replaced by approval', async (t) => {
+  const { url, movaLab } = await startService(t, {
+    movaLabReply: categoryReply,
+  });
+  const created = await (await createRun(url)).json();
+  const rejected = await fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: adminHeaders('admin-2'),
+    body: JSON.stringify({ candidateVersion: created.result.candidateVersion }),
+  });
+  assert.equal(rejected.status, 200);
+  const body = await rejected.json();
+  assert.equal(body.status, 'REJECTED');
+  assert.equal(body.approval.decision, 'rejected');
+  assert.equal(body.approval.categoryId, null);
+  assert.equal(body.approval.frozenPayload, null);
+  assert.equal(movaLab.calls.filter((call) => call.url.endsWith('/categories')).length, 0);
+
+  const repeated = await fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: adminHeaders('admin-3'),
+    body: JSON.stringify({ candidateVersion: created.result.candidateVersion }),
+  });
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).approval.actorId, 'admin-2');
+
+  const conflicting = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({
+      candidateVersion: created.result.candidateVersion,
+      categoryId: 'cat-1',
+    }),
+  });
+  assert.equal(conflicting.status, 409);
+});
+
+test('approval requires trusted Content Admin context and an exact current revision', async (t) => {
+  const { url, movaLab, store } = await startService(t, {
+    movaLabReply: categoryReply,
+  });
+  const created = await (await createRun(url)).json();
+  const unauthorized = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+      'x-actor-id': 'teacher-1',
+    },
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  assert.equal(unauthorized.status, 403);
+  assert.equal(store.getApproval(created.id), undefined);
+
+  const stale = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ candidateVersion: 2, categoryId: 'cat-1' }),
+  });
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error.code, 'STALE_CANDIDATE');
+  assert.equal(movaLab.calls.filter((call) => call.url.endsWith('/categories')).length, 0);
+});
+
+test('simultaneous approve and reject have one durable winner', async (t) => {
+  const { url, store } = await startService(t, {
+    movaLabReply: categoryReply,
+  });
+  const created = await (await createRun(url)).json();
+  const approve = fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders('admin-approve'),
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  const reject = fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: adminHeaders('admin-reject'),
+    body: JSON.stringify({ candidateVersion: 1 }),
+  });
+  const responses = await Promise.all([approve, reject]);
+  assert.deepEqual(
+    responses.map((response) => response.status).sort((a, b) => a - b),
+    [200, 409],
+  );
+  assert.ok(store.getApproval(created.id));
+  assert.notEqual(store.getRun(created.id)?.status, 'AWAITING_APPROVAL');
 });
 
 test('same actor, key, and input return the existing run without executing again', async (t) => {

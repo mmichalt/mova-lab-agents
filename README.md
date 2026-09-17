@@ -64,6 +64,14 @@ use the same endpoint. Resume preserves the recorded deadline, provider and
 revision counters, checkpoints, workflow/prompt versions, and model digest;
 missing or changed model metadata fails explicitly. If a process dies after a
 provider response but before its checkpoint commits, that LLM call may repeat.
+`POST /workflows/:id/approve` and `/reject` require the trusted Mova-Lab
+authorization context: `X-Actor-Id` plus `X-Content-Admin: true`. Approval accepts
+only the current `candidateVersion` and a real category returned by Mova-Lab,
+freezes the candidate payload and hash, and changes the run to `RUNNING`/`import`
+for the later importer. Rejection changes it to `REJECTED` without an import.
+Repeating the same decision returns the persisted outcome; a stale revision or
+different decision returns `409`. The response exposes the durable `approval`
+record, including actor, timestamp, decision, category, frozen payload, and hash.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation

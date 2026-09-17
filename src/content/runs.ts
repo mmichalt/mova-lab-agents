@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '../llm/execution.ts';
@@ -6,6 +7,7 @@ import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
   CONSTRAINTS_VERSION,
+  hashNormalizedInput,
   PersistError,
   type PersistedRun,
   type RunPhase,
@@ -14,6 +16,7 @@ import {
   WORKFLOW_VERSION,
   type WorkflowStore,
 } from '../persist/store.ts';
+import { listGenerationCategories } from '../tools/mova-lab.ts';
 import {
   EXERCISES_PROMPT_VERSION,
   REVISION_PROMPT_VERSION,
@@ -25,6 +28,7 @@ import {
   type ContentRequest,
   contentRequestSchema,
   type GeneratedProposal,
+  recordingProposalSchema,
 } from './schemas.ts';
 import {
   type GenerationState,
@@ -79,6 +83,15 @@ export type WorkflowResource = {
     vocabulary: unknown;
     error: { code: string; message: string; retryable: boolean } | null;
   };
+  approval: {
+    actorId: string;
+    candidateVersion: number;
+    categoryId: string | null;
+    payloadHash: string;
+    decision: 'approved' | 'rejected';
+    frozenPayload: unknown;
+    decidedAt: number;
+  } | null;
   candidates: Array<{
     candidateVersion: number;
     proposals: unknown;
@@ -86,6 +99,15 @@ export type WorkflowResource = {
     createdAt: number;
   }>;
 };
+
+const approveRequestSchema = z.strictObject({
+  candidateVersion: z.int().positive(),
+  categoryId: z.string().trim().min(1).max(128),
+});
+
+const rejectRequestSchema = z.strictObject({
+  candidateVersion: z.int().positive(),
+});
 
 export function actorIdFrom(req: Request) {
   return requiredHeader(req, 'x-actor-id', 'An actor id is required.');
@@ -170,6 +192,33 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
   return presentRun(options.store, latest, options.ownerId, clock.now());
 }
 
+export async function approveContentGeneration(
+  options: ExecutionOptions & { id: string; body: unknown; signal?: AbortSignal },
+) {
+  const parsed = approveRequestSchema.safeParse(options.body);
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid approval request.');
+  }
+  return decideContentGeneration(options, {
+    decision: 'approved',
+    candidateVersion: parsed.data.candidateVersion,
+    categoryId: parsed.data.categoryId,
+  });
+}
+
+export async function rejectContentGeneration(
+  options: ExecutionOptions & { id: string; body: unknown; signal?: AbortSignal },
+) {
+  const parsed = rejectRequestSchema.safeParse(options.body);
+  if (!parsed.success) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid rejection request.');
+  }
+  return decideContentGeneration(options, {
+    decision: 'rejected',
+    candidateVersion: parsed.data.candidateVersion,
+  });
+}
+
 export function getContentGeneration(
   store: WorkflowStore,
   id: string,
@@ -224,12 +273,126 @@ export function presentRun(
       vocabulary: state.vocabulary ?? null,
       error: errorOf(state.error),
     },
+    approval: approvalOf(store.getApproval(run.id)),
     candidates: store.listCandidates(run.id).map((row) => ({
       candidateVersion: row.candidateVersion,
       proposals: row.proposals,
       checks: row.checks,
       createdAt: row.createdAt,
     })),
+  };
+}
+
+async function decideContentGeneration(
+  options: ExecutionOptions & { id: string; body: unknown; signal?: AbortSignal },
+  decision:
+    | { decision: 'approved'; candidateVersion: number; categoryId: string }
+    | { decision: 'rejected'; candidateVersion: number },
+) {
+  const clock = options.clock ?? systemClock;
+  const run = options.store.getRun(options.id);
+  if (!run) throw new AppError(404, 'NOT_FOUND', 'Not found.');
+
+  const candidate = approvalCandidate(options.store, run, decision.candidateVersion);
+  const frozenPayload = {
+    candidateVersion: decision.candidateVersion,
+    categoryId: decision.decision === 'approved' ? decision.categoryId : null,
+    proposals: candidate,
+  };
+  const payloadHash = hashNormalizedInput(frozenPayload);
+  const existing = options.store.getApproval(run.id);
+  if (existing) {
+    if (sameDecision(existing, decision, payloadHash)) {
+      const latest = options.store.getRun(run.id);
+      if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+      return presentRun(options.store, latest, latest.ownerId, clock.now());
+    }
+    throw approvalConflict();
+  }
+  if (run.status !== 'AWAITING_APPROVAL') {
+    throw approvalConflict();
+  }
+
+  if (decision.decision === 'approved') {
+    const categories = await listGenerationCategories({
+      config: options.config,
+      signal: options.signal ?? new AbortController().signal,
+    });
+    if (!categories.items.some((category) => category.id === decision.categoryId)) {
+      throw new AppError(409, 'CATEGORY_NOT_FOUND', 'The selected category is not available.');
+    }
+  }
+
+  try {
+    options.store.recordApproval({
+      runId: run.id,
+      actorId: options.ownerId,
+      candidateVersion: decision.candidateVersion,
+      payloadHash,
+      decidedAt: clock.now(),
+      expectedStateVersion: run.stateVersion,
+      ...(decision.decision === 'approved'
+        ? { decision: 'approved' as const, categoryId: decision.categoryId, frozenPayload }
+        : { decision: 'rejected' as const }),
+    });
+  } catch (err) {
+    const raced = options.store.getApproval(run.id);
+    if (raced && sameDecision(raced, decision, payloadHash)) {
+      const latest = options.store.getRun(run.id);
+      if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+      return presentRun(options.store, latest, latest.ownerId, clock.now());
+    }
+    if (err instanceof PersistError && err.code === 'CONFLICT') throw approvalConflict();
+    throw sqliteUnavailable(err);
+  }
+  const latest = options.store.getRun(run.id);
+  if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+  return presentRun(options.store, latest, latest.ownerId, clock.now());
+}
+
+function approvalCandidate(store: WorkflowStore, run: PersistedRun, candidateVersion: number) {
+  const state = asState(run.state);
+  if (asCount(state.candidateVersion) !== candidateVersion) {
+    throw new AppError(409, 'STALE_CANDIDATE', 'The candidate revision is no longer current.');
+  }
+  const row = store
+    .listCandidates(run.id)
+    .find((item) => item.candidateVersion === candidateVersion);
+  const parsed = row ? z.array(recordingProposalSchema).safeParse(row.proposals) : null;
+  if (!parsed?.success) {
+    throw new AppError(409, 'CANDIDATE_UNAVAILABLE', 'The candidate revision is unavailable.');
+  }
+  return parsed.data.map(({ localId, ...proposal }) => ({ ...proposal, localId }));
+}
+
+function sameDecision(
+  existing: NonNullable<ReturnType<WorkflowStore['getApproval']>>,
+  decision:
+    | { decision: 'approved'; candidateVersion: number; categoryId: string }
+    | { decision: 'rejected'; candidateVersion: number },
+  payloadHash: string,
+) {
+  return (
+    existing.decision === decision.decision &&
+    existing.candidateVersion === decision.candidateVersion &&
+    existing.payloadHash === payloadHash
+  );
+}
+
+function approvalConflict() {
+  return new AppError(409, 'APPROVAL_CONFLICT', 'The workflow approval has already been decided.');
+}
+
+function approvalOf(approval: ReturnType<WorkflowStore['getApproval']>) {
+  if (!approval) return null;
+  return {
+    actorId: approval.actorId,
+    candidateVersion: approval.candidateVersion,
+    categoryId: approval.categoryId,
+    payloadHash: approval.payloadHash,
+    decision: approval.decision,
+    frozenPayload: approval.frozenPayload,
+    decidedAt: approval.decidedAt,
   };
 }
 
@@ -492,6 +655,7 @@ function isResumable(run: PersistedRun, now: number) {
   return (
     run.status === 'RUNNING' &&
     run.phase !== 'finished' &&
+    run.phase !== 'import' &&
     (run.leaseExpiresAt === null || run.leaseExpiresAt <= now)
   );
 }
