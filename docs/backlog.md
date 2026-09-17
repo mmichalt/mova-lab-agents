@@ -51,7 +51,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-017 — Claims and interrupted-run recovery](#ag-017)
 - [x] [AG-018 — Idempotent draft import in Mova-Lab](#ag-018)
 - [x] [AG-019 — Durable approval and rejection](#ag-019)
-- [ ] [AG-020 — Approved draft import and partial recovery](#ag-020)
+- [x] [AG-020 — Approved draft import and partial recovery](#ag-020)
 - [ ] [AG-021 — Generation and review UI in Mova-Lab](#ag-021)
 
 ### Milestone 3 — Asynchronous execution
@@ -1078,7 +1078,7 @@ inference.
 **Stage:** 7  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-018](#ag-018), [AG-019](#ag-019)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Coordinate a local checkpoint and a remote
 side effect without pretending they form one transaction.
@@ -1101,6 +1101,16 @@ creation, before local receipt, and between items.
 
 **Out of scope:** Distributed rollback, automatic content repair after approval,
 publication, and model-visible mutation tools.
+
+Recorded: Approval now validates the frozen payload and runs a deterministic,
+sequential importer against `POST /api/internal/content-generation/recording-drafts`.
+Each proposal uses `runId:proposalLocalId` and the approved payload hash as its
+idempotent source key, with returned draft IDs stored in durable receipts. The
+persisted run exposes `importProgress`; `COMPLETED` requires every receipt, while
+partial remote failures retain imported drafts and resume only pending or failed
+proposals. Import recovery does not call Ollama or modify the approved payload.
+Tests cover the fixed receiver contract, malformed/lost responses, partial
+progress, receipt persistence, and resume without repeated generation.
 
 ### AG-021
 

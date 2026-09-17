@@ -243,6 +243,9 @@ function categoriesReply(call: MovaLabCall): OllamaReply | undefined {
 }
 
 function categoryReply(call: MovaLabCall): OllamaReply {
+  if (call.method === 'POST' && call.url === '/api/internal/content-generation/recording-drafts') {
+    return { status: 200, json: { id: 'draft-1' } };
+  }
   return categoriesReply(call) ?? { status: 200, json: EXPECTED_CONSTRAINTS };
 }
 
@@ -301,9 +304,11 @@ test('Content Admin approval freezes the exact candidate and survives retrieval'
     categoryId: 'cat-1',
     proposals: created.result.proposals,
   };
-  assert.equal(body.status, 'RUNNING');
+  assert.equal(body.status, 'COMPLETED');
   assert.equal(body.phase, 'import');
   assert.equal(body.resumable, false);
+  assert.equal(body.importProgress.status, 'completed');
+  assert.equal(body.importProgress.imported, body.importProgress.total);
   assert.deepEqual(body.approval.frozenPayload, frozenPayload);
   assert.equal(body.approval.actorId, 'admin-1');
   assert.equal(body.approval.payloadHash, hashNormalizedInput(frozenPayload));
@@ -314,6 +319,61 @@ test('Content Admin approval freezes the exact candidate and survives retrieval'
     headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
   });
   assert.equal((await fetched.json()).approval.payloadHash, body.approval.payloadHash);
+});
+
+test('partial draft imports keep receipts and resume missing proposals without generation', async (t) => {
+  const createdDrafts = new Map<string, string>();
+  const attempts = new Map<string, number>();
+  const { url, ollama, movaLab } = await startService(t, {
+    movaLabReply: (call) => {
+      if (call.url === '/api/internal/content-generation/categories') {
+        return categoriesReply(call) as OllamaReply;
+      }
+      if (call.url === '/api/internal/content-generation/recording-drafts') {
+        const body = call.body as { sourceImportKey: string };
+        const key = body.sourceImportKey;
+        const attempt = (attempts.get(key) ?? 0) + 1;
+        attempts.set(key, attempt);
+        const id = createdDrafts.get(key) ?? `draft-${createdDrafts.size + 1}`;
+        createdDrafts.set(key, id);
+        return attempt === 1 && key.endsWith('proposal-2')
+          ? { status: 200, raw: '{}' }
+          : { status: 200, json: { id } };
+      }
+      return { status: 200, json: EXPECTED_CONSTRAINTS };
+    },
+  });
+  const created = await (await createRun(url)).json();
+  const approval = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  const failed = await approval.json();
+  assert.equal(approval.status, 200);
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(failed.resumable, true);
+  assert.equal(failed.importProgress.total, 2);
+  assert.equal(failed.importProgress.imported, 1);
+  assert.equal(failed.importProgress.receipts[1].status, 'failed');
+  assert.equal(failed.result.error.code, 'MOVA_LAB_INVALID_RESPONSE');
+
+  const resumed = await fetch(`${url}/workflows/${created.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  const completed = await resumed.json();
+  assert.equal(resumed.status, 200);
+  assert.equal(completed.status, 'COMPLETED');
+  assert.equal(completed.importProgress.imported, 2);
+  assert.equal(chatCalls(ollama?.calls ?? []).length, 5);
+  assert.equal(attempts.get(`${created.id}:proposal-1`), 1);
+  assert.equal(attempts.get(`${created.id}:proposal-2`), 2);
+  assert.equal(
+    movaLab.calls.filter((call) => call.url === '/api/internal/content-generation/recording-drafts')
+      .length,
+    3,
+  );
 });
 
 test('rejection is durable, idempotent, and cannot be replaced by approval', async (t) => {

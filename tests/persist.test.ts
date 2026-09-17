@@ -507,6 +507,36 @@ test('import receipts reject duplicate keys and incomplete imported rows', (t) =
     status: 'imported',
     createdAt: 5_000,
   });
+  assert.deepEqual(
+    store.updateImportReceipt({
+      runId: run.id,
+      proposalLocalId: 'p1',
+      payloadHash: 'ph-1',
+      contentId: 'cms-1b',
+      status: 'imported',
+    }),
+    {
+      id: store.listImportReceipts(run.id)[0]?.id,
+      runId: run.id,
+      proposalLocalId: 'p1',
+      importKey: 'import-p1',
+      payloadHash: 'ph-1',
+      contentId: 'cms-1b',
+      status: 'imported',
+      createdAt: 5_000,
+    },
+  );
+  assert.throws(
+    () =>
+      store.updateImportReceipt({
+        runId: run.id,
+        proposalLocalId: 'p1',
+        payloadHash: 'changed',
+        contentId: 'cms-1c',
+        status: 'imported',
+      }),
+    isPersist('CONFLICT'),
+  );
   assert.throws(
     () =>
       store.saveImportReceipt({

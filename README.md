@@ -67,8 +67,12 @@ provider response but before its checkpoint commits, that LLM call may repeat.
 `POST /workflows/:id/approve` and `/reject` require the trusted Mova-Lab
 authorization context: `X-Actor-Id` plus `X-Content-Admin: true`. Approval accepts
 only the current `candidateVersion` and a real category returned by Mova-Lab,
-freezes the candidate payload and hash, and changes the run to `RUNNING`/`import`
-for the later importer. Rejection changes it to `REJECTED` without an import.
+freezes the candidate payload and hash, then sequentially imports its recording
+proposals as unpublished drafts through the fixed Mova-Lab receiver. Each proposal
+uses `runId:proposalLocalId` as its stable source key and stores the returned draft
+ID as a durable receipt. The run is `COMPLETED` only after every receipt is
+confirmed; partial failures retain successful receipts and are resumable, retrying
+only missing proposals. Rejection changes it to `REJECTED` without an import.
 Repeating the same decision returns the persisted outcome; a stale revision or
 different decision returns `409`. The response exposes the durable `approval`
 record, including actor, timestamp, decision, category, frozen payload, and hash.

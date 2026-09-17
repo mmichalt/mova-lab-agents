@@ -6,6 +6,7 @@ import {
   EXPECTED_CONSTRAINTS,
   exactPhraseMatches,
   GENERATION_CONTRACT_VERSION,
+  importRecordingDraft,
   listGenerationCategories,
   readGenerationConstraints,
   SEARCH_QUERY_MAX_LENGTH,
@@ -151,6 +152,46 @@ test('empty search is not uniqueness and categories drop extra fields', async (t
   assert.deepEqual(categories.items, [
     { id: 'cat-1', name: 'Артикуляція', slug: 'artykuliatsiia' },
   ]);
+});
+
+test('draft import uses the fixed receiver contract and strips local controls', async (t) => {
+  const movaLab = await fakeMovaLab(t, () => ({ status: 200, json: { id: 'draft-1' } }));
+  const result = await importRecordingDraft({
+    config: labConfig(movaLab.url),
+    signal: new AbortController().signal,
+    actorId: 'admin-1',
+    sourceImportKey: 'run-1:proposal-1',
+    payloadHash: 'payload-hash',
+    categoryId: 'cat-1',
+    proposal: {
+      localId: 'proposal-1',
+      type: 'recording',
+      title: 'Повтори звук Р',
+      phrase: 'Риба пливе',
+      childHint: 'Повтори',
+      teacherNote: 'Нотатка',
+      targetSound: 'р',
+      difficulty: 'easy',
+    },
+  });
+  assert.deepEqual(result, { id: 'draft-1' });
+  assert.deepEqual(movaLab.calls[0], {
+    method: 'POST',
+    url: '/api/internal/content-generation/recording-drafts',
+    authorization: 'Bearer mova-lab-token',
+    actorId: 'admin-1',
+    body: {
+      sourceImportKey: 'run-1:proposal-1',
+      payloadHash: 'payload-hash',
+      categoryId: 'cat-1',
+      title: 'Повтори звук Р',
+      phrase: 'Риба пливе',
+      childHint: 'Повтори',
+      teacherNote: 'Нотатка',
+      targetSound: 'р',
+      difficulty: 'easy',
+    },
+  });
 });
 
 test('malformed, unauthorized, timeout, and abort fail closed', async (t) => {

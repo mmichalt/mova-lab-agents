@@ -95,6 +95,8 @@ const searchSchema = z.strictObject({
   items: z.array(searchHitSchema).max(SEARCH_RESULT_LIMIT_MAX),
 });
 
+const importedDraftSchema = z.object({ id: nonempty(128) }).strip();
+
 export const searchArgsSchema = z.strictObject({
   q: nonempty(SEARCH_QUERY_MAX_LENGTH),
   limit: z.int().min(1).max(SEARCH_RESULT_LIMIT_MAX).default(SEARCH_RESULT_LIMIT_DEFAULT),
@@ -108,6 +110,8 @@ export type RecordingSearchResult = {
   hasMore: boolean;
   items: RecordingSearchHit[];
 };
+
+export type ImportedRecordingDraft = z.infer<typeof importedDraftSchema>;
 
 type LabCall = {
   config: Config;
@@ -150,6 +154,39 @@ export async function searchRecordingExercises(
   };
 }
 
+export async function importRecordingDraft(
+  options: LabCall & {
+    actorId: string;
+    sourceImportKey: string;
+    payloadHash: string;
+    categoryId: string;
+    proposal: {
+      localId: string;
+      type: 'recording';
+      title: string;
+      phrase: string;
+      childHint: string;
+      teacherNote: string;
+      targetSound: 'р' | 'л';
+      difficulty: 'easy';
+    };
+  },
+): Promise<ImportedRecordingDraft> {
+  const { localId: _localId, type: _type, ...proposal } = options.proposal;
+  return postJson(
+    options,
+    'api/internal/content-generation/recording-drafts',
+    importedDraftSchema,
+    {
+      sourceImportKey: options.sourceImportKey,
+      payloadHash: options.payloadHash,
+      categoryId: options.categoryId,
+      ...proposal,
+    },
+    options.actorId,
+  );
+}
+
 export function exactPhraseMatches(
   items: readonly RecordingSearchHit[],
   phrase: string,
@@ -187,6 +224,38 @@ async function getJson<T>(
   return parseJson(raw, schema);
 }
 
+async function postJson<T>(
+  options: LabCall & { actorId: string },
+  path: string,
+  schema: z.ZodType<T>,
+  body: unknown,
+  actorId: string,
+): Promise<T> {
+  const { config, signal: workflowSignal } = options;
+  if (workflowSignal.aborted) throw abortError(workflowSignal);
+  const signal = AbortSignal.any([workflowSignal, AbortSignal.timeout(config.movaLabTimeoutMs)]);
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(config.movaLabBaseUrl, path), {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${config.movaLabServiceToken}`,
+        'content-type': 'application/json',
+        'x-actor-id': actorId,
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    throw mapFetchError(err, workflowSignal);
+  }
+
+  const raw = await readBody(response, signal, workflowSignal);
+  if (!response.ok) throw mapPostStatus(response.status);
+  return parseJson(raw, schema);
+}
+
 function parseJson<T>(raw: string, schema: z.ZodType<T>): T {
   let json: unknown;
   try {
@@ -207,6 +276,19 @@ function mapStatus(status: number) {
     return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab is unavailable.');
   }
   return invalidResponse();
+}
+
+function mapPostStatus(status: number) {
+  if (status === 401 || status === 403) {
+    return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab rejected the service credentials.');
+  }
+  if (status === 409) {
+    return new AppError(409, 'MOVA_LAB_IMPORT_CONFLICT', 'Mova-Lab rejected the import key.');
+  }
+  if (status === 429 || status >= 500) {
+    return new AppError(503, 'MOVA_LAB_UNAVAILABLE', 'Mova-Lab is unavailable.');
+  }
+  return new AppError(502, 'MOVA_LAB_IMPORT_REJECTED', 'Mova-Lab rejected the draft import.');
 }
 
 function invalidResponse() {
