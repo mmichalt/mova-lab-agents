@@ -186,6 +186,13 @@ export type WorkflowStore = {
   saveImportReceipt: (
     input: Omit<ImportReceiptRecord, 'id'> & { id?: string },
   ) => ImportReceiptRecord;
+  updateImportReceipt: (input: {
+    runId: string;
+    proposalLocalId: string;
+    payloadHash: string;
+    contentId: string | null;
+    status: ImportReceiptRecord['status'];
+  }) => ImportReceiptRecord;
   backupTo: (destinationPath: string) => string;
   sqliteSettings: () => { journalMode: string; foreignKeys: number; busyTimeout: number };
   close: () => void;
@@ -553,6 +560,32 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     return mapReceipt(row);
   };
 
+  const updateImportReceipt: WorkflowStore['updateImportReceipt'] = (input) =>
+    wrap(() => {
+      const updated = db
+        .prepare(
+          `UPDATE import_receipts
+           SET content_id = @contentId, status = @status
+           WHERE run_id = @runId
+             AND proposal_local_id = @proposalLocalId
+             AND payload_hash = @payloadHash`,
+        )
+        .run({
+          runId: input.runId,
+          proposalLocalId: input.proposalLocalId,
+          payloadHash: input.payloadHash,
+          contentId: input.contentId,
+          status: input.status,
+        });
+      if (updated.changes !== 1) {
+        throw new PersistError('CONFLICT', 'Import receipt does not match the approved payload.');
+      }
+      const row = db
+        .prepare('SELECT * FROM import_receipts WHERE run_id = ? AND proposal_local_id = ?')
+        .get(input.runId, input.proposalLocalId) as ReceiptRow;
+      return mapReceipt(row);
+    });
+
   const checkpointTx = db.transaction(saveCheckpoint);
   const claimTx = db.transaction(claimRun);
   const heartbeatTx = db.transaction(heartbeatRun);
@@ -582,6 +615,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     heartbeatRun: (input) => heartbeatTx(input),
     recordApproval: (input) => approvalTx(input),
     saveImportReceipt,
+    updateImportReceipt,
     backupTo: (destinationPath) => {
       const dest = resolve(destinationPath);
       mkdirSync(dirname(dest), { recursive: true });

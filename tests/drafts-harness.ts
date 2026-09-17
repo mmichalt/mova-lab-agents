@@ -17,7 +17,13 @@ export type ChatKind =
   | 'age'
   | 'language';
 export type OllamaCall = { method: string; url: string; body: unknown };
-export type MovaLabCall = { method: string; url: string; authorization: string | undefined };
+export type MovaLabCall = {
+  method: string;
+  url: string;
+  authorization: string | undefined;
+  actorId: string | undefined;
+  body: unknown;
+};
 export type OllamaReply =
   | { hang: true }
   | { hangBody: true; status?: number }
@@ -100,24 +106,31 @@ export async function fakeMovaLab(
 ) {
   const calls: MovaLabCall[] = [];
   const server = http.createServer((req, res) => {
-    const call: MovaLabCall = {
-      method: req.method ?? '',
-      url: req.url ?? '',
-      authorization: header(req, 'authorization'),
-    };
-    calls.push(call);
-    const result = reply(call);
-    if ('hang' in result) return;
-    if ('hangBody' in result) {
-      res.writeHead(result.status ?? 200, { 'content-type': 'application/json' });
-      res.write('{');
-      return;
-    }
-    res.writeHead(result.status, {
-      'content-type': 'application/json',
-      ...result.headers,
-    });
-    res.end(result.raw ?? JSON.stringify(result.json ?? {}));
+    void (async () => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const call: MovaLabCall = {
+        method: req.method ?? '',
+        url: req.url ?? '',
+        authorization: header(req, 'authorization'),
+        actorId: header(req, 'x-actor-id'),
+        body: raw ? JSON.parse(raw) : undefined,
+      };
+      calls.push(call);
+      const result = reply(call);
+      if ('hang' in result) return;
+      if ('hangBody' in result) {
+        res.writeHead(result.status ?? 200, { 'content-type': 'application/json' });
+        res.write('{');
+        return;
+      }
+      res.writeHead(result.status, {
+        'content-type': 'application/json',
+        ...result.headers,
+      });
+      res.end(result.raw ?? JSON.stringify(result.json ?? {}));
+    })();
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');

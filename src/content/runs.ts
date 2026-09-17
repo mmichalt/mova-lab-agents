@@ -6,8 +6,10 @@ import { type Clock, createLimits, MAX_PROVIDER_REQUESTS, systemClock } from '..
 import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
+  type ApprovalRecord,
   CONSTRAINTS_VERSION,
   hashNormalizedInput,
+  type ImportReceiptRecord,
   PersistError,
   type PersistedRun,
   type RunPhase,
@@ -16,7 +18,7 @@ import {
   WORKFLOW_VERSION,
   type WorkflowStore,
 } from '../persist/store.ts';
-import { listGenerationCategories } from '../tools/mova-lab.ts';
+import { importRecordingDraft, listGenerationCategories } from '../tools/mova-lab.ts';
 import {
   EXERCISES_PROMPT_VERSION,
   REVISION_PROMPT_VERSION,
@@ -98,6 +100,19 @@ export type WorkflowResource = {
     checks: unknown;
     createdAt: number;
   }>;
+  importProgress: {
+    status: 'not_started' | 'running' | 'failed' | 'completed';
+    total: number;
+    imported: number;
+    receipts: Array<{
+      proposalLocalId: string;
+      importKey: string;
+      payloadHash: string;
+      contentId: string | null;
+      status: ImportReceiptRecord['status'];
+      createdAt: number;
+    }>;
+  };
 };
 
 const approveRequestSchema = z.strictObject({
@@ -168,25 +183,30 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
   if (!isResumable(run, clock.now())) {
     throw new AppError(409, 'RUN_NOT_RESUMABLE', 'The workflow is not interrupted or retryable.');
   }
-  await assertRecoveryCompatible(options.config, options.signal, run);
-  const claimToken = options.store.claimRun({
-    runId: run.id,
-    owner: options.requestId,
-    now: clock.now(),
-    leaseMs: RUN_LEASE_MS,
-  });
-  if (!claimToken) {
-    throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being resumed.');
+  const importing = isApprovedImport(options.store, run);
+  if (importing) {
+    await executeApprovedImport(options, run);
+  } else {
+    await assertRecoveryCompatible(options.config, options.signal, run);
+    const claimToken = options.store.claimRun({
+      runId: run.id,
+      owner: options.requestId,
+      now: clock.now(),
+      leaseMs: RUN_LEASE_MS,
+    });
+    if (!claimToken) {
+      throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being resumed.');
+    }
+    const request = contentRequestSchema.safeParse(run.normalizedInput);
+    if (!request.success) {
+      throw new AppError(
+        409,
+        'WORKFLOW_INPUT_UNSUPPORTED',
+        'The recorded workflow input is invalid.',
+      );
+    }
+    await executePersistedRun(options, run, request.data, claimToken);
   }
-  const request = contentRequestSchema.safeParse(run.normalizedInput);
-  if (!request.success) {
-    throw new AppError(
-      409,
-      'WORKFLOW_INPUT_UNSUPPORTED',
-      'The recorded workflow input is invalid.',
-    );
-  }
-  await executePersistedRun(options, run, request.data, claimToken);
   const latest = options.store.getRun(run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
   return presentRun(options.store, latest, options.ownerId, clock.now());
@@ -240,6 +260,8 @@ export function presentRun(
     throw new AppError(404, 'NOT_FOUND', 'Not found.');
   }
   const state = asState(run.state);
+  const approval = store.getApproval(run.id);
+  const receipts = store.listImportReceipts(run.id);
   const proposals = Array.isArray(state.candidate)
     ? withLocalIds(state.candidate as GeneratedProposal[])
     : [];
@@ -280,6 +302,7 @@ export function presentRun(
       checks: row.checks,
       createdAt: row.createdAt,
     })),
+    importProgress: importProgressOf(run, approval, receipts),
   };
 }
 
@@ -347,7 +370,260 @@ async function decideContentGeneration(
   }
   const latest = options.store.getRun(run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  return presentRun(options.store, latest, latest.ownerId, clock.now());
+  if (decision.decision === 'approved') {
+    await executeApprovedImport(options, latest);
+  }
+  const imported = options.store.getRun(run.id);
+  if (!imported) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+  return presentRun(options.store, imported, imported.ownerId, clock.now());
+}
+
+const frozenApprovalSchema = z.strictObject({
+  candidateVersion: z.int().positive(),
+  categoryId: z.string().trim().min(1).max(128),
+  proposals: z.array(recordingProposalSchema).min(1).max(12),
+});
+
+type FrozenApproval = z.infer<typeof frozenApprovalSchema>;
+
+async function executeApprovedImport(options: ExecutionOptions, run: PersistedRun) {
+  const approval = options.store.getApproval(run.id);
+  if (!approval)
+    throw new AppError(409, 'APPROVAL_REQUIRED', 'The workflow has no approved payload.');
+  const approved = approvedPayload(approval);
+  const clock = options.clock ?? systemClock;
+  const claimToken = options.store.claimRun({
+    runId: run.id,
+    owner: options.requestId,
+    now: clock.now(),
+    leaseMs: RUN_LEASE_MS,
+  });
+  if (!claimToken) {
+    throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being imported.');
+  }
+  const current = options.store.getRun(run.id);
+  if (!current) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+
+  let latest = current;
+  let activeReceipt: ImportReceiptRecord | undefined;
+  let lost = false;
+  const leaseLost = new AbortController();
+  const heartbeat = setInterval(() => {
+    try {
+      if (
+        !options.store.heartbeatRun({
+          runId: run.id,
+          owner: options.requestId,
+          claimToken,
+          now: clock.now(),
+          leaseMs: RUN_LEASE_MS,
+        })
+      ) {
+        lost = true;
+        leaseLost.abort(claimLostError());
+      }
+    } catch {
+      lost = true;
+      leaseLost.abort(claimLostError());
+    }
+  }, RUN_HEARTBEAT_MS);
+  heartbeat.unref();
+  const signal = AbortSignal.any(
+    [options.signal, leaseLost.signal].filter((item): item is AbortSignal => item !== undefined),
+  );
+
+  try {
+    latest = saveImportCheckpoint(options.store, latest, claimToken, 'RUNNING', null, clock.now());
+    for (const proposal of approved.proposals) {
+      const importKey = `${run.id}:${proposal.localId}`;
+      const existing = options.store
+        .listImportReceipts(run.id)
+        .find((receipt) => receipt.proposalLocalId === proposal.localId);
+      if (
+        existing &&
+        (existing.importKey !== importKey || existing.payloadHash !== approval.payloadHash)
+      ) {
+        throw new AppError(409, 'APPROVED_PAYLOAD_CHANGED', 'The approved import payload changed.');
+      }
+      if (existing?.status === 'imported') {
+        if (!existing.contentId)
+          throw new AppError(409, 'IMPORT_RECEIPT_INVALID', 'The import receipt is invalid.');
+        continue;
+      }
+
+      activeReceipt = existing
+        ? options.store.updateImportReceipt({
+            runId: run.id,
+            proposalLocalId: proposal.localId,
+            payloadHash: approval.payloadHash,
+            contentId: null,
+            status: 'pending',
+          })
+        : options.store.saveImportReceipt({
+            runId: run.id,
+            proposalLocalId: proposal.localId,
+            importKey,
+            payloadHash: approval.payloadHash,
+            contentId: null,
+            status: 'pending',
+            createdAt: clock.now(),
+          });
+      const imported = await importRecordingDraft({
+        config: options.config,
+        signal,
+        actorId: approval.actorId,
+        sourceImportKey: importKey,
+        payloadHash: approval.payloadHash,
+        categoryId: approved.categoryId,
+        proposal,
+      });
+      if (lost) throw claimLostError();
+      options.store.updateImportReceipt({
+        runId: run.id,
+        proposalLocalId: proposal.localId,
+        payloadHash: approval.payloadHash,
+        contentId: imported.id,
+        status: 'imported',
+      });
+      activeReceipt = undefined;
+      latest = saveImportCheckpoint(
+        options.store,
+        latest,
+        claimToken,
+        'RUNNING',
+        null,
+        clock.now(),
+      );
+    }
+    if (lost) throw claimLostError();
+    latest = saveImportCheckpoint(
+      options.store,
+      latest,
+      claimToken,
+      'COMPLETED',
+      null,
+      clock.now(),
+    );
+    return latest;
+  } catch (err) {
+    if (activeReceipt?.status === 'pending') {
+      try {
+        options.store.updateImportReceipt({
+          runId: run.id,
+          proposalLocalId: activeReceipt.proposalLocalId,
+          payloadHash: activeReceipt.payloadHash,
+          contentId: null,
+          status: 'failed',
+        });
+      } catch {
+        // The run checkpoint remains the recovery source if this receipt update races a crash.
+      }
+    }
+    if (!(err instanceof AppError) || err.code === 'RUN_CLAIM_LOST') throw err;
+    const error = importError(err);
+    latest = saveImportCheckpoint(options.store, latest, claimToken, 'FAILED', error, clock.now());
+    return latest;
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+function saveImportCheckpoint(
+  store: WorkflowStore,
+  run: PersistedRun,
+  claimToken: string,
+  status: 'RUNNING' | 'FAILED' | 'COMPLETED',
+  error: { code: string; message: string; retryable: boolean } | null,
+  now: number,
+) {
+  return store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: run.stateVersion,
+    status,
+    phase: status === 'FAILED' ? 'finished' : 'import',
+    consumed: run.consumed,
+    state: {
+      ...asState(run.state),
+      status,
+      phase: status === 'RUNNING' ? 'import' : 'finished',
+      error,
+    },
+    now,
+    claimToken,
+  });
+}
+
+function approvedPayload(approval: ApprovalRecord | undefined): FrozenApproval {
+  if (approval?.decision !== 'approved') {
+    throw new AppError(409, 'APPROVAL_REQUIRED', 'The workflow has no approved payload.');
+  }
+  const parsed = frozenApprovalSchema.safeParse(approval.frozenPayload);
+  if (
+    !parsed.success ||
+    parsed.data.candidateVersion !== approval.candidateVersion ||
+    parsed.data.categoryId !== approval.categoryId ||
+    frozenPayloadHash(parsed.data) !== approval.payloadHash
+  ) {
+    throw new AppError(409, 'APPROVED_PAYLOAD_CHANGED', 'The approved import payload changed.');
+  }
+  return parsed.data;
+}
+
+function frozenPayloadHash(payload: FrozenApproval) {
+  return hashNormalizedInput({
+    candidateVersion: payload.candidateVersion,
+    categoryId: payload.categoryId,
+    proposals: payload.proposals.map(({ localId, ...proposal }) => ({ ...proposal, localId })),
+  });
+}
+
+function importError(err: AppError) {
+  return {
+    code: err.code,
+    message: err.message,
+    retryable:
+      err.retryable ||
+      err.code === 'CLIENT_DISCONNECTED' ||
+      (err.status >= 500 && !['MOVA_LAB_IMPORT_REJECTED'].includes(err.code)),
+  };
+}
+
+function isApprovedImport(store: WorkflowStore, run: PersistedRun) {
+  return store.getApproval(run.id)?.decision === 'approved';
+}
+
+function importProgressOf(
+  run: PersistedRun,
+  approval: ApprovalRecord | undefined,
+  receipts: ImportReceiptRecord[],
+): WorkflowResource['importProgress'] {
+  const frozen =
+    approval?.decision === 'approved'
+      ? frozenApprovalSchema.safeParse(approval.frozenPayload).data
+      : undefined;
+  const total = frozen?.proposals.length ?? 0;
+  return {
+    status:
+      approval?.decision !== 'approved'
+        ? 'not_started'
+        : run.status === 'COMPLETED'
+          ? 'completed'
+          : run.status === 'FAILED'
+            ? 'failed'
+            : 'running',
+    total,
+    imported: receipts.filter((receipt) => receipt.status === 'imported').length,
+    receipts: receipts.map(
+      ({ proposalLocalId, importKey, payloadHash, contentId, status, createdAt }) => ({
+        proposalLocalId,
+        importKey,
+        payloadHash,
+        contentId,
+        status,
+        createdAt,
+      }),
+    ),
+  };
 }
 
 function approvalCandidate(store: WorkflowStore, run: PersistedRun, candidateVersion: number) {
@@ -655,7 +931,6 @@ function isResumable(run: PersistedRun, now: number) {
   return (
     run.status === 'RUNNING' &&
     run.phase !== 'finished' &&
-    run.phase !== 'import' &&
     (run.leaseExpiresAt === null || run.leaseExpiresAt <= now)
   );
 }
