@@ -6,7 +6,9 @@ import { type TestContext, test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
 import { PROMPT_VERSIONS } from '../src/content/runs.ts';
+import type { GeneratedProposal } from '../src/content/schemas.ts';
 import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
+import { withLocalIds } from '../src/content/workflow.ts';
 import type { Clock } from '../src/llm/execution.ts';
 import { createLogger } from '../src/logger.ts';
 import {
@@ -20,11 +22,13 @@ import { shutDown } from '../src/server.ts';
 import { EXPECTED_CONSTRAINTS } from '../src/tools/mova-lab.ts';
 import {
   chatCalls,
+  chatsOf,
   fakeMovaLab,
   fakeOllama,
   instantClock,
   listen,
   type MovaLabCall,
+  type OllamaCall,
   type OllamaReply,
   runtimeReply,
   scriptedChats,
@@ -32,7 +36,12 @@ import {
   teacherRequest,
   testEnv,
 } from './drafts-harness.ts';
-import { chatEnvelope, generatedContent, vocabularyContent } from './fixtures/ollama.ts';
+import {
+  chatEnvelope,
+  chatFixtures,
+  generatedContent,
+  vocabularyContent,
+} from './fixtures/ollama.ts';
 
 const logger = createLogger('silent');
 
@@ -58,6 +67,8 @@ async function startService(
     movaLabReply?: Parameters<typeof fakeMovaLab>[1];
     ollamaUrl?: string;
     clock?: Clock;
+    maxInFlightWorkflows?: number;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ) {
   const store = options.store ?? tempStore(t);
@@ -70,13 +81,29 @@ async function startService(
     testEnv({
       OLLAMA_BASE_URL: options.ollamaUrl ?? ollama?.url ?? 'http://127.0.0.1:9',
       MOVA_LAB_BASE_URL: movaLab.url,
+      ...options.env,
     }),
   );
   const { server, url } = await listen(
-    createApp({ config, logger, store, clock: options.clock ?? instantClock() }),
+    createApp({
+      config,
+      logger,
+      store,
+      clock: options.clock ?? instantClock(),
+      maxInFlightWorkflows: options.maxInFlightWorkflows,
+    }),
   );
   t.after(() => shutDown(server, 50));
   return { store, url, ollama, movaLab, config };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting');
 }
 
 test('resume reuses a committed vocabulary checkpoint and remaining limits', async (t) => {
@@ -275,7 +302,15 @@ test('creating a persisted run reaches AWAITING_APPROVAL and is retrievable', as
   assert.equal(body.candidates.length, 1);
   assert.equal(body.modelTag, 'qwen3:4b-instruct');
   assert.equal(body.modelDigest, 'sha256:abc');
+  assert.deepEqual(body.imports, body.importProgress.receipts);
   assertSafe(body);
+  const attempts = store.listAttempts(body.id);
+  assert.equal(attempts.length, 5);
+  assert.equal(
+    attempts.every((item) => item.outcome === 'completed' && item.finishedAt != null),
+    true,
+  );
+  assert.equal((attempts[0]?.usage as { modelDigest?: string } | null)?.modelDigest, 'sha256:abc');
 
   const fetched = await fetch(`${url}/workflows/${body.id}`, {
     headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
@@ -309,6 +344,14 @@ test('Content Admin approval freezes the exact candidate and survives retrieval'
   assert.equal(body.resumable, false);
   assert.equal(body.importProgress.status, 'completed');
   assert.equal(body.importProgress.imported, body.importProgress.total);
+  assert.deepEqual(body.imports, body.importProgress.receipts);
+  assert.equal(
+    body.imports.every(
+      (item: { status: string; contentId: string | null }) =>
+        item.status === 'imported' && item.contentId != null,
+    ),
+    true,
+  );
   assert.deepEqual(body.approval.frozenPayload, frozenPayload);
   assert.equal(body.approval.actorId, 'admin-1');
   assert.equal(body.approval.payloadHash, hashNormalizedInput(frozenPayload));
@@ -356,16 +399,18 @@ test('partial draft imports keep receipts and resume missing proposals without g
   assert.equal(failed.importProgress.total, 2);
   assert.equal(failed.importProgress.imported, 1);
   assert.equal(failed.importProgress.receipts[1].status, 'failed');
+  assert.deepEqual(failed.imports, failed.importProgress.receipts);
   assert.equal(failed.result.error.code, 'MOVA_LAB_INVALID_RESPONSE');
 
   const resumed = await fetch(`${url}/workflows/${created.id}/resume`, {
     method: 'POST',
-    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+    headers: adminHeaders('admin-resume'),
   });
   const completed = await resumed.json();
   assert.equal(resumed.status, 200);
   assert.equal(completed.status, 'COMPLETED');
   assert.equal(completed.importProgress.imported, 2);
+  assert.deepEqual(completed.imports, completed.importProgress.receipts);
   assert.equal(chatCalls(ollama?.calls ?? []).length, 5);
   assert.equal(attempts.get(`${created.id}:proposal-1`), 1);
   assert.equal(attempts.get(`${created.id}:proposal-2`), 2);
@@ -676,4 +721,600 @@ test('GET /ready checks sqlite and model tags without generation; /health stays 
   const report = await unreadiness.json();
   assert.equal(report.status, 'not_ready');
   assert.equal(report.sqlite, 'unavailable');
+});
+
+function seedInterrupted(
+  store: WorkflowStore,
+  key: string,
+  state: Record<string, unknown>,
+  extras: {
+    phase?: 'vocabulary' | 'generation' | 'checks' | 'revision';
+    consumed?: { providerRequests: number; revisionCount: number };
+    candidate?: {
+      candidateVersion: number;
+      proposals: unknown;
+      checks: unknown;
+      createdAt: number;
+    };
+    modelDigest?: string | null;
+  } = {},
+) {
+  const run = store.createRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: key,
+    normalizedInput: teacherRequest,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions: PROMPT_VERSIONS,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: extras.modelDigest === undefined ? 'sha256:abc' : extras.modelDigest,
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600_000,
+      attemptTimeoutMs: 120_000,
+      deadlineAt: 100_000,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+  const token = store.claimRun({
+    runId: run.id,
+    owner: 'crashed-worker',
+    now: 1_000,
+    leaseMs: 100,
+  });
+  assert.ok(token);
+  store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 0,
+    status: 'RUNNING',
+    phase: extras.phase ?? 'checks',
+    consumed: extras.consumed ?? { providerRequests: 3, revisionCount: 0 },
+    state: {
+      request: teacherRequest,
+      status: 'RUNNING',
+      candidateVersion: 0,
+      revisionCount: 0,
+      constraintsVersion: CONSTRAINTS_VERSION,
+      checks: [],
+      history: [],
+      usage: [],
+      error: null,
+      providerRequests: 3,
+      modelTag: 'qwen3:4b-instruct',
+      modelDigest: extras.modelDigest === undefined ? 'sha256:abc' : extras.modelDigest,
+      ...state,
+    },
+    now: 1_050,
+    claimToken: token,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: extras.modelDigest === undefined ? 'sha256:abc' : extras.modelDigest,
+    candidate: extras.candidate,
+  });
+  return run;
+}
+
+test('owner teachers cannot decide; admins can review without exposing other runs', async (t) => {
+  const { url } = await startService(t);
+  const created = await (await createRun(url)).json();
+  const ownerGet = await fetch(`${url}/workflows/${created.id}`, {
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(ownerGet.status, 200);
+
+  const otherGet = await fetch(`${url}/workflows/${created.id}`, {
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-2' },
+  });
+  assert.equal(otherGet.status, 404);
+  assert.equal((await otherGet.json()).error.code, 'NOT_FOUND');
+
+  const spoofedAdmin = await fetch(`${url}/workflows/${created.id}`, {
+    headers: {
+      authorization: 'Bearer test-token',
+      'x-actor-id': 'teacher-2',
+      'x-content-admin': 'yes',
+    },
+  });
+  assert.equal(spoofedAdmin.status, 404);
+
+  const ownerReject = await fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+      'x-actor-id': 'teacher-1',
+    },
+    body: JSON.stringify({ candidateVersion: 1 }),
+  });
+  assert.equal(ownerReject.status, 403);
+  assert.equal((await ownerReject.json()).error.code, 'FORBIDDEN');
+
+  const otherReject = await fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+      'x-actor-id': 'teacher-2',
+    },
+    body: JSON.stringify({ candidateVersion: 1 }),
+  });
+  assert.equal(otherReject.status, 403);
+
+  const otherResume = await fetch(`${url}/workflows/${created.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-2' },
+  });
+  assert.equal(otherResume.status, 404);
+
+  const adminGet = await fetch(`${url}/workflows/${created.id}`, {
+    headers: adminHeaders(),
+  });
+  assert.equal(adminGet.status, 200);
+  assert.equal((await adminGet.json()).ownerId, 'teacher-1');
+
+  const adminReject = await fetch(`${url}/workflows/${created.id}/reject`, {
+    method: 'POST',
+    headers: adminHeaders('admin-review'),
+    body: JSON.stringify({ candidateVersion: 1 }),
+  });
+  assert.equal(adminReject.status, 200);
+  assert.equal((await adminReject.json()).status, 'REJECTED');
+});
+
+test('process capacity rejects extra create/resume/legacy work and still serves duplicate keys', async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const scripted = sequentialReply();
+  let held = false;
+  const ollama = await fakeOllama(t, (call) => {
+    const reply = scripted(call);
+    if (
+      !held &&
+      call.method === 'POST' &&
+      call.url === '/api/chat' &&
+      'status' in reply &&
+      !('hang' in reply)
+    ) {
+      held = true;
+      return { ...reply, wait: gate };
+    }
+    return reply;
+  });
+  const store = tempStore(t);
+  const pending = seedInterrupted(
+    store,
+    'pending-resume',
+    { phase: 'generation', vocabulary: JSON.parse(vocabularyContent) },
+    { phase: 'generation', consumed: { providerRequests: 1, revisionCount: 0 } },
+  );
+  const { url } = await startService(t, { store, ollamaUrl: ollama.url });
+  const busy = createRun(url, { key: 'busy-1' });
+  await waitUntil(() => chatCalls(ollama.calls).length === 1);
+
+  const duplicate = await createRun(url, { key: 'busy-1' });
+  assert.equal(duplicate.status, 200);
+  assert.equal((await duplicate.json()).id, store.getRunByIdempotency('teacher-1', 'busy-1')?.id);
+
+  const extra = await createRun(url, { actor: 'teacher-2', key: 'busy-2' });
+  assert.equal(extra.status, 429);
+  assert.equal((await extra.json()).error.code, 'WORKFLOW_CAPACITY_EXCEEDED');
+
+  const resume = await fetch(`${url}/workflows/${pending.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(resume.status, 429);
+
+  const drafts = await fetch(`${url}/content-drafts`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'content-type': 'application/json' },
+    body: JSON.stringify(teacherRequest),
+  });
+  assert.equal(drafts.status, 429);
+  assert.equal((await drafts.json()).error.code, 'WORKFLOW_CAPACITY_EXCEEDED');
+
+  release();
+  const created = await busy;
+  assert.equal(created.status, 201);
+});
+
+test('client disconnect stays a resumable CLIENT_DISCONNECTED within the saved deadline', async (t) => {
+  const hangChat = (call: OllamaCall) =>
+    call.method === 'POST' && call.url === '/api/chat'
+      ? { hang: true as const }
+      : runtimeReply({})(call);
+  const ollama = await fakeOllama(t, hangChat);
+  const { url, store } = await startService(t, { ollamaUrl: ollama.url });
+  const ac = new AbortController();
+  const pending = fetch(`${url}/workflows/content-generation`, {
+    method: 'POST',
+    headers: headers('teacher-1', 'disconnect-1'),
+    body: JSON.stringify(teacherRequest),
+    signal: ac.signal,
+  });
+  await waitUntil(() => chatCalls(ollama.calls).length === 1);
+  ac.abort();
+  await assert.rejects(pending);
+  await waitUntil(
+    () => store.getRunByIdempotency('teacher-1', 'disconnect-1')?.status === 'FAILED',
+  );
+  const run = store.getRunByIdempotency('teacher-1', 'disconnect-1');
+  assert.ok(run);
+  const fetched = await fetch(`${url}/workflows/${run.id}`, {
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  const body = await fetched.json();
+  assert.equal(fetched.status, 200);
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.error.code, 'CLIENT_DISCONNECTED');
+  assert.equal(body.result.error.retryable, true);
+  assert.equal(body.resumable, true);
+  assert.equal(body.limits.deadlineAt, run.limits.deadlineAt);
+
+  const replay = await createRun(url, { key: 'disconnect-1' });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).id, run.id);
+});
+
+test('resume skips committed generation and a completed parallel review', async (t) => {
+  const store = tempStore(t);
+  const generated = JSON.parse(generatedContent) as {
+    proposals: GeneratedProposal[];
+  };
+  const vocabulary = JSON.parse(vocabularyContent) as { items: unknown };
+  const proposals = withLocalIds(generated.proposals);
+  const contentCheck = {
+    status: 'passed' as const,
+    name: 'content' as const,
+    issues: [LETTER_PRESENCE_ISSUE],
+  };
+  seedInterrupted(
+    store,
+    'resume-checks',
+    {
+      phase: 'checks',
+      candidateVersion: 1,
+      vocabulary: { items: vocabulary.items },
+      candidate: proposals,
+      checks: [contentCheck, { status: 'passed', name: 'age', issues: [] }],
+    },
+    {
+      candidate: {
+        candidateVersion: 1,
+        proposals,
+        checks: [contentCheck, { status: 'passed', name: 'age', issues: [] }],
+        createdAt: 1_050,
+      },
+    },
+  );
+  const ollama = await fakeOllama(t, sequentialReply());
+  const { url } = await startService(t, {
+    store,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+  const runId = store.getRunByIdempotency('teacher-1', 'resume-checks')?.id;
+  const response = await fetch(`${url}/workflows/${runId}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'AWAITING_APPROVAL');
+  assert.equal(body.result.candidateVersion, 1);
+  assert.equal(chatsOf(ollama.calls, 'vocabulary').length, 0);
+  assert.equal(chatsOf(ollama.calls, 'generation').length, 0);
+  assert.equal(chatsOf(ollama.calls, 'age').length, 0);
+  assert.equal(chatsOf(ollama.calls, 'language').length, 1);
+  assert.equal(body.candidates[0].candidateVersion, 1);
+});
+
+test('resume after a malformed-output checkpoint revises without regenerating', async (t) => {
+  const store = tempStore(t);
+  const vocabulary = JSON.parse(vocabularyContent) as { items: unknown };
+  seedInterrupted(
+    store,
+    'resume-revision',
+    {
+      phase: 'revision',
+      candidateVersion: 0,
+      revisionCount: 1,
+      vocabulary: { items: vocabulary.items },
+      candidate: null,
+      checks: [
+        {
+          status: 'failed',
+          name: 'content',
+          issues: [
+            {
+              source: 'schema',
+              code: 'INVALID_OUTPUT',
+              severity: 'error',
+              message: 'The model returned invalid output.',
+            },
+          ],
+        },
+      ],
+    },
+    {
+      phase: 'revision',
+      consumed: { providerRequests: 3, revisionCount: 1 },
+    },
+  );
+  const ollama = await fakeOllama(t, sequentialReply());
+  const { url } = await startService(t, {
+    store,
+    ollamaUrl: ollama.url,
+    clock: instantClock({ now: () => 2_000 }),
+  });
+  const response = await fetch(
+    `${url}/workflows/${store.getRunByIdempotency('teacher-1', 'resume-revision')?.id}/resume`,
+    {
+      method: 'POST',
+      headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+    },
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.status, 'AWAITING_APPROVAL');
+  assert.equal(body.result.candidateVersion, 1);
+  assert.equal(body.result.revisionCount, 1);
+  assert.equal(chatsOf(ollama.calls, 'generation').length, 0);
+  assert.equal(chatsOf(ollama.calls, 'revision').length, 1);
+});
+
+test('a changed model digest fails the same fresh run', async (t) => {
+  let tags = 0;
+  const fallback = sequentialReply();
+  const ollama = await fakeOllama(t, (call) => {
+    if (call.method === 'GET' && call.url === '/api/tags') {
+      tags += 1;
+      return {
+        status: 200,
+        json: {
+          models: [
+            {
+              name: 'qwen3:4b-instruct',
+              digest: tags === 1 ? 'sha256:abc' : 'sha256:other',
+            },
+          ],
+        },
+      };
+    }
+    return fallback(call);
+  });
+  const { url } = await startService(t, { ollamaUrl: ollama.url });
+  const response = await createRun(url, { key: 'digest-change' });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.status, 'FAILED');
+  assert.equal(body.result.error.code, 'MODEL_DIGEST_CHANGED');
+  assert.equal(body.modelDigest, 'sha256:abc');
+});
+
+test('resume fails when model work has no recorded digest', async (t) => {
+  const store = tempStore(t);
+  const run = seedInterrupted(
+    store,
+    'digest-missing-resume',
+    { phase: 'generation', vocabulary: JSON.parse(vocabularyContent) },
+    {
+      phase: 'generation',
+      consumed: { providerRequests: 1, revisionCount: 0 },
+      modelDigest: null,
+    },
+  );
+  const { url } = await startService(t, { store });
+  const response = await fetch(`${url}/workflows/${run.id}/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer test-token', 'x-actor-id': 'teacher-1' },
+  });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error.code, 'MODEL_DIGEST_UNAVAILABLE');
+});
+
+test('malformed structured output finishes the persisted attempt as failed', async (t) => {
+  const { url, store } = await startService(t, {
+    reply: scriptedChats({
+      generation: { status: 200, json: chatFixtures.invalidJson },
+    }),
+  });
+  const response = await createRun(url, { key: 'malformed-attempt' });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.status, 'AWAITING_APPROVAL');
+  const attempts = store.listAttempts(body.id);
+  const generation = attempts.filter((item) => item.step === 'generation');
+  assert.equal(generation.length, 1);
+  assert.equal(generation[0]?.outcome, 'failed');
+  assert.equal((generation[0]?.error as { code?: string } | null)?.code, 'PROVIDER_INVALID_OUTPUT');
+  assert.equal(
+    attempts
+      .filter((item) => item.step === 'revision')
+      .every((item) => item.outcome === 'completed'),
+    true,
+  );
+});
+
+test('approved import resume validates the frozen payload without calling Ollama', async (t) => {
+  const createdDrafts = new Map<string, string>();
+  const attempts = new Map<string, number>();
+  const first = await startService(t, {
+    movaLabReply: (call) => {
+      if (call.url === '/api/internal/content-generation/categories') {
+        return categoriesReply(call) as OllamaReply;
+      }
+      if (call.url === '/api/internal/content-generation/recording-drafts') {
+        const body = call.body as { sourceImportKey: string };
+        const key = body.sourceImportKey;
+        const attempt = (attempts.get(key) ?? 0) + 1;
+        attempts.set(key, attempt);
+        const id = createdDrafts.get(key) ?? `draft-${createdDrafts.size + 1}`;
+        createdDrafts.set(key, id);
+        return attempt === 1 && key.endsWith('proposal-2')
+          ? { status: 200, raw: '{}' }
+          : { status: 200, json: { id } };
+      }
+      return { status: 200, json: EXPECTED_CONSTRAINTS };
+    },
+  });
+  const created = await (await createRun(first.url, { key: 'import-no-ollama' })).json();
+  const approval = await fetch(`${first.url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  assert.equal((await approval.json()).status, 'FAILED');
+  const sqlitePath = first.store.path;
+  first.store.close();
+  const reopened = openWorkflowStore(sqlitePath);
+  t.after(() => reopened.close());
+  const second = await startService(t, {
+    store: reopened,
+    ollamaUrl: 'http://127.0.0.1:9',
+    movaLabReply: (call) => {
+      if (call.url === '/api/internal/content-generation/recording-drafts') {
+        const body = call.body as { sourceImportKey: string };
+        const id = createdDrafts.get(body.sourceImportKey) ?? 'draft-2';
+        return { status: 200, json: { id } };
+      }
+      return { status: 200, json: EXPECTED_CONSTRAINTS };
+    },
+  });
+  const resumed = await fetch(`${second.url}/workflows/${created.id}/resume`, {
+    method: 'POST',
+    headers: adminHeaders('admin-resume'),
+  });
+  const completed = await resumed.json();
+  assert.equal(resumed.status, 200);
+  assert.equal(completed.status, 'COMPLETED');
+  assert.equal(completed.importProgress.imported, 2);
+  assert.equal(second.ollama, undefined);
+});
+
+test('actor revocation reports FORBIDDEN, blocks CMS writes, and does not regenerate', async (t) => {
+  const { url, ollama, movaLab } = await startService(t, {
+    movaLabReply: (call) => {
+      if (call.url === '/api/internal/content-generation/recording-drafts') {
+        return { status: 403, json: { message: 'revoked' } };
+      }
+      return categoryReply(call);
+    },
+  });
+  const created = await (await createRun(url, { key: 'revoked' })).json();
+  const chats = chatCalls(ollama?.calls ?? []).length;
+  const approval = await fetch(`${url}/workflows/${created.id}/approve`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+  });
+  const failed = await approval.json();
+  assert.equal(approval.status, 200);
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(failed.result.error.code, 'MOVA_LAB_FORBIDDEN');
+  assert.equal(failed.resumable, true);
+  assert.equal(failed.importProgress.imported, 0);
+  assert.equal(chatCalls(ollama?.calls ?? []).length, chats);
+  assert.equal(
+    movaLab.calls.filter((call) => call.url === '/api/internal/content-generation/recording-drafts')
+      .length,
+    1,
+  );
+
+  const resumed = await fetch(`${url}/workflows/${created.id}/resume`, {
+    method: 'POST',
+    headers: adminHeaders(),
+  });
+  const again = await resumed.json();
+  assert.equal(resumed.status, 200);
+  assert.equal(again.status, 'FAILED');
+  assert.equal(again.result.error.code, 'MOVA_LAB_FORBIDDEN');
+  assert.equal(chatCalls(ollama?.calls ?? []).length, chats);
+  assert.equal(
+    movaLab.calls.filter((call) => call.url === '/api/internal/content-generation/recording-drafts')
+      .length,
+    2,
+  );
+});
+
+test('approved import keeps auth, conflict, rejection, timeout, and transport distinct', async (t) => {
+  const cases: Array<{
+    key: string;
+    code: string;
+    resumable: boolean;
+    reply: OllamaReply | ((call: MovaLabCall) => OllamaReply);
+    env?: NodeJS.ProcessEnv;
+  }> = [
+    {
+      key: 'import-auth',
+      code: 'MOVA_LAB_AUTH_FAILED',
+      resumable: true,
+      reply: { status: 401, json: { message: 'no' } },
+    },
+    {
+      key: 'import-conflict',
+      code: 'MOVA_LAB_IMPORT_CONFLICT',
+      resumable: false,
+      reply: { status: 409, json: { message: 'exists' } },
+    },
+    {
+      key: 'import-rejected',
+      code: 'MOVA_LAB_IMPORT_REJECTED',
+      resumable: false,
+      reply: { status: 400, json: { message: 'bad' } },
+    },
+    {
+      key: 'import-invalid',
+      code: 'MOVA_LAB_INVALID_RESPONSE',
+      resumable: true,
+      reply: { status: 200, raw: '{}' },
+    },
+    {
+      key: 'import-timeout',
+      code: 'MOVA_LAB_TIMEOUT',
+      resumable: true,
+      reply: { hang: true },
+      env: { MOVA_LAB_TIMEOUT_MS: '50' },
+    },
+    {
+      key: 'import-transport',
+      code: 'MOVA_LAB_UNAVAILABLE',
+      resumable: true,
+      reply: { status: 503, json: { error: 'down' } },
+    },
+  ];
+  for (const item of cases) {
+    const { url, ollama, movaLab } = await startService(t, {
+      env: item.env,
+      movaLabReply: (call) => {
+        if (call.url === '/api/internal/content-generation/recording-drafts') {
+          return typeof item.reply === 'function' ? item.reply(call) : item.reply;
+        }
+        return categoryReply(call);
+      },
+    });
+    const created = await (await createRun(url, { key: item.key })).json();
+    const chats = chatCalls(ollama?.calls ?? []).length;
+    const approval = await fetch(`${url}/workflows/${created.id}/approve`, {
+      method: 'POST',
+      headers: adminHeaders(),
+      body: JSON.stringify({ candidateVersion: 1, categoryId: 'cat-1' }),
+    });
+    const failed = await approval.json();
+    assert.equal(approval.status, 200);
+    assert.equal(failed.status, 'FAILED');
+    assert.equal(failed.result.error.code, item.code);
+    assert.equal(failed.resumable, item.resumable);
+    assert.equal(chatCalls(ollama?.calls ?? []).length, chats);
+    assert.equal(
+      movaLab.calls.some(
+        (call) => call.url === '/api/internal/content-generation/recording-drafts',
+      ),
+      true,
+    );
+  }
 });

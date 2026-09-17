@@ -13,6 +13,7 @@ import {
   MAX_VOCABULARY_TOOL_CALLS,
   MAX_VOCABULARY_TURNS,
   runSearchTool,
+  SEARCH_EXISTING_EXERCISES,
   searchExistingExercisesTool,
   toolResultMessage,
 } from '../tools/dispatch.ts';
@@ -169,7 +170,12 @@ async function selectVocabularyMessages(
           requestId: options.requestId,
           step: 'vocabulary',
           promptVersion: VOCABULARY_PROMPT_VERSION,
-          toolName: rejected.name || null,
+          toolName:
+            rejected.reason === 'unknown'
+              ? 'unknown'
+              : rejected.name === SEARCH_EXISTING_EXERCISES
+                ? SEARCH_EXISTING_EXERCISES
+                : 'invalid',
           reason: rejected.reason,
           auditId: rejected.auditId,
         },

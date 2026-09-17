@@ -15,6 +15,7 @@ import {
   validationIssueSchema,
   vocabularyOutputSchema,
   vocabularySchema,
+  workflowResourceSchema,
 } from '../src/content/schemas.ts';
 
 const examples = new URL('../docs/examples/', import.meta.url);
@@ -486,5 +487,16 @@ test('generation result requires checks, local IDs, workflow status, and an appr
       proposals: [validProposal],
     }).success,
     false,
+  );
+});
+
+test('persisted-run example matches the public workflow resource contract', () => {
+  const resource = workflowResourceSchema.parse(loadExample('persisted-run.json'));
+  assert.equal(resource.status, 'AWAITING_APPROVAL');
+  assert.equal(resource.resumable, false);
+  assert.deepEqual(resource.imports, resource.importProgress.receipts);
+  assert.equal(
+    resource.result.checks.some((check) => check.status === 'passed'),
+    true,
   );
 });

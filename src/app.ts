@@ -38,8 +38,10 @@ export function createApp(options: {
   testRoutes?: boolean;
   clock?: Clock;
   maxProviderRequests?: number;
+  maxInFlightWorkflows?: number;
 }) {
   const app = express();
+  const admission = createInFlightAdmission(options.maxInFlightWorkflows ?? 1);
   app.disable('x-powered-by');
   app.use((_req, res, next) => {
     const requestId = randomUUID();
@@ -67,17 +69,23 @@ export function createApp(options: {
   app.post('/content-drafts', auth, json, (req, res, next) => {
     res.setHeader('deprecation', 'true');
     void withRequestAbort(res, next, async (signal) => {
-      res.json(
-        await generateContentDrafts({
-          config: options.config,
-          logger: res.locals.log as Logger,
-          requestId: res.locals.requestId as string,
-          body: req.body,
-          clock: options.clock,
-          maxProviderRequests: options.maxProviderRequests,
-          signal,
-        }),
-      );
+      const release = admission.tryAcquire();
+      if (!release) throw capacityError();
+      try {
+        res.json(
+          await generateContentDrafts({
+            config: options.config,
+            logger: res.locals.log as Logger,
+            requestId: res.locals.requestId as string,
+            body: req.body,
+            clock: options.clock,
+            maxProviderRequests: options.maxProviderRequests,
+            signal,
+          }),
+        );
+      } finally {
+        release();
+      }
     });
   });
   app.post('/workflows/content-generation', auth, json, (req, res, next) => {
@@ -93,6 +101,7 @@ export function createApp(options: {
         clock: options.clock,
         maxProviderRequests: options.maxProviderRequests,
         signal,
+        admission,
       });
       res.status(created.created ? 201 : 200).json(created.resource);
     });
@@ -105,6 +114,7 @@ export function createApp(options: {
           String(req.params.id),
           actorIdFrom(req),
           options.clock?.now(),
+          isContentAdmin(req),
         ),
       );
     } catch (err) {
@@ -124,6 +134,7 @@ export function createApp(options: {
           body: req.body,
           clock: options.clock,
           signal,
+          canReview: true,
         }),
       );
     });
@@ -141,24 +152,32 @@ export function createApp(options: {
           body: req.body,
           clock: options.clock,
           signal,
+          canReview: true,
         }),
       );
     });
   });
   app.post('/workflows/:id/resume', auth, (req, res, next) => {
     void withRequestAbort(res, next, async (signal) => {
-      const resource = await resumeContentGeneration({
-        store: requireStore(options.store),
-        config: options.config,
-        logger: res.locals.log as Logger,
-        requestId: res.locals.requestId as string,
-        ownerId: actorIdFrom(req),
-        id: String(req.params.id),
-        clock: options.clock,
-        maxProviderRequests: options.maxProviderRequests,
-        signal,
-      });
-      res.json(resource);
+      const release = admission.tryAcquire();
+      if (!release) throw capacityError();
+      try {
+        const resource = await resumeContentGeneration({
+          store: requireStore(options.store),
+          config: options.config,
+          logger: res.locals.log as Logger,
+          requestId: res.locals.requestId as string,
+          ownerId: actorIdFrom(req),
+          id: String(req.params.id),
+          clock: options.clock,
+          maxProviderRequests: options.maxProviderRequests,
+          signal,
+          canReview: isContentAdmin(req),
+        });
+        res.json(resource);
+      } finally {
+        release();
+      }
     });
   });
   if (options.testRoutes) {
@@ -185,13 +204,38 @@ export function createApp(options: {
 function requireContentAdmin(req: Request, _res: Response, next: NextFunction) {
   try {
     actorIdFrom(req);
-    if (req.get('x-content-admin')?.trim().toLowerCase() !== 'true') {
+    if (!isContentAdmin(req)) {
       throw new AppError(403, 'FORBIDDEN', 'Content Admin authority is required.');
     }
     next();
   } catch (err) {
     next(err);
   }
+}
+
+function isContentAdmin(req: Request) {
+  return req.get('x-content-admin')?.trim().toLowerCase() === 'true';
+}
+
+function createInFlightAdmission(max: number) {
+  let inFlight = 0;
+  return {
+    tryAcquire() {
+      if (inFlight >= max) return undefined;
+      inFlight += 1;
+      let released = false;
+      return () => {
+        if (!released) {
+          released = true;
+          inFlight -= 1;
+        }
+      };
+    },
+  };
+}
+
+function capacityError() {
+  return new AppError(429, 'WORKFLOW_CAPACITY_EXCEEDED', 'Workflow capacity is currently full.');
 }
 
 function equalToken(actual: string, expected: string) {

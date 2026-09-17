@@ -78,6 +78,43 @@ function isPersist(code: PersistError['code']) {
   };
 }
 
+function awaitApproval(
+  store: WorkflowStore,
+  run: ReturnType<WorkflowStore['createRun']>,
+  now = 4_000,
+) {
+  return store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: run.stateVersion,
+    status: 'AWAITING_APPROVAL',
+    phase: 'finished',
+    consumed: run.consumed,
+    state: { candidateVersion: 1 },
+    now,
+  });
+}
+
+function approveImport(
+  store: WorkflowStore,
+  run: ReturnType<WorkflowStore['getRun']> & object,
+  extras: { now?: number; payloadHash?: string; localId?: string } = {},
+) {
+  const current = store.getRun(run.id);
+  assert.ok(current);
+  const localId = extras.localId ?? 'p1';
+  return store.recordApproval({
+    runId: current.id,
+    actorId: 'admin-1',
+    candidateVersion: 1,
+    payloadHash: extras.payloadHash ?? 'hash-a',
+    decidedAt: extras.now ?? 4_100,
+    expectedStateVersion: current.stateVersion,
+    decision: 'approved',
+    categoryId: 'cat-1',
+    frozenPayload: { proposals: [{ localId }] },
+  });
+}
+
 test('opens WAL files with foreign keys, busy timeout, and idempotent migrations', (t) => {
   const store = tempStore(t);
   assert.deepEqual(store.sqliteSettings(), {
@@ -482,15 +519,102 @@ test('recordApproval commits the decision and status together', (t) => {
     isPersist('CONFLICT'),
   );
   assert.equal(store.getApproval(run.id)?.decision, 'approved');
-  const completed = store.saveCheckpoint({
-    runId: run.id,
-    expectedStateVersion: 2,
-    status: 'COMPLETED',
-    phase: 'import',
-    consumed: { providerRequests: 4, revisionCount: 0 },
-    state: { candidateVersion: 1 },
+  assert.throws(
+    () =>
+      store.saveCheckpoint({
+        runId: run.id,
+        expectedStateVersion: 2,
+        status: 'COMPLETED',
+        phase: 'import',
+        consumed: { providerRequests: 4, revisionCount: 0 },
+        state: { candidateVersion: 1 },
+        now: 4_300,
+      }),
+    isPersist('CONFLICT'),
+  );
+  assert.equal(store.getRun(run.id)?.status, 'RUNNING');
+});
+
+test('completeImport requires a live claim and every frozen imported receipt', (t) => {
+  const store = tempStore(t);
+  const created = create(store);
+  approveImport(store, awaitApproval(store, created));
+  const importing = store.getRun(created.id);
+  assert.ok(importing);
+  const claimToken = store.claimRun({
+    runId: importing.id,
+    owner: 'importer',
     now: 4_300,
+    leaseMs: 1_000,
   });
+  assert.ok(claimToken);
+  const complete = (runId: string, token: string, now: number, consumed = importing.consumed) =>
+    store.completeImport({
+      runId,
+      claimToken: token,
+      now,
+      consumed,
+      state: { status: 'COMPLETED' },
+    });
+  assert.throws(() => complete(importing.id, 'missing', 4_300), isPersist('CONFLICT'));
+  assert.throws(() => complete(importing.id, claimToken, 4_310), isPersist('CONSTRAINT'));
+  store.saveImportReceipt({
+    runId: importing.id,
+    proposalLocalId: 'p1',
+    importKey: `${importing.id}:p1`,
+    payloadHash: 'wrong-hash',
+    contentId: 'cms-1',
+    status: 'imported',
+    createdAt: 4_320,
+    claimToken,
+    now: 4_320,
+  });
+  assert.throws(() => complete(importing.id, claimToken, 4_330), isPersist('CONSTRAINT'));
+
+  const second = create(store, { key: 'key-2' });
+  approveImport(store, awaitApproval(store, second, 5_000), { now: 5_100 });
+  const other = store.getRun(second.id);
+  assert.ok(other);
+  const staleToken = store.claimRun({
+    runId: other.id,
+    owner: 'importer',
+    now: 5_200,
+    leaseMs: 50,
+  });
+  assert.ok(staleToken);
+  store.saveImportReceipt({
+    runId: other.id,
+    proposalLocalId: 'p1',
+    importKey: `${other.id}:p1`,
+    payloadHash: 'hash-a',
+    contentId: null,
+    status: 'failed',
+    createdAt: 5_210,
+    claimToken: staleToken,
+    now: 5_210,
+  });
+  assert.throws(
+    () => complete(other.id, staleToken, 5_220, other.consumed),
+    isPersist('CONSTRAINT'),
+  );
+  store.updateImportReceipt({
+    runId: other.id,
+    proposalLocalId: 'p1',
+    payloadHash: 'hash-a',
+    contentId: 'cms-1',
+    status: 'imported',
+    claimToken: staleToken,
+    now: 5_230,
+  });
+  assert.throws(() => complete(other.id, staleToken, 5_300, other.consumed), isPersist('CONFLICT'));
+  const liveToken = store.claimRun({
+    runId: other.id,
+    owner: 'importer-2',
+    now: 5_301,
+    leaseMs: 1_000,
+  });
+  assert.ok(liveToken);
+  const completed = complete(other.id, liveToken, 5_310, other.consumed);
   assert.equal(completed.status, 'COMPLETED');
   assert.equal(completed.phase, 'import');
 });
@@ -498,6 +622,13 @@ test('recordApproval commits the decision and status together', (t) => {
 test('import receipts reject duplicate keys and incomplete imported rows', (t) => {
   const store = tempStore(t);
   const run = create(store);
+  const claimToken = store.claimRun({
+    runId: run.id,
+    owner: 'importer',
+    now: 4_900,
+    leaseMs: 1_000,
+  });
+  assert.ok(claimToken);
   store.saveImportReceipt({
     runId: run.id,
     proposalLocalId: 'p1',
@@ -506,25 +637,21 @@ test('import receipts reject duplicate keys and incomplete imported rows', (t) =
     contentId: 'cms-1',
     status: 'imported',
     createdAt: 5_000,
+    claimToken,
+    now: 5_000,
   });
-  assert.deepEqual(
-    store.updateImportReceipt({
-      runId: run.id,
-      proposalLocalId: 'p1',
-      payloadHash: 'ph-1',
-      contentId: 'cms-1b',
-      status: 'imported',
-    }),
-    {
-      id: store.listImportReceipts(run.id)[0]?.id,
-      runId: run.id,
-      proposalLocalId: 'p1',
-      importKey: 'import-p1',
-      payloadHash: 'ph-1',
-      contentId: 'cms-1b',
-      status: 'imported',
-      createdAt: 5_000,
-    },
+  assert.throws(
+    () =>
+      store.updateImportReceipt({
+        runId: run.id,
+        proposalLocalId: 'p1',
+        payloadHash: 'ph-1',
+        contentId: 'cms-1b',
+        status: 'imported',
+        claimToken,
+        now: 5_000,
+      }),
+    isPersist('CONFLICT'),
   );
   assert.throws(
     () =>
@@ -534,6 +661,8 @@ test('import receipts reject duplicate keys and incomplete imported rows', (t) =
         payloadHash: 'changed',
         contentId: 'cms-1c',
         status: 'imported',
+        claimToken,
+        now: 5_000,
       }),
     isPersist('CONFLICT'),
   );
@@ -547,6 +676,8 @@ test('import receipts reject duplicate keys and incomplete imported rows', (t) =
         contentId: 'cms-2',
         status: 'imported',
         createdAt: 5_100,
+        claimToken,
+        now: 5_100,
       }),
     isPersist('CONSTRAINT'),
   );
@@ -560,10 +691,259 @@ test('import receipts reject duplicate keys and incomplete imported rows', (t) =
         contentId: null,
         status: 'imported',
         createdAt: 5_100,
+        claimToken,
+        now: 5_100,
       }),
     isPersist('CONSTRAINT'),
   );
   assert.equal(store.listImportReceipts(run.id).length, 1);
+});
+
+test('stale import executors cannot overwrite newer receipts after lease expiry', (t) => {
+  const store = tempStore(t);
+  const created = create(store);
+  approveImport(store, awaitApproval(store, created, 4_000), { now: 4_100 });
+  const run = store.getRun(created.id);
+  assert.ok(run);
+  const oldToken = store.claimRun({
+    runId: run.id,
+    owner: 'old-importer',
+    now: 5_000,
+    leaseMs: 100,
+  });
+  assert.ok(oldToken);
+  store.saveImportReceipt({
+    runId: run.id,
+    proposalLocalId: 'p1',
+    importKey: `${run.id}:p1`,
+    payloadHash: 'hash-a',
+    contentId: null,
+    status: 'pending',
+    createdAt: 5_000,
+    claimToken: oldToken,
+    now: 5_000,
+  });
+  assert.throws(
+    () =>
+      store.saveImportReceipt({
+        runId: run.id,
+        proposalLocalId: 'p2',
+        importKey: `${run.id}:p2`,
+        payloadHash: 'hash-a',
+        contentId: null,
+        status: 'pending',
+        createdAt: 5_200,
+        claimToken: oldToken,
+        now: 5_101,
+      }),
+    isPersist('CONFLICT'),
+  );
+
+  const other = openWorkflowStore(store.path);
+  t.after(() => other.close());
+  const newToken = other.claimRun({
+    runId: run.id,
+    owner: 'new-importer',
+    now: 5_101,
+    leaseMs: 1_000,
+  });
+  assert.ok(newToken);
+  other.updateImportReceipt({
+    runId: run.id,
+    proposalLocalId: 'p1',
+    payloadHash: 'hash-a',
+    contentId: 'cms-1',
+    status: 'imported',
+    claimToken: newToken,
+    now: 5_150,
+  });
+  other.completeImport({
+    runId: run.id,
+    claimToken: newToken,
+    now: 5_160,
+    consumed: run.consumed,
+    state: { status: 'COMPLETED' },
+  });
+
+  assert.throws(
+    () =>
+      store.updateImportReceipt({
+        runId: run.id,
+        proposalLocalId: 'p1',
+        payloadHash: 'hash-a',
+        contentId: 'cms-stale',
+        status: 'imported',
+        claimToken: oldToken,
+        now: 5_200,
+      }),
+    isPersist('CONFLICT'),
+  );
+  assert.throws(
+    () =>
+      store.updateImportReceipt({
+        runId: run.id,
+        proposalLocalId: 'p1',
+        payloadHash: 'hash-a',
+        contentId: null,
+        status: 'failed',
+        claimToken: oldToken,
+        now: 5_200,
+      }),
+    isPersist('CONFLICT'),
+  );
+  const receipt = store.listImportReceipts(run.id)[0];
+  assert.equal(receipt?.status, 'imported');
+  assert.equal(receipt?.contentId, 'cms-1');
+  assert.equal(store.getRun(run.id)?.status, 'COMPLETED');
+});
+
+test('reserveAttempt spends budget before I/O and unknown outcomes survive reopen', (t) => {
+  const store = tempStore(t);
+  const run = create(store, { now: 8_000 });
+  const token = store.claimRun({
+    runId: run.id,
+    owner: 'worker-a',
+    now: 8_000,
+    leaseMs: 1_000,
+  });
+  assert.ok(token);
+  const reserved = store.reserveAttempt({
+    runId: run.id,
+    claimToken: token,
+    step: 'vocabulary',
+    candidateVersion: null,
+    operationKey: 'vocabulary:0',
+    startedAt: 8_010,
+  });
+  assert.equal(reserved.executionAttempt, 1);
+  assert.equal(store.getRun(run.id)?.consumed.providerRequests, 1);
+  const unknown = store.listAttempts(run.id)[0];
+  assert.equal(unknown?.outcome, 'unknown');
+  assert.equal(unknown?.finishedAt, null);
+
+  const sqlitePath = store.path;
+  store.close();
+  const reopened = openWorkflowStore(sqlitePath);
+  t.after(() => reopened.close());
+  assert.equal(reopened.getRun(run.id)?.consumed.providerRequests, 1);
+  assert.equal(reopened.listAttempts(run.id)[0]?.outcome, 'unknown');
+
+  const resume = reopened.claimRun({
+    runId: run.id,
+    owner: 'worker-b',
+    now: 9_100,
+    leaseMs: 1_000,
+  });
+  assert.ok(resume);
+  assert.throws(
+    () =>
+      reopened.finishAttempt({
+        runId: run.id,
+        claimToken: token,
+        reservation: reserved,
+        finishedAt: 9_200,
+        outcome: 'completed',
+        usage: { inputTokens: 4 },
+        error: null,
+      }),
+    isPersist('CONFLICT'),
+  );
+  assert.equal(reopened.listAttempts(run.id)[0]?.outcome, 'unknown');
+  assert.equal(reopened.getRun(run.id)?.consumed.providerRequests, 1);
+
+  const retried = reopened.reserveAttempt({
+    runId: run.id,
+    claimToken: resume,
+    step: 'vocabulary',
+    candidateVersion: null,
+    operationKey: 'vocabulary:0',
+    startedAt: 9_210,
+  });
+  reopened.finishAttempt({
+    runId: run.id,
+    claimToken: resume,
+    reservation: retried,
+    finishedAt: 9_220,
+    outcome: 'completed',
+    usage: {
+      model: 'qwen3:4b-instruct',
+      inputTokens: 10,
+      modelDigest: 'digest-1',
+      ollamaVersion: '0.33.3',
+    },
+    error: null,
+    modelTag: 'qwen3:4b-instruct',
+    modelDigest: 'digest-1',
+  });
+  const finished = reopened.listAttempts(run.id);
+  assert.equal(finished[0]?.outcome, 'unknown');
+  assert.equal(finished[1]?.outcome, 'completed');
+  assert.deepEqual(finished[1]?.error, null);
+  assert.equal(reopened.getRun(run.id)?.consumed.providerRequests, 2);
+  assert.equal(reopened.getRun(run.id)?.modelDigest, 'digest-1');
+  assert.equal(reopened.getRun(run.id)?.modelTag, 'qwen3:4b-instruct');
+});
+
+test('finishAttempt records sanitized errors and expired owners cannot complete a reservation', (t) => {
+  const store = tempStore(t);
+  const run = create(store);
+  const token = store.claimRun({
+    runId: run.id,
+    owner: 'worker-a',
+    now: 1_000,
+    leaseMs: 100,
+  });
+  assert.ok(token);
+  const reserved = store.reserveAttempt({
+    runId: run.id,
+    claimToken: token,
+    step: 'generation',
+    candidateVersion: 1,
+    operationKey: 'generation:1',
+    startedAt: 1_010,
+  });
+  store.finishAttempt({
+    runId: run.id,
+    claimToken: token,
+    reservation: reserved,
+    finishedAt: 1_020,
+    outcome: 'failed',
+    usage: null,
+    error: { code: 'PROVIDER_UNAVAILABLE', status: 503, retryable: true },
+  });
+  const attempt = store.listAttempts(run.id)[0];
+  assert.equal(attempt?.outcome, 'failed');
+  assert.deepEqual(attempt?.error, {
+    code: 'PROVIDER_UNAVAILABLE',
+    status: 503,
+    retryable: true,
+  });
+
+  const next = store.reserveAttempt({
+    runId: run.id,
+    claimToken: token,
+    step: 'generation',
+    candidateVersion: 1,
+    operationKey: 'generation:1',
+    startedAt: 1_030,
+  });
+  assert.throws(
+    () =>
+      store.finishAttempt({
+        runId: run.id,
+        claimToken: token,
+        reservation: next,
+        finishedAt: 1_101,
+        outcome: 'completed',
+        usage: { inputTokens: 2 },
+        error: null,
+        modelDigest: 'digest-late',
+      }),
+    isPersist('CONFLICT'),
+  );
+  assert.equal(store.listAttempts(run.id)[1]?.outcome, 'unknown');
+  assert.equal(store.getRun(run.id)?.consumed.providerRequests, 2);
+  assert.equal(store.getRun(run.id)?.modelDigest, null);
 });
 
 test('schema constraints reject unknown status and orphan attempts', (t) => {

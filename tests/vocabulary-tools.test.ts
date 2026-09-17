@@ -179,6 +179,51 @@ test('unknown tools and injected actor fields fail without searching', async (t)
   assert.equal(searchCalls(injected.movaLab.calls).length, 0);
 });
 
+test('rejected tool names log allowlisted classification and a local audit id', async (t) => {
+  const secretName = `SECRET_TOOL_NAME_${'x'.repeat(4000)}`;
+  const unknown = await postDrafts(t, {
+    reply: scriptedChats({
+      'vocabulary-tools': {
+        status: 200,
+        json: toolEnvelope([{ function: { name: secretName, arguments: { q: 'риба' } } }]),
+      },
+    }),
+    movaLabReply: searchReply(),
+  });
+  assert.equal(unknown.response.status, 502);
+  assert.equal(unknown.logs.includes(secretName), false);
+  assert.equal(unknown.logs.includes('SECRET_TOOL_NAME'), false);
+  const rejected = unknown.logs
+    .split('\n')
+    .filter((line) => line.includes('tool rejected'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0]?.toolName, 'unknown');
+  assert.equal(rejected[0]?.reason, 'unknown');
+  assert.match(String(rejected[0]?.auditId), /^[\da-f-]{36}$/i);
+
+  const invalid = await postDrafts(t, {
+    reply: scriptedChats({
+      'vocabulary-tools': {
+        status: 200,
+        json: toolEnvelope([
+          searchCall({ q: 'риба', actorId: 'forged-teacher', url: 'http://evil.example' }),
+        ]),
+      },
+    }),
+    movaLabReply: searchReply(),
+  });
+  assert.equal(invalid.logs.includes('forged-teacher'), false);
+  assert.equal(invalid.logs.includes('http://evil.example'), false);
+  const invalidRejected = invalid.logs
+    .split('\n')
+    .filter((line) => line.includes('tool rejected'))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(invalidRejected[0]?.toolName, SEARCH_EXISTING_EXERCISES);
+  assert.equal(invalidRejected[0]?.reason, 'invalid-args');
+  assert.match(String(invalidRejected[0]?.auditId), /^[\da-f-]{36}$/i);
+});
+
 test('search failures stay in the tool observation and final vocabulary still validates', async (t) => {
   const { response, ollama, logs } = await postDrafts(t, {
     reply: scriptedChats({
