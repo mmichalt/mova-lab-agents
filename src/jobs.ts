@@ -10,6 +10,7 @@ export const WORKFLOW_QUEUE_NAME = 'mova-lab-workflows';
 export const WORKFLOW_DRAIN_MS = 10_000;
 export const MAX_WORKFLOW_DELIVERIES = 3;
 export const WORKFLOW_RECONCILE_MS = 5_000;
+const WORKFLOW_QUEUE_READY_TIMEOUT_MS = 1_000;
 
 export type WorkflowJobName = 'generation' | 'import';
 export type WorkflowJobData = { runId: string };
@@ -31,7 +32,6 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
       enableOfflineQueue: false,
       maxRetriesPerRequest: 1,
     },
-    skipWaitingForReady: true,
     defaultJobOptions: {
       attempts: 1,
       removeOnComplete: true,
@@ -42,6 +42,7 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
 
   const enqueue = async (name: WorkflowJobName, runId: string, stateVersion: number) => {
     try {
+      await waitForQueueReady(queue);
       const jobId = workflowJobId(name, runId, stateVersion);
       const existing = await queue.getJob(jobId);
       if (!existing) {
@@ -82,6 +83,23 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
     },
     close: () => queue.close(),
   };
+}
+
+async function waitForQueueReady(queue: Queue<WorkflowJobData, void, WorkflowJobName>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      queue.waitUntilReady(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('Workflow queue readiness timed out.')),
+          WORKFLOW_QUEUE_READY_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function createWorkflowWorker(options: {
