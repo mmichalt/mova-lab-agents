@@ -285,6 +285,7 @@ test('resume reuses a committed vocabulary checkpoint and remaining limits', asy
     store,
     ollamaUrl: ollama.url,
     clock: instantClock({ now: () => 2_000 }),
+    env: { EXPERIMENTAL_SUPERVISOR: 'true' },
   });
   const response = await fetch(`${url}/workflows/${run.id}/resume`, {
     method: 'POST',
@@ -295,6 +296,7 @@ test('resume reuses a committed vocabulary checkpoint and remaining limits', asy
   assert.equal(body.status, 'AWAITING_APPROVAL');
   assert.equal(body.consumed.providerRequests, 4);
   assert.equal(chatCalls(ollama.calls).length, 3);
+  assert.equal(chatsOf(ollama.calls, 'supervisor').length, 0);
   assert.equal(store.getRun(run.id)?.leaseToken, null);
 });
 

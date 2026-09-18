@@ -228,7 +228,10 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       (typeof checkpointState.ollamaVersion === 'string' ? checkpointState.ollamaVersion : null),
     supervisor: parsedSupervisor?.success
       ? parsedSupervisor.data
-      : storedSupervisor == null && options.supervisor
+      : storedSupervisor == null &&
+          options.initialState === undefined &&
+          !resume &&
+          options.supervisor
         ? createSupervisorState()
         : undefined,
     vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
@@ -743,6 +746,7 @@ async function executeSupervisorAction(
 
   if (action.action === 'generate') {
     if (!state.vocabulary) return rejectedSupervisorAction('Vocabulary is required.');
+    if (state.candidate) return rejectedSupervisorAction('A candidate already exists.');
     const proposals = await generateExercises({
       ...llm,
       candidateVersion: state.candidateVersion,

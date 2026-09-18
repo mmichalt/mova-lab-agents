@@ -99,6 +99,19 @@ test('supervisor can revise a failed candidate before finishing', async (t) => {
   assert.equal(chatsOf(result.ollama.calls, 'revision').length, 1);
 });
 
+test('supervisor cannot generate over an existing candidate', async (t) => {
+  const result = await postDrafts(t, {
+    experimentalSupervisor: true,
+    reply: scriptedChats({
+      supervisor: [action('vocabulary'), action('generate'), action('generate')],
+    }),
+  });
+
+  assert.equal(result.response.status, 422);
+  assert.equal((await result.response.json()).error.code, 'SUPERVISOR_PREREQUISITE_MISSING');
+  assert.equal(chatsOf(result.ollama.calls, 'generation').length, 1);
+});
+
 test('supervisor stops at eight decisions', async (t) => {
   const result = await postDrafts(t, {
     experimentalSupervisor: true,

@@ -932,7 +932,7 @@ function openPersistedRun(
       modelTag: options.config.ollamaModel,
       initialState: options.config.experimentalSupervisor
         ? { supervisor: createSupervisorState() }
-        : {},
+        : { supervisor: null },
       limits: {
         maxProviderRequests: execution.maxProviderRequests,
         maxRevisions: MAX_REVISIONS,
