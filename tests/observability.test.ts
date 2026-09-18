@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-node';
+import { presentRun } from '../src/content/runs.ts';
 import {
   aggregateAttemptTiming,
   aggregateUsage,
@@ -108,6 +109,87 @@ test('usage and timing reports preserve unknowns and null local cost', () => {
       warmAttempts: 1,
     },
   );
+});
+
+test('run reports use durable usage and unknown pre-execution runtime', (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ag-026-'));
+  const store = openWorkflowStore(path.join(dir, 'workflow.sqlite'));
+  t.after(() => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const run = store.createRun({
+    ownerId: 'teacher',
+    idempotencyKey: 'durable-usage',
+    normalizedInput: { ageYears: 7 },
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: CONSTRAINTS_VERSION,
+    promptVersions: {},
+    modelTag: 'configured',
+    initialState: {
+      usage: [
+        {
+          model: 'stale',
+          inputTokens: 99,
+          cachedInputTokens: 0,
+          outputTokens: 99,
+          estimatedCostUsd: null,
+        },
+      ],
+    },
+    limits: {
+      maxProviderRequests: 1,
+      maxRevisions: 0,
+      workflowTimeoutMs: 100,
+      attemptTimeoutMs: 50,
+      deadlineAt: 100,
+      ollamaNumCtx: 1,
+      ollamaNumPredict: 1,
+    },
+    now: 0,
+  });
+  store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: 0,
+    status: 'RUNNING',
+    phase: 'generation',
+    consumed: { providerRequests: 1, revisionCount: 0 },
+    state: run.state,
+    now: 1,
+    modelTag: 'configured',
+    modelDigest: 'digest',
+    attempt: {
+      step: 'generation',
+      candidateVersion: null,
+      operationKey: 'generation:0',
+      executionAttempt: 1,
+      outcome: 'completed',
+      startedAt: 0,
+      finishedAt: 1,
+      usage: {
+        model: 'actual',
+        inputTokens: 2,
+        cachedInputTokens: null,
+        outputTokens: 3,
+        estimatedCostUsd: null,
+      },
+      error: null,
+    },
+  });
+
+  const persisted = store.getRun(run.id);
+  assert.ok(persisted);
+  const resource = presentRun(store, persisted, 'teacher', 1);
+  assert.deepEqual(resource.observability.usage, {
+    attempts: 1,
+    inputTokens: 2,
+    cachedInputTokens: null,
+    outputTokens: 3,
+    estimatedCostUsd: null,
+    costStatus: 'unmeasured_local',
+  });
+  assert.equal(resource.observability.runtime.contextTokens, null);
+  assert.equal(resource.observability.runtime.hardware.platform, null);
 });
 
 test('retention redacts terminal content and keeps pending reviews', () => {

@@ -147,15 +147,17 @@ async function chatOnce(
           now: options.clock.now(),
           usage: options.usage,
         });
-        span.setAttributes({
-          'llm.input_tokens': result.usage.inputTokens ?? -1,
-          'llm.cached_input_tokens': result.usage.cachedInputTokens ?? -1,
-          'llm.output_tokens': result.usage.outputTokens ?? -1,
-          'llm.load_duration_ns': result.loadDurationNs ?? -1,
-          'llm.prompt_evaluation_duration_ns': result.promptEvaluationDurationNs ?? -1,
-          'llm.generation_duration_ns': result.generationDurationNs ?? -1,
-          'llm.duration_units': 'nanoseconds',
-        });
+        for (const [name, value] of Object.entries({
+          'llm.input_tokens': result.usage.inputTokens,
+          'llm.cached_input_tokens': result.usage.cachedInputTokens,
+          'llm.output_tokens': result.usage.outputTokens,
+          'llm.load_duration_ns': result.loadDurationNs,
+          'llm.prompt_evaluation_duration_ns': result.promptEvaluationDurationNs,
+          'llm.generation_duration_ns': result.generationDurationNs,
+        })) {
+          if (value !== null) span.setAttribute(name, value);
+        }
+        span.setAttribute('llm.duration_units', 'nanoseconds');
         return result;
       },
     );

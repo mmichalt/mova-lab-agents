@@ -16,7 +16,6 @@ import {
   aggregateAttemptTiming,
   aggregateProviderTiming,
   aggregateUsage,
-  initialRuntime,
   linksFor,
   type Observability,
   type RuntimeMetadata,
@@ -399,6 +398,7 @@ export function presentRun(
     : [];
   const checks = z.array(checkResultSchema).safeParse(state.checks).data ?? [];
   const importProgress = importProgressOf(run, approval, receipts);
+  const attempts = store.listAttempts(run.id);
   return {
     id: run.id,
     status: run.status,
@@ -439,25 +439,44 @@ export function presentRun(
     importProgress,
     imports: importProgress.receipts,
     observability: {
-      usage: aggregateUsage(Array.isArray(state.usage) ? (state.usage as LlmUsage[]) : []),
+      usage: aggregateUsage(attemptUsages(attempts)),
       timing: Array.isArray(state.timing)
         ? aggregateProviderTiming(state.timing as Parameters<typeof aggregateProviderTiming>[0])
-        : aggregateAttemptTiming(store.listAttempts(run.id)),
-      runtime: runtimeOf(run, state),
+        : aggregateAttemptTiming(attempts),
+      runtime: runtimeOf(state),
     },
   };
 }
 
-function runtimeOf(run: PersistedRun, state: Record<string, unknown>): RuntimeMetadata {
+function runtimeOf(state: Record<string, unknown>): RuntimeMetadata {
   const runtime = state.runtime;
   if (typeof runtime === 'object' && runtime !== null && !Array.isArray(runtime)) {
     return runtime as RuntimeMetadata;
   }
-  return initialRuntime({
-    modelTag: run.modelTag,
-    contextTokens: run.limits.ollamaNumCtx,
-    outputTokens: run.limits.ollamaNumPredict,
-  });
+  return {
+    modelTag: null,
+    modelDigest: null,
+    quantization: null,
+    ollamaVersion: null,
+    contextTokens: null,
+    outputTokens: null,
+    hardware: {
+      platform: null,
+      arch: null,
+      cpuModel: null,
+      cpuCount: null,
+      memoryBytes: null,
+      gpu: null,
+    },
+    durationUnits: 'wall_ms',
+    loadDurationUnits: 'nanoseconds',
+  };
+}
+
+function attemptUsages(attempts: ReturnType<WorkflowStore['listAttempts']>): LlmUsage[] {
+  return attempts.flatMap(({ usage }) =>
+    typeof usage === 'object' && usage !== null && !Array.isArray(usage) ? [usage as LlmUsage] : [],
+  );
 }
 
 async function decideContentGeneration(

@@ -37,14 +37,14 @@ export type RuntimeMetadata = {
   modelDigest: string | null;
   quantization: string | null;
   ollamaVersion: string | null;
-  contextTokens: number;
-  outputTokens: number;
+  contextTokens: number | null;
+  outputTokens: number | null;
   hardware: {
-    platform: string;
-    arch: string;
+    platform: string | null;
+    arch: string | null;
     cpuModel: string | null;
-    cpuCount: number;
-    memoryBytes: number;
+    cpuCount: number | null;
+    memoryBytes: number | null;
     gpu: null;
   };
   durationUnits: 'wall_ms';
@@ -169,8 +169,9 @@ export function safeException(value: unknown, diagnostics = false) {
 
 function otlpTracesUrl(endpoint: string) {
   const url = new URL(endpoint);
+  url.pathname = url.pathname.replace(/\/+$/, '');
   if (url.pathname.endsWith('/v1/traces')) return url.toString();
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/v1/traces`;
+  url.pathname = `${url.pathname}/v1/traces`;
   return url.toString();
 }
 
