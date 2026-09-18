@@ -2,8 +2,9 @@
 
 **Status:** AG-001 through AG-020 and AG-029 are marked complete. AG-021 has
 implementation awaiting acceptance. AG-030 agents-repo follow-up is in progress
-in this working tree; sibling `mova-lab` findings remain. Remaining tickets are
-unstarted.
+in this working tree; sibling `mova-lab` findings remain. AG-022 and AG-023
+implementation is in progress pending Redis failure-injection verification and
+review/PR handoff. Other remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -1491,7 +1492,8 @@ Accepted work is recoverable, and repeated delivery does not duplicate imports.
 **Stage:** 8  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-020](#ag-020)  
-**Status:** Unstarted
+**Status:** In progress — implementation and local verification complete; Redis
+verification and review/PR handoff remain.
 
 **Problem and learning objective:** Separate durable acceptance from execution
 and learn producers, consumers, and acknowledgements.
@@ -1517,13 +1519,17 @@ dispatch, and graceful shutdown.
 **Out of scope:** Multiple hosts, BullMQ Flow graphs, separate service repositories,
 queue payload copies of content, and exactly-once delivery.
 
+Recorded locally: the asynchronous endpoint/worker tests pass with fake queues;
+Redis-backed verification remains outstanding.
+
 ### AG-023
 
 **Title:** Add reconciliation and bounded redelivery  
 **Stage:** 8  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-022](#ag-022)  
-**Status:** Unstarted
+**Status:** In progress — implementation and local verification complete; Redis
+failure-injection verification and review/PR handoff remain.
 
 **Problem and learning objective:** Close the persist-before-enqueue failure window
 and understand why queue locks do not replace workflow idempotency.
@@ -1544,6 +1550,10 @@ Redis-outage behavior.
 **Verification:** Interrupt enqueueing before/after acknowledgement, duplicate jobs,
 expire claims, delete/recreate queue jobs, exhaust attempts, and verify persisted
 limits remain authoritative.
+
+Recorded locally: `npm test` (246 passing), `npm run typecheck`, `npm run lint`,
+and `npm run build`. Redis-backed failure-injection verification has not yet been
+run, so this ticket is not marked complete.
 
 **Out of scope:** Transactional outbox, automatic unlimited re-drive, separate
 dead-letter infrastructure, and distributed provider rate limiting.

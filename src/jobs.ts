@@ -8,6 +8,8 @@ import type { PersistedRun, WorkflowStore } from './persist/store.ts';
 
 export const WORKFLOW_QUEUE_NAME = 'mova-lab-workflows';
 export const WORKFLOW_DRAIN_MS = 10_000;
+export const MAX_WORKFLOW_DELIVERIES = 3;
+export const WORKFLOW_RECONCILE_MS = 5_000;
 
 export type WorkflowJobName = 'generation' | 'import';
 export type WorkflowJobData = { runId: string };
@@ -15,6 +17,7 @@ export type WorkflowJobData = { runId: string };
 export type WorkflowJobProducer = {
   enqueueGeneration: (runId: string, stateVersion: number) => Promise<void>;
   enqueueImport: (runId: string, stateVersion: number) => Promise<void>;
+  reconcile?: (store: WorkflowStore, now?: number) => Promise<number>;
   close: () => Promise<void>;
 };
 
@@ -22,11 +25,16 @@ type WorkflowJob = Job<WorkflowJobData, void, WorkflowJobName>;
 
 export function createWorkflowQueue(redisUrl: string, logger?: Logger): WorkflowJobProducer {
   const queue = new Queue<WorkflowJobData, void, WorkflowJobName>(WORKFLOW_QUEUE_NAME, {
-    connection: { url: redisUrl },
+    connection: {
+      url: redisUrl,
+      connectTimeout: 1_000,
+      enableOfflineQueue: false,
+      maxRetriesPerRequest: 1,
+    },
     skipWaitingForReady: true,
     defaultJobOptions: {
       attempts: 1,
-      removeOnComplete: { age: 86_400, count: 1_000 },
+      removeOnComplete: true,
       removeOnFail: { age: 604_800, count: 1_000 },
     },
   });
@@ -34,7 +42,18 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
 
   const enqueue = async (name: WorkflowJobName, runId: string, stateVersion: number) => {
     try {
-      await queue.add(name, { runId }, { jobId: `${name}-${runId}-${stateVersion}` });
+      const jobId = workflowJobId(name, runId, stateVersion);
+      const existing = await queue.getJob(jobId);
+      if (!existing) {
+        await queue.add(name, { runId }, { jobId });
+      } else {
+        const state = await existing.getState();
+        if (state === 'failed') await existing.retry('failed');
+        if (state === 'completed') {
+          await existing.remove();
+          await queue.add(name, { runId }, { jobId });
+        }
+      }
     } catch {
       throw new AppError(503, 'QUEUE_UNAVAILABLE', 'Workflow queue is unavailable.');
     }
@@ -43,6 +62,24 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
   return {
     enqueueGeneration: (runId, stateVersion) => enqueue('generation', runId, stateVersion),
     enqueueImport: (runId, stateVersion) => enqueue('import', runId, stateVersion),
+    reconcile: async (store, now = Date.now()) => {
+      let scheduled = 0;
+      for (const run of store.listRunnableRuns(now)) {
+        const name = jobNameFor(run, store);
+        if (run.deliveryCounts[name] >= MAX_WORKFLOW_DELIVERIES) {
+          store.exhaustDeliveries({
+            runId: run.id,
+            phase: name,
+            expectedStateVersion: run.stateVersion,
+            now,
+          });
+          continue;
+        }
+        await enqueue(name, run.id, run.stateVersion);
+        scheduled += 1;
+      }
+      return scheduled;
+    },
     close: () => queue.close(),
   };
 }
@@ -53,6 +90,8 @@ export function createWorkflowWorker(options: {
   store: WorkflowStore;
   redisUrl: string;
   workerId?: string;
+  queue?: WorkflowJobProducer;
+  reconcileIntervalMs?: number;
 }) {
   const worker = new Worker<WorkflowJobData, void, WorkflowJobName>(
     WORKFLOW_QUEUE_NAME,
@@ -78,6 +117,27 @@ export function createWorkflowWorker(options: {
     );
   });
   worker.on('error', (err) => options.logger.error({ err }, 'worker error'));
+  const queue = options.queue;
+  if (queue?.reconcile) {
+    let reconciling = false;
+    const reconcile = () => {
+      if (reconciling) return;
+      reconciling = true;
+      void queue
+        .reconcile?.(options.store)
+        .catch((err) => options.logger.error({ err }, 'workflow reconciliation failed'))
+        .finally(() => {
+          reconciling = false;
+        });
+    };
+    const reconcileTimer = setInterval(
+      reconcile,
+      options.reconcileIntervalMs ?? WORKFLOW_RECONCILE_MS,
+    );
+    reconcileTimer.unref();
+    workerTimers.set(worker, reconcileTimer);
+    void reconcile();
+  }
   return worker;
 }
 
@@ -85,20 +145,25 @@ export async function closeWorkflowWorker(
   worker: ReturnType<typeof createWorkflowWorker>,
   drainMs = WORKFLOW_DRAIN_MS,
 ) {
+  const reconcileTimer = workerTimers.get(worker);
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer);
+    workerTimers.delete(worker);
+  }
   worker.cancelAllJobs('worker shutdown');
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
   const closing = worker.close();
   try {
     await Promise.race([
       closing,
       new Promise<void>((resolve) => {
-        timer = setTimeout(() => {
+        drainTimer = setTimeout(() => {
           void worker.close(true).then(resolve, resolve);
         }, drainMs);
       }),
     ]);
   } finally {
-    if (timer) clearTimeout(timer);
+    if (drainTimer) clearTimeout(drainTimer);
   }
 }
 
@@ -108,7 +173,13 @@ async function processWorkflowJob(
   workerSignal?: AbortSignal,
 ) {
   const run = options.store.getRun(job.data.runId);
-  if (!run || !isRunnable(run, job.name, Date.now(), options.store)) return;
+  if (
+    !run ||
+    run.stateVersion !== jobStateVersion(job) ||
+    !isRunnable(run, job.name, Date.now(), options.store)
+  ) {
+    return;
+  }
 
   const signalController = new AbortController();
   const onWorkerAbort = () => signalController.abort(clientDisconnected());
@@ -124,10 +195,49 @@ async function processWorkflowJob(
       id: run.id,
       signal: signalController.signal,
       canReview: job.name === 'import',
+      queueDelivery: { stateVersion: run.stateVersion, phase: job.name },
     });
+    await redeliverIfNeeded(run, job.name, options);
   } finally {
     workerSignal?.removeEventListener('abort', onWorkerAbort);
   }
+}
+
+async function redeliverIfNeeded(
+  previous: PersistedRun,
+  name: WorkflowJobName,
+  options: Parameters<typeof createWorkflowWorker>[0],
+) {
+  const latest = options.store.getRun(previous.id);
+  if (latest?.status !== 'FAILED' || !retryable(latest.state)) return;
+  if (!options.queue) return;
+  if (latest.deliveryCounts[name] >= MAX_WORKFLOW_DELIVERIES) {
+    options.store.exhaustDeliveries({
+      runId: latest.id,
+      phase: name,
+      expectedStateVersion: latest.stateVersion,
+      now: Date.now(),
+    });
+    return;
+  }
+  await (name === 'import'
+    ? options.queue.enqueueImport(latest.id, latest.stateVersion)
+    : options.queue.enqueueGeneration(latest.id, latest.stateVersion));
+}
+
+const workerTimers = new WeakMap<object, ReturnType<typeof setInterval>>();
+
+function workflowJobId(name: WorkflowJobName, runId: string, stateVersion: number) {
+  return `${name}-${runId}-${stateVersion}`;
+}
+
+function jobStateVersion(job: WorkflowJob) {
+  const match = /-(\d+)$/.exec(String(job.id));
+  return match ? Number(match[1]) : -1;
+}
+
+function jobNameFor(run: PersistedRun, store: WorkflowStore): WorkflowJobName {
+  return store.getApproval(run.id)?.decision === 'approved' ? 'import' : 'generation';
 }
 
 function isRunnable(run: PersistedRun, name: WorkflowJobName, now: number, store: WorkflowStore) {

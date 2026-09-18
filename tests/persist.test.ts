@@ -133,6 +133,7 @@ test('opens WAL files with foreign keys, busy timeout, and idempotent migrations
   assert.deepEqual(names, [
     { name: '001_workflow_persistence' },
     { name: '002_run_ollama_version' },
+    { name: '003_run_delivery_counts' },
   ]);
 });
 
@@ -451,6 +452,50 @@ test('retryable failures can be claimed back into active execution', (t) => {
     modelTag: 'qwen3:4b-instruct',
   });
   assert.equal(resumed.status, 'RUNNING');
+});
+
+test('queue delivery counts survive expiry and become a persisted failure at three', (t) => {
+  const store = tempStore(t);
+  const run = create(store);
+  for (const now of [1_000, 1_100, 1_200]) {
+    assert.ok(
+      store.claimRun({
+        runId: run.id,
+        owner: `worker-${now}`,
+        now,
+        leaseMs: 50,
+        expectedStateVersion: 0,
+        deliveryPhase: 'generation',
+      }),
+    );
+  }
+  assert.deepEqual(store.getRun(run.id)?.deliveryCounts, { generation: 3, import: 0 });
+  assert.equal(
+    store.claimRun({
+      runId: run.id,
+      owner: 'worker-4',
+      now: 1_300,
+      leaseMs: 50,
+      expectedStateVersion: 0,
+      deliveryPhase: 'generation',
+    }),
+    undefined,
+  );
+  const exhausted = store.exhaustDeliveries({
+    runId: run.id,
+    phase: 'generation',
+    expectedStateVersion: 0,
+    now: 1_300,
+  });
+  assert.ok(exhausted);
+  assert.equal(exhausted?.status, 'FAILED');
+  assert.equal(exhausted?.stateVersion, 1);
+  assert.deepEqual((exhausted.state as { error: unknown }).error, {
+    code: 'QUEUE_DELIVERY_EXHAUSTED',
+    message: 'Workflow delivery limit was exhausted.',
+    retryable: false,
+  });
+  assert.deepEqual(store.listRunnableRuns(2_000), []);
 });
 
 test('recordApproval commits the decision and status together', (t) => {

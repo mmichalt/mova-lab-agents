@@ -5,7 +5,7 @@ import path from 'node:path';
 import { type TestContext, test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
-import { PROMPT_VERSIONS } from '../src/content/runs.ts';
+import { PROMPT_VERSIONS, resumeContentGeneration } from '../src/content/runs.ts';
 import type { GeneratedProposal } from '../src/content/schemas.ts';
 import { LETTER_PRESENCE_ISSUE } from '../src/content/validation.ts';
 import { withLocalIds } from '../src/content/workflow.ts';
@@ -59,6 +59,31 @@ function tempStore(t: TestContext): WorkflowStore {
   return store;
 }
 
+function createRecoveryRun(
+  store: WorkflowStore,
+  overrides: { key: string; modelTag?: string; constraintsVersion?: string },
+) {
+  return store.createRun({
+    ownerId: 'teacher-1',
+    idempotencyKey: overrides.key,
+    normalizedInput: teacherRequest,
+    workflowVersion: WORKFLOW_VERSION,
+    constraintsVersion: overrides.constraintsVersion ?? CONSTRAINTS_VERSION,
+    promptVersions: PROMPT_VERSIONS,
+    modelTag: overrides.modelTag ?? 'qwen3:4b-instruct',
+    limits: {
+      maxProviderRequests: 20,
+      maxRevisions: 2,
+      workflowTimeoutMs: 600_000,
+      attemptTimeoutMs: 120_000,
+      deadlineAt: 601_000,
+      ollamaNumCtx: 4096,
+      ollamaNumPredict: 2000,
+    },
+    now: 1_000,
+  });
+}
+
 async function startService(
   t: TestContext,
   options: {
@@ -105,6 +130,98 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000) {
   }
   throw new Error('timed out waiting');
 }
+
+test('queued generation persists compatibility failures', async (t) => {
+  const store = tempStore(t);
+  const run = createRecoveryRun(store, { key: 'queued-generation-failure', modelTag: 'old-model' });
+  const config = loadConfig(testEnv({ OLLAMA_MODEL: 'qwen3:4b-instruct' }));
+  const resource = await resumeContentGeneration({
+    store,
+    config,
+    logger,
+    requestId: 'worker:generation:1',
+    ownerId: run.ownerId,
+    id: run.id,
+    clock: instantClock({ now: () => 2_000 }),
+    queueDelivery: { stateVersion: run.stateVersion, phase: 'generation' },
+  });
+
+  assert.equal(resource.status, 'FAILED');
+  assert.equal(resource.resumable, false);
+  assert.equal(store.getRun(run.id)?.deliveryCounts.generation, 1);
+  assert.deepEqual(resource.result.error, {
+    code: 'MODEL_TAG_CHANGED',
+    message: 'The configured model tag changed.',
+    retryable: false,
+  });
+});
+
+test('queued import persists compatibility failures before importing', async (t) => {
+  const store = tempStore(t);
+  const run = createRecoveryRun(store, {
+    key: 'queued-import-failure',
+    constraintsVersion: 'constraints/old',
+  });
+  const awaiting = store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: run.stateVersion,
+    status: 'AWAITING_APPROVAL',
+    phase: 'finished',
+    consumed: run.consumed,
+    state: { candidateVersion: 1 },
+    now: 1_100,
+  });
+  const payload = {
+    candidateVersion: 1,
+    categoryId: 'cat-1',
+    proposals: [
+      {
+        localId: 'p1',
+        type: 'recording',
+        title: 'Риба в річці',
+        phrase: 'Риба пливе в річці',
+        childHint: 'Скажи фразу повільно',
+        teacherNote: 'Повільний темп.',
+        targetSound: 'р',
+        difficulty: 'easy',
+      },
+    ],
+  };
+  const approved = store.recordApproval({
+    runId: awaiting.id,
+    actorId: 'admin-1',
+    candidateVersion: payload.candidateVersion,
+    categoryId: payload.categoryId,
+    payloadHash: hashNormalizedInput(payload),
+    decidedAt: 1_200,
+    expectedStateVersion: awaiting.stateVersion,
+    decision: 'approved',
+    frozenPayload: payload,
+  });
+  const current = store.getRun(run.id);
+  assert.ok(current);
+
+  const resource = await resumeContentGeneration({
+    store,
+    config: loadConfig(testEnv()),
+    logger,
+    requestId: 'worker:import:1',
+    ownerId: run.ownerId,
+    id: run.id,
+    canReview: true,
+    clock: instantClock({ now: () => 2_000 }),
+    queueDelivery: { stateVersion: current.stateVersion, phase: 'import' },
+  });
+
+  assert.equal(approved.decision, 'approved');
+  assert.equal(resource.status, 'FAILED');
+  assert.equal(store.getRun(run.id)?.deliveryCounts.import, 1);
+  assert.deepEqual(resource.result.error, {
+    code: 'CONSTRAINTS_VERSION_CHANGED',
+    message: 'The recorded generation constraints are no longer available.',
+    retryable: false,
+  });
+});
 
 test('resume reuses a committed vocabulary checkpoint and remaining limits', async (t) => {
   const store = tempStore(t);

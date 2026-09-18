@@ -92,7 +92,17 @@ array with the same confirmed draft IDs so callers can render Content Studio lin
 A browser or proxy disconnect does not cancel an accepted queued run. The worker
 has concurrency one, so only one run uses the local Ollama instance at a time;
 queue wait is durable in Redis and workflow state remains authoritative in
-SQLite. The legacy `/content-drafts` endpoint remains synchronous and retains
+SQLite. A worker reconciles `PENDING`, expired-lease, and retryable failed runs
+every five seconds using `generation-<run-id>-<state-version>` or
+`import-<run-id>-<state-version>` job IDs.
+Each execution phase has three persisted queue deliveries; re-enqueueing keeps
+the provider, revision, and deadline counters. Failed BullMQ jobs remain
+retained, and the `POST /workflows/:id/resume` endpoint is the bounded operator
+re-drive for a retryable run. During a Redis outage, committed runs stay in
+SQLite and are queued by reconciliation once Redis returns; new submissions
+return `503 QUEUE_UNAVAILABLE` if durable dispatch cannot be confirmed. Stale
+job versions and human-review or terminal runs are skipped. The legacy
+`/content-drafts` endpoint remains synchronous and retains
 its request-lifetime cancellation behavior.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates

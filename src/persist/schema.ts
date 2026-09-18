@@ -109,4 +109,11 @@ CREATE TABLE import_receipts (
 ALTER TABLE runs ADD COLUMN ollama_version TEXT;
 `,
   },
+  {
+    id: 3,
+    name: '003_run_delivery_counts',
+    sql: `
+ALTER TABLE runs ADD COLUMN delivery_counts TEXT NOT NULL DEFAULT '{"generation":0,"import":0}' CHECK (json_valid(delivery_counts));
+`,
+  },
 ] as const;
