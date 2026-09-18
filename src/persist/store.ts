@@ -46,6 +46,10 @@ export type PersistedConsumed = {
   revisionCount: number;
 };
 
+export type DeliveryPhase = 'generation' | 'import';
+
+export type PersistedDeliveryCounts = Record<DeliveryPhase, number>;
+
 export type PersistedRun = {
   id: string;
   ownerId: string;
@@ -64,6 +68,7 @@ export type PersistedRun = {
   ollamaVersion: string | null;
   limits: PersistedLimits;
   consumed: PersistedConsumed;
+  deliveryCounts: PersistedDeliveryCounts;
   state: unknown;
   leaseOwner: string | null;
   leaseToken: string | null;
@@ -157,6 +162,9 @@ export type ClaimInput = {
   owner: string;
   now: number;
   leaseMs: number;
+  expectedStateVersion?: number;
+  deliveryPhase?: DeliveryPhase;
+  maxDeliveries?: number;
 };
 
 export type OpenedRun = {
@@ -177,6 +185,13 @@ export type WorkflowStore = {
   listImportReceipts: (runId: string) => ImportReceiptRecord[];
   saveCheckpoint: (input: CheckpointInput) => PersistedRun;
   claimRun: (input: ClaimInput) => string | undefined;
+  listRunnableRuns: (now: number) => PersistedRun[];
+  exhaustDeliveries: (input: {
+    runId: string;
+    phase: DeliveryPhase;
+    expectedStateVersion: number;
+    now: number;
+  }) => PersistedRun | undefined;
   heartbeatRun: (input: ClaimInput & { claimToken: string }) => boolean;
   reserveAttempt: (input: {
     runId: string;
@@ -257,6 +272,7 @@ type RunRow = {
   ollama_version: string | null;
   limits: string;
   consumed: string;
+  delivery_counts: string;
   state: string;
   lease_owner: string | null;
   lease_token: string | null;
@@ -283,11 +299,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     INSERT INTO runs (
       id, owner_id, idempotency_key, input_hash, normalized_input, status, phase,
       state_version, schema_version, workflow_version, constraints_version, prompt_versions,
-      model_tag, model_digest, ollama_version, limits, consumed, state, created_at, updated_at
+      model_tag, model_digest, ollama_version, limits, consumed, delivery_counts, state, created_at, updated_at
     ) VALUES (
       @id, @ownerId, @idempotencyKey, @inputHash, @normalizedInput, 'PENDING', 'vocabulary',
       0, @schemaVersion, @workflowVersion, @constraintsVersion, @promptVersions,
-      @modelTag, @modelDigest, @ollamaVersion, @limits, @consumed, @state, @now, @now
+      @modelTag, @modelDigest, @ollamaVersion, @limits, @consumed, @deliveryCounts, @state, @now, @now
     )
   `);
   const updateCheckpointStmt = db.prepare(`
@@ -329,13 +345,30 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       lease_owner = @owner,
       lease_token = @token,
       lease_expires_at = @expiresAt,
+      delivery_counts = CASE
+        WHEN @deliveryPhase IS NULL THEN delivery_counts
+        ELSE json_set(
+          delivery_counts,
+          '$.' || @deliveryPhase,
+          json_extract(delivery_counts, '$.' || @deliveryPhase) + 1
+        )
+      END,
       status = CASE WHEN status IN ('PENDING', 'FAILED') THEN 'RUNNING' ELSE status END,
-      phase = CASE WHEN status = 'FAILED' THEN 'checks' ELSE phase END,
+      phase = CASE
+        WHEN status = 'FAILED' AND @deliveryPhase = 'import' THEN 'import'
+        WHEN status = 'FAILED' THEN 'checks'
+        ELSE phase
+      END,
       updated_at = @now
     WHERE id = @id
       AND (
         status IN ('PENDING', 'RUNNING')
         OR (status = 'FAILED' AND json_extract(state, '$.error.retryable') = 1)
+      )
+      AND (@expectedStateVersion IS NULL OR state_version = @expectedStateVersion)
+      AND (
+        @deliveryPhase IS NULL
+        OR json_extract(delivery_counts, '$.' || @deliveryPhase) < @maxDeliveries
       )
       AND (lease_token IS NULL OR lease_expires_at <= @now)
   `);
@@ -438,6 +471,17 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
   const listReceiptsStmt = db.prepare(
     'SELECT * FROM import_receipts WHERE run_id = ? ORDER BY created_at, id',
   );
+  const listRunnableRunsStmt = db.prepare(`
+    SELECT * FROM runs
+    WHERE status = 'PENDING'
+       OR (
+         status = 'RUNNING'
+         AND phase != 'finished'
+         AND (lease_token IS NULL OR lease_expires_at <= @now)
+       )
+       OR (status = 'FAILED' AND json_extract(state, '$.error.retryable') = 1)
+    ORDER BY updated_at, id
+  `);
 
   const readRun = (id: string) => {
     const row = getRunStmt.get(id) as RunRow | undefined;
@@ -463,6 +507,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         ollamaVersion: input.ollamaVersion ?? null,
         limits: jsonText(input.limits),
         consumed: jsonText({ providerRequests: 0, revisionCount: 0 }),
+        deliveryCounts: jsonText({ generation: 0, import: 0 }),
         state: jsonText({}),
         now: input.now,
       });
@@ -589,8 +634,54 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         token,
         expiresAt: input.now + input.leaseMs,
         now: input.now,
+        expectedStateVersion: input.expectedStateVersion ?? null,
+        deliveryPhase: input.deliveryPhase ?? null,
+        maxDeliveries: input.maxDeliveries ?? 3,
       });
       return result.changes === 1 ? token : undefined;
+    });
+
+  const exhaustDeliveries: WorkflowStore['exhaustDeliveries'] = (input) =>
+    wrap(() => {
+      const run = readRun(input.runId);
+      if (!run || run.stateVersion !== input.expectedStateVersion) return undefined;
+      if (
+        !runnableForDelivery(run, input.phase, input.now) ||
+        run.deliveryCounts[input.phase] < 3
+      ) {
+        return undefined;
+      }
+      const state = asRecord(run.state);
+      const updated = db
+        .prepare(`
+          UPDATE runs SET
+            status = 'FAILED',
+            phase = 'finished',
+            state_version = state_version + 1,
+            state = @state,
+            lease_owner = NULL,
+            lease_token = NULL,
+            lease_expires_at = NULL,
+            updated_at = @now
+          WHERE id = @id
+            AND state_version = @expectedStateVersion
+        `)
+        .run({
+          id: input.runId,
+          expectedStateVersion: input.expectedStateVersion,
+          state: jsonText({
+            ...state,
+            status: 'FAILED',
+            phase: 'finished',
+            error: {
+              code: 'QUEUE_DELIVERY_EXHAUSTED',
+              message: 'Workflow delivery limit was exhausted.',
+              retryable: false,
+            },
+          }),
+          now: input.now,
+        });
+      return updated.changes === 1 ? readRun(input.runId) : undefined;
     });
 
   const heartbeatRun: WorkflowStore['heartbeatRun'] = (input) =>
@@ -840,6 +931,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
 
   const checkpointTx = db.transaction(saveCheckpoint);
   const claimTx = db.transaction(claimRun);
+  const exhaustDeliveriesTx = db.transaction(exhaustDeliveries);
   const heartbeatTx = db.transaction(heartbeatRun);
   const approvalTx = db.transaction(recordApproval);
   const receiptSaveTx = db.transaction(saveImportReceipt);
@@ -869,6 +961,8 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     listImportReceipts: (runId) => (listReceiptsStmt.all(runId) as ReceiptRow[]).map(mapReceipt),
     saveCheckpoint: (input) => checkpointTx(input),
     claimRun: (input) => claimTx(input),
+    listRunnableRuns: (now) => (listRunnableRunsStmt.all({ now }) as RunRow[]).map(mapRun),
+    exhaustDeliveries: (input) => exhaustDeliveriesTx(input),
     heartbeatRun: (input) => heartbeatTx(input),
     reserveAttempt: (input) => attemptReserveTx(input),
     finishAttempt: (input) => attemptFinishTx(input),
@@ -1039,6 +1133,28 @@ function assertClaim(run: PersistedRun, claimToken: string, now: number) {
   }
 }
 
+function runnableForDelivery(run: PersistedRun, phase: DeliveryPhase, now: number) {
+  if (run.status === 'PENDING') return phase === 'generation';
+  if (run.status === 'RUNNING') {
+    return (
+      (phase === 'import' ? run.phase === 'import' : run.phase !== 'import') &&
+      (run.leaseExpiresAt === null || run.leaseExpiresAt <= now)
+    );
+  }
+  return run.status === 'FAILED' && retryableState(run.state);
+}
+
+function retryableState(value: unknown) {
+  const error = asRecord(asRecord(value).error);
+  return error.retryable === true;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function assertReadableSqlite(sqlitePath: string) {
   let db: Database.Database | undefined;
   try {
@@ -1108,6 +1224,7 @@ function mapRun(row: RunRow): PersistedRun {
     ollamaVersion: row.ollama_version,
     limits: unpack(row.limits) as PersistedLimits,
     consumed: unpack(row.consumed) as PersistedConsumed,
+    deliveryCounts: unpack(row.delivery_counts) as PersistedDeliveryCounts,
     state: unpack(row.state),
     leaseOwner: row.lease_owner,
     leaseToken: row.lease_token,

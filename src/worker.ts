@@ -1,20 +1,22 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { type Config, loadConfig } from './config.ts';
-import { closeWorkflowWorker, createWorkflowWorker } from './jobs.ts';
+import { closeWorkflowWorker, createWorkflowQueue, createWorkflowWorker } from './jobs.ts';
 import { createLogger } from './logger.ts';
 import { openWorkflowStore } from './persist/store.ts';
 
 export function startWorker(config: Config) {
   const logger = createLogger(config.logLevel);
   const store = openWorkflowStore(config.sqlitePath);
+  const queue = createWorkflowQueue(config.redisUrl, logger);
   const worker = createWorkflowWorker({
     config,
     logger,
     store,
     redisUrl: config.redisUrl,
+    queue,
   });
-  return { logger, store, worker };
+  return { logger, store, queue, worker };
 }
 
 function isEntrypoint() {
@@ -27,7 +29,7 @@ function isEntrypoint() {
 if (isEntrypoint()) {
   try {
     const config = loadConfig();
-    const { logger, store, worker } = startWorker(config);
+    const { logger, store, queue, worker } = startWorker(config);
     logger.info({ sqlitePath: config.sqlitePath, workerId: worker.id }, 'worker ready');
     let stopping = false;
     const stop = (signal: string) => {
@@ -35,13 +37,15 @@ if (isEntrypoint()) {
       stopping = true;
       logger.info({ signal }, 'worker shutting down');
       void closeWorkflowWorker(worker).then(
-        () => {
+        async () => {
+          await queue.close();
           store.close();
           process.exit(0);
         },
-        (err: unknown) => {
+        async (err: unknown) => {
           logger.error({ err }, 'worker shutdown failed');
           try {
+            await queue.close();
             store.close();
           } finally {
             process.exit(1);

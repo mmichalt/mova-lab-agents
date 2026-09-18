@@ -15,6 +15,7 @@ import type { Logger } from '../logger.ts';
 import {
   type ApprovalRecord,
   CONSTRAINTS_VERSION,
+  type DeliveryPhase,
   hashNormalizedInput,
   type ImportReceiptRecord,
   PersistError,
@@ -58,6 +59,11 @@ type ExecutionOptions = Omit<
   Parameters<typeof createContentGeneration>[0],
   'idempotencyKey' | 'body'
 >;
+
+export type QueueDelivery = {
+  stateVersion: number;
+  phase: DeliveryPhase;
+};
 
 export const PROMPT_VERSIONS = {
   vocabulary: VOCABULARY_PROMPT_VERSION,
@@ -218,13 +224,21 @@ export async function createContentGeneration(options: {
   }
 }
 
-export async function resumeContentGeneration(options: ExecutionOptions & { id: string }) {
+export async function resumeContentGeneration(
+  options: ExecutionOptions & { id: string; queueDelivery?: QueueDelivery },
+) {
   const clock = options.clock ?? systemClock;
   const run = options.store.getRun(options.id);
   if (!run || !canAccess(run, options.ownerId, options.canReview)) {
     throw new AppError(404, 'NOT_FOUND', 'Not found.');
   }
+  if (options.queueDelivery && run.stateVersion !== options.queueDelivery.stateVersion) {
+    return presentRun(options.store, run, options.ownerId, clock.now(), options.canReview);
+  }
   if (!isResumable(run, clock.now())) {
+    if (options.queueDelivery) {
+      return presentRun(options.store, run, options.ownerId, clock.now(), options.canReview);
+    }
     throw new AppError(409, 'RUN_NOT_RESUMABLE', 'The workflow is not interrupted or retryable.');
   }
   const importing = isApprovedImport(options.store, run);
@@ -240,18 +254,49 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
       await options.queue.enqueueGeneration(run.id, run.stateVersion);
     }
   } else if (importing) {
-    assertImportRecoveryCompatible(options.store, run);
-    await executeApprovedImport(options, run);
+    if (!options.queueDelivery) assertImportRecoveryCompatible(options.store, run);
+    await executeApprovedImport(options, run, options.queueDelivery);
   } else {
-    await assertRecoveryCompatible(options.config, options.signal, run);
+    if (!options.queueDelivery) {
+      await assertRecoveryCompatible(options.config, options.signal, run);
+    }
     const claimToken = options.store.claimRun({
       runId: run.id,
       owner: options.requestId,
       now: clock.now(),
       leaseMs: RUN_LEASE_MS,
+      expectedStateVersion: options.queueDelivery?.stateVersion,
+      deliveryPhase: options.queueDelivery?.phase,
     });
     if (!claimToken) {
+      const latest = options.store.getRun(run.id);
+      if (options.queueDelivery && latest) {
+        if (latest.stateVersion !== options.queueDelivery.stateVersion) {
+          return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);
+        }
+        const exhausted = options.store.exhaustDeliveries({
+          runId: latest.id,
+          phase: options.queueDelivery.phase,
+          expectedStateVersion: latest.stateVersion,
+          now: clock.now(),
+        });
+        if (exhausted) {
+          return presentRun(
+            options.store,
+            exhausted,
+            options.ownerId,
+            clock.now(),
+            options.canReview,
+          );
+        }
+        if (!isResumable(latest, clock.now())) {
+          return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);
+        }
+      }
       throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being resumed.');
+    }
+    if (options.queueDelivery) {
+      await assertRecoveryCompatible(options.config, options.signal, run);
     }
     const request = contentRequestSchema.safeParse(run.normalizedInput);
     if (!request.success) {
@@ -463,23 +508,42 @@ const frozenApprovalSchema = z.strictObject({
 
 type FrozenApproval = z.infer<typeof frozenApprovalSchema>;
 
-async function executeApprovedImport(options: ExecutionOptions, run: PersistedRun) {
+async function executeApprovedImport(
+  options: ExecutionOptions,
+  run: PersistedRun,
+  queueDelivery?: QueueDelivery,
+) {
   const approval = options.store.getApproval(run.id);
   if (!approval)
     throw new AppError(409, 'APPROVAL_REQUIRED', 'The workflow has no approved payload.');
-  const approved = approvedPayload(approval);
+  const approved = queueDelivery ? undefined : approvedPayload(approval);
   const clock = options.clock ?? systemClock;
   const claimToken = options.store.claimRun({
     runId: run.id,
     owner: options.requestId,
     now: clock.now(),
     leaseMs: RUN_LEASE_MS,
+    expectedStateVersion: queueDelivery?.stateVersion,
+    deliveryPhase: queueDelivery?.phase,
   });
   if (!claimToken) {
+    const latest = options.store.getRun(run.id);
+    if (queueDelivery && latest) {
+      if (latest.stateVersion !== queueDelivery.stateVersion) return latest;
+      const exhausted = options.store.exhaustDeliveries({
+        runId: latest.id,
+        phase: queueDelivery.phase,
+        expectedStateVersion: latest.stateVersion,
+        now: clock.now(),
+      });
+      if (exhausted) return exhausted;
+      if (!isResumable(latest, clock.now())) return latest;
+    }
     throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being imported.');
   }
   const current = options.store.getRun(run.id);
   if (!current) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+  const payload = approved ?? approvedPayload(options.store.getApproval(run.id));
 
   let latest = current;
   let activeReceipt: ImportReceiptRecord | undefined;
@@ -511,7 +575,7 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
 
   try {
     latest = saveImportCheckpoint(options.store, latest, claimToken, 'RUNNING', null, clock.now());
-    for (const proposal of approved.proposals) {
+    for (const proposal of payload.proposals) {
       const importKey = `${run.id}:${proposal.localId}`;
       const existing = options.store
         .listImportReceipts(run.id)
@@ -555,7 +619,7 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
         actorId: approval.actorId,
         sourceImportKey: importKey,
         payloadHash: approval.payloadHash,
-        categoryId: approved.categoryId,
+        categoryId: payload.categoryId,
         proposal,
       });
       if (lost) throw claimLostError();
@@ -580,7 +644,7 @@ async function executeApprovedImport(options: ExecutionOptions, run: PersistedRu
     }
     if (lost) throw claimLostError();
     if (
-      approved.proposals.some((proposal) => {
+      payload.proposals.some((proposal) => {
         const receipt = options.store
           .listImportReceipts(run.id)
           .find((item) => item.proposalLocalId === proposal.localId);
