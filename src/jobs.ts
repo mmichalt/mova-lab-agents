@@ -20,6 +20,7 @@ export type WorkflowJobData = { runId: string; enqueuedAt?: number };
 export type WorkflowJobProducer = {
   enqueueGeneration: (runId: string, stateVersion: number) => Promise<void>;
   enqueueImport: (runId: string, stateVersion: number) => Promise<void>;
+  ready?: () => Promise<'ok' | 'unavailable'>;
   reconcile?: (store: WorkflowStore, now?: number) => Promise<number>;
   close: () => Promise<void>;
 };
@@ -69,6 +70,14 @@ export function createWorkflowQueue(
   return {
     enqueueGeneration: (runId, stateVersion) => enqueue('generation', runId, stateVersion),
     enqueueImport: (runId, stateVersion) => enqueue('import', runId, stateVersion),
+    ready: async () => {
+      try {
+        await waitForQueueReady(queue);
+        return 'ok';
+      } catch {
+        return 'unavailable';
+      }
+    },
     reconcile: async (store, now = Date.now()) => {
       let scheduled = 0;
       for (const run of store.listRunnableRuns(now)) {

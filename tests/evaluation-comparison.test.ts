@@ -164,6 +164,20 @@ test('comparison exposes mismatched inputs and missing runs instead of merging t
   assert.deepEqual(holdout?.missingModes, ['deterministic']);
 });
 
+test('comparison rejects a report with mixed runtime identity', () => {
+  const mixed = report([run('case', 1), run('holdout-case', 1)]);
+  mixed.status = 'incomplete';
+  mixed.metadataMismatches = [
+    { field: 'model', expected: { digest: 'one' }, actual: { digest: 'two' } },
+  ];
+  const comparison = compareWorkflowReports(recorded({ deterministic: mixed }));
+  assert.equal(comparison.status, 'invalid');
+  assert.equal(
+    comparison.inputMismatches.some((item) => item.field === 'deterministic.metadataMismatches'),
+    true,
+  );
+});
+
 test('missing therapist ratings stay nullable and keep review pending', () => {
   const comparison = compareWorkflowReports(recorded());
   assert.equal(comparison.humanReview.status, 'pending');

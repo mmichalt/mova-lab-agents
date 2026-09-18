@@ -1327,7 +1327,7 @@ evidence. CI must not pull models or invoke live inference.
 - Revalidate application constraints at import time. Changed constraints must fail import visibly, not trigger silent edits to approved content.
 - Render generated strings as text in the eventual UI.
 - Log metadata by default. Raw prompts and provider responses require explicit diagnostic capture, restricted access, and redaction.
-- Initial diagnostic retention: seven days. Purge terminal workflow content after 30 days; retain minimal idempotency tombstones for 90 days. Pending human reviews are not silently purged.
+- Initial diagnostic retention: seven days. Purge terminal workflow content after 30 days; retain minimal idempotency tombstones for 90 days from the terminal timestamp. Pending human reviews are not silently purged.
 - Store real imported content and its audit history under Mova-Lab's policies.
 
 Local model requests stay within the configured host/Compose network. Bind the

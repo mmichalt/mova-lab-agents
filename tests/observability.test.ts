@@ -109,6 +109,51 @@ test('usage and timing reports preserve unknowns and null local cost', () => {
       warmAttempts: 1,
     },
   );
+  assert.deepEqual(
+    aggregateUsage([
+      null,
+      {
+        model: 'local',
+        inputTokens: 10,
+        cachedInputTokens: null,
+        outputTokens: 5,
+        estimatedCostUsd: null,
+      },
+    ]),
+    {
+      attempts: 2,
+      inputTokens: null,
+      cachedInputTokens: null,
+      outputTokens: null,
+      estimatedCostUsd: null,
+      costStatus: 'unmeasured_local',
+    },
+  );
+  assert.deepEqual(
+    aggregateAttemptTiming(
+      [
+        { startedAt: 0, finishedAt: null, usage: null },
+        { startedAt: 10, finishedAt: 20, usage: null },
+      ],
+      [
+        {
+          wallDurationMs: 4,
+          loadDurationNs: 8,
+          promptEvaluationDurationNs: 2,
+          generationDurationNs: 3,
+        },
+      ],
+    ),
+    {
+      attempts: 2,
+      wallDurationMs: null,
+      loadDurationNs: null,
+      promptEvaluationDurationNs: null,
+      generationDurationNs: null,
+      coldAttempts: 1,
+      warmAttempts: 0,
+    },
+  );
 });
 
 test('run reports use durable usage and unknown pre-execution runtime', (t) => {

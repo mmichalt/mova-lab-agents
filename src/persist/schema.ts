@@ -124,4 +124,11 @@ ALTER TABLE runs ADD COLUMN trace_contexts TEXT NOT NULL DEFAULT '[]' CHECK (jso
 ALTER TABLE runs ADD COLUMN content_redacted_at INTEGER;
 `,
   },
+  {
+    id: 5,
+    name: '005_run_terminal_timestamp',
+    sql: `
+ALTER TABLE runs ADD COLUMN terminal_at INTEGER;
+`,
+  },
 ] as const;

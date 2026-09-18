@@ -1,10 +1,11 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, AG-026, AG-027, and AG-029 are marked
-complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
-follow-up is in progress in this working tree; sibling `mova-lab` findings
-remain. AG-024 implementation is complete across both repositories;
-merge/rollout is pending. Other remaining tickets are unstarted.
+**Status:** AG-001 through AG-027 and AG-029 are marked complete. AG-028's
+tooling is implemented, but its live comparison evidence remains pending.
+AG-030 follow-up is implemented in both repositories, while its status/evidence
+still needs reconciliation. AG-024 and MOVA-321 are merged across both
+repositories; rollout evidence remains pending. AG-031 implementation is
+complete, with live evidence still pending.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -71,6 +72,11 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
 - [x] [AG-027 — Budgeted evaluation runner](#ag-027)
 - [ ] [AG-028 — Workflow comparison and findings](#ag-028)
+
+### Milestones 3–4 review follow-up
+
+- [ ] [AG-031 — Async recovery and measurement correctness](#ag-031)
+- [ ] [MOVA-321 — Async generation handoff follow-up](#mova-321)
 
 ## Milestone 1: standalone recording-proposal generator
 
@@ -1777,3 +1783,239 @@ not yet complete.
 
 **Out of scope:** Automatic default changes, claims of clinical validation,
 unrequested provider migration, and implementing every proposed follow-up.
+
+## Milestones 3–4 review follow-up
+
+### AG-031
+
+**Title:** Milestones 3–4 follow-up: recovery compatibility, readiness, and trustworthy measurement
+
+**Stages:** 8–10
+
+**Repository:** `mova-lab-agents`
+
+**Dependencies:** [AG-023](#ag-023), [AG-025](#ag-025), [AG-026](#ag-026),
+[AG-027](#ag-027)
+
+**Status:** Implementation complete; live model/Redis evidence and therapist
+ratings remain pending.
+
+**Priority:** High; preserve active deterministic runs before deployment and fix
+evaluation accounting before using Milestone 4 reports to make architecture decisions.
+
+**Problem and learning objective:** A post-Milestone review found that the queue
+and bounded supervisor retain their security boundaries, but upgrade recovery,
+service readiness, observability totals, and evaluation comparability do not yet
+match the architecture plan. Repair the existing paths without adding an
+orchestration framework, monitoring service, or second source of workflow truth.
+
+**Review scope:** Reviewed on 2026-09-18 at `mova-lab-agents` commit `4c8eb32`.
+The review covered Milestones 3–4 commits from `b93f997` through `4c8eb32`, the
+corresponding backlog and architecture contracts, ordinary tests, focused probes,
+and the Redis smoke implementation. `npm test` passed 275 tests; type-checking,
+Biome, and the production build passed. The subprocess Redis smoke is implemented
+as `tests/smoke-redis-subprocess.ts` but was not run because this environment has
+no reachable Redis. The live model evaluations were not rerun. P1 means high
+priority, P2 normal priority, and P3 low priority.
+
+**Review findings:**
+
+1. **P1 — Adding the optional supervisor prompt invalidates recovery of older
+   deterministic runs.** `src/content/runs.ts:80-87` adds `supervisor` to the
+   prompt-version map for every run, including deterministic runs, while
+   `assertRecoveryCompatible` at `:1327` requires exact map equality. A pending,
+   interrupted, or retryable deterministic run created before AG-025 lacks that
+   unused key and now fails with `PROMPT_VERSION_UNSUPPORTED`. Store only the
+   versions actually used by the selected mode, or retain a compatible handler
+   for the pre-AG-025 deterministic version. Verify upgrade recovery from real
+   pre-AG-025 rows; do not reset deadlines, attempts, revisions, or model identity.
+
+2. **P1 — The single-call baseline is not a fair or reliably budgeted comparator.**
+   `evals/runner.ts:584-589` divides the run token allowance by the maximum call
+   allowance, limiting the one baseline generation to 133 tokens under the default
+   2,000-token/15-call run budget. The path then reports calls from successful
+   usage samples (`:625,638,665-670`), so failed attempts can count as zero, joins
+   its system instructions with literal `\\n` text (`:607-613`), and fabricates
+   passed content/age/language checks for every schema-valid generation
+   (`:618-634`). Use the existing token reservation and deterministic validation
+   primitives, count attempts at the execution boundary, and classify raw model
+   success separately from content/check success. Add a fake Ollama regression
+   that asserts `num_predict`, retries, failure accounting, and a deliberately
+   invalid but schema-valid candidate.
+
+3. **P1 — Real comparison reports can be invalid or silently mix runtime identities.**
+   The single-call path records a null digest/quantization and empty runtime and
+   hardware (`evals/runner.ts:639-643,655-659`), while the comparison requires
+   those fields to equal the deterministic and supervisor reports. Separately,
+   `evaluateCorpus` overwrites report metadata with the last completed run at
+   `:310-312`; it does not reject a changed digest, runtime, settings, or hardware
+   earlier in the same report. Capture the same Ollama/runtime evidence in all
+   three modes, validate per-run identity consistency before writing a report,
+   and make mixed evidence incomplete or invalid rather than last-value-wins.
+
+4. **P1 — Durable usage reports turn unknown attempts into known low totals.**
+   `src/content/runs.ts:476-479` drops attempts whose usage is null before
+   aggregation. A two-attempt probe with one unknown attempt reported
+   `attempts: 1`, `inputTokens: 10`, and `outputTokens: 5` instead of two attempts
+   and unknown totals. Timing likewise prefers a possibly stale checkpoint array
+   over durable `step_attempts` at `:441-446`. Aggregate against every reserved
+   attempt, preserve null when any contributing measurement is unknown, and merge
+   checkpoint-only provider timing without losing crash records. Cover a crash
+   after reservation and a later successful recovery.
+
+5. **P2 — API readiness ignores Redis and tests the worker's model dependency.**
+   `src/ready.ts:11-21` reports readiness solely from SQLite and Ollama. The async
+   API can therefore report ready while it cannot enqueue accepted work, and can
+   report not ready because Ollama is unavailable even though its queue-facing
+   acceptance path is healthy. Make readiness role-aware: the API must check its
+   SQLite/Redis producer dependencies; the worker must check SQLite, Redis, and
+   the configured model. Keep `/health` as dependency-free liveness and bound all
+   readiness probes.
+
+6. **P2 — The evaluation corpus omits planned failure and security cases.** All
+   20 entries in `evals/corpus.json` use ordinary cooperative instructions; none
+   covers contradictory instructions, prompt-injection-like text, tight/forbidden
+   vocabulary, or a likely refusal/correction case required by the Stage 10 plan.
+   `evals/protocol.ts:11-46` also checks that requested sounds occur but not the
+   required even distribution. Replace redundant cases with explicit expectations
+   for those scenarios, add the missing distribution/property checks, and keep a
+   genuinely untouched holdout subset.
+
+7. **P2 — Milestone 3's destructive recovery acceptance is not automated.**
+   `tests/smoke-redis.ts:100-148` removes a queued job, runs in-process workers,
+   performs a clean worker close, and exercises retry exhaustion. It never kills
+   a worker process during a provider/import call, interrupts Redis around an
+   acknowledgement, or proves a lost import response cannot duplicate a receiver
+   write. Add one subprocess/Redis-backed smoke covering those exact boundaries;
+   keep it outside ordinary CI if Docker/Redis availability requires that.
+
+8. **P3 — Trace and retention details do not match their documentation.** The
+   manually created `workflow.execution` span is not made active for its step
+   spans (`src/content/workflow.ts:209-214`), and supervisor search omits the
+   observability argument at `:822`, so the advertised hierarchy has gaps.
+   Retention sets `content_redacted_at` after 30 days, then waits another 90 days
+   before deletion (`src/persist/store.ts:927-967`), retaining tombstones for
+   about 120 days although the README says 90 days. Correct the parent context and
+   search span, and compute tombstone expiry from the terminal timestamp (or
+   document a deliberate 120-day policy).
+
+9. **P2 — Milestone completion claims are ahead of recorded evidence.** AG-028 is
+   still explicitly in progress, there are no three live mode reports or therapist
+   ratings in the repository, AG-025's local planning evaluation is unrecorded,
+   and `architecture-plan.md` still labels all described functionality as planned.
+   Run and record the opt-in evidence after findings 2, 3, and 6 are fixed, write
+   the evidence-based retain/simplify/defer conclusion, and then reconcile the
+   ticket and architecture status. Do not mark a dry run or fake-model test as
+   quality evidence.
+
+**Acceptance criteria:**
+
+- Pre-AG-025 deterministic runs resume after upgrade without adopting supervisor
+  behavior or resetting any persisted limit.
+- Unknown/crashed attempts remain included in usage/timing counts and force
+  affected totals to null.
+- API and worker readiness fail only for their own required dependencies, including
+  Redis, within documented deadlines.
+- Single-call, deterministic, and supervisor evaluation modes enforce the same
+  total budgets, record stable comparable runtime identity, and never invent
+  passed checks.
+- The corpus covers the planned adversarial/contradictory/boundary classes and
+  verifies target-sound distribution.
+- A subprocess Redis smoke proves worker death, acknowledgement loss, redelivery,
+  and lost import-response recovery without duplicate CMS drafts.
+- Live local reports and therapist ratings remain explicitly pending until they
+  actually exist; once recorded, AG-028 contains an evidence-based conclusion.
+
+**Verification:** Focused regressions plus `npm test` (277 passed),
+`npm run typecheck`, `npm run lint`, and `npm run build` pass. The Redis
+subprocess smoke is available as `npm run smoke:redis:subprocess` but needs a
+reachable Redis instance; the three opt-in local evaluation modes and therapist
+ratings remain pending before completing AG-028.
+
+**Out of scope:** Promoting the supervisor to default, paid-provider pricing,
+new orchestration/observability frameworks, dashboards, WebSockets, and clinical
+validation claims.
+
+### MOVA-321
+
+**Title:** Milestone 3 UI follow-up: ship the async handoff and make recovery states unambiguous
+
+**Stage:** 8, product integration
+
+**Repository:** `mova-lab`
+
+**Dependencies:** [AG-024](#ag-024)
+
+**Status:** Implementation merged to sibling `main`; quality gates pass and
+rollout evidence remains pending.
+
+**Priority:** High for merge/rollout; normal for the UI and HTTP corrections below.
+
+**Problem and learning objective:** The async proxy/UI implementation preserves
+the intended browser, authorization, response-size, and text-rendering boundaries,
+but it is not on sibling `main`, and two state/HTTP details obscure what actually
+happened. Ship the existing focused diff with the smallest corrections needed for
+truthful asynchronous status.
+
+**Review scope:** Reviewed on 2026-09-18 at `mova-lab` branch
+`ag-024-async-ui-handoff`, commit `8c4fc42`, against sibling `main` commit
+`0e446c2`. Focused server tests passed 13/13 and client tests passed 16/16.
+No new authorization bypass was found: service credentials remain server-side,
+Content Admin context is derived from trusted Nest authorization, response bodies
+are bounded/projected, and generated strings render as React text.
+The reviewed handoff is now present on sibling `main`; this implementation adds
+the recovery-label, stable-202, and completed-import invalidation corrections.
+
+**Review findings:**
+
+1. **P1 — The completed async handoff was not on `mova-lab` main at review
+   time.** PR [#129](https://github.com/mmichalt/mova-lab/pull/129) merged the
+   AG-024 handoff and PR [#130](https://github.com/mmichalt/mova-lab/pull/130)
+   merged the MOVA-321 corrections; both passed CI. Verify the deployed Nest
+   configuration points to the queued agents API before calling Milestone 3
+   rolled out.
+
+2. **P2 — An expired `RUNNING` lease is still labelled as active work.**
+   `content-generation-page.tsx:38-45` only gives resumable `FAILED` runs a recovery
+   label. A resumable `RUNNING` resource stops polling and shows a recovery button,
+   but its heading still says generation/import is in progress. Render every
+   resumable non-`PENDING` run as interrupted/recovery-needed and cover generation
+   and import phases in the page test.
+
+3. **P2 — The proxy API erases replay versus new-acceptance status semantics.**
+   `content-studio.controller.ts:92-93,118-119,151-152` hard-codes `202` for create,
+   approve, and resume, while the agents API uses `200` for idempotent replays and
+   `202` for newly scheduled work; reject still inherits Nest's default `201` even
+   though it creates no resource. Either deliberately document one stable Nest
+   contract or preserve the upstream distinction, but make create/approve/reject/
+   resume consistent and test new acceptance, replay, and terminal replay.
+
+4. **P3 — Completed imports do not invalidate Content Studio exercise lists.**
+   `content-studio-queries.ts:107-119` polls the workflow to completion, but no
+   transition invalidates the cached exercises query. With a 60-second stale time
+   and focus refetch disabled, the library can omit freshly imported drafts even
+   though direct receipt links work. Invalidate the existing exercise query once
+   when import first reaches `COMPLETED`; add no event bus or WebSocket.
+
+**Acceptance criteria:**
+
+- The async handoff is merged and deployed with the documented 10-second proxy
+  timeout and server-only credentials.
+- Pending, active, interrupted, approval, partial-import, completed, rejected,
+  and terminal-failure states have non-contradictory Ukrainian labels/actions.
+- HTTP status behavior is explicit and covered for first acceptance and idempotent
+  replay across every generation mutation.
+- The Content Studio list refreshes once after a completed import while confirmed
+  receipt links continue to work.
+- Owner/non-owner teacher and permitted/non-permitted Content Admin behavior,
+  bounded upstream bodies, and safe text rendering keep their current regressions.
+
+**Verification:** PRs #129 and #130 are merged to sibling `main` with successful
+CI. Focused generation server/client suites pass (3 server and 10 client tests).
+Sibling lint, server tests (569 passed, 2 skipped), client tests (323 passed),
+build, CMS type-check, and harness checks pass. Against the queued agents service,
+verify create `202`, reload/polling, expired lease recovery, approval/import,
+partial receipt links, idempotent replay, and the refreshed Content Studio list.
+
+**Out of scope:** WebSockets, a generation-review queue redesign, new client state
+libraries, publication automation, and broader Content Studio UI changes.

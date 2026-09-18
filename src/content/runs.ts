@@ -14,7 +14,6 @@ import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
   aggregateAttemptTiming,
-  aggregateProviderTiming,
   aggregateUsage,
   linksFor,
   type Observability,
@@ -77,14 +76,22 @@ export type QueueDelivery = {
   phase: DeliveryPhase;
 };
 
-export const PROMPT_VERSIONS = {
+const BASE_PROMPT_VERSIONS = {
   vocabulary: VOCABULARY_PROMPT_VERSION,
   exercises: EXERCISES_PROMPT_VERSION,
   revision: REVISION_PROMPT_VERSION,
   age: AGE_PROMPT_VERSION,
   language: LANGUAGE_PROMPT_VERSION,
+};
+
+export const PROMPT_VERSIONS = {
+  ...BASE_PROMPT_VERSIONS,
   supervisor: SUPERVISOR_PROMPT_VERSION,
 };
+
+export function promptVersionsFor(supervisor: boolean) {
+  return supervisor ? PROMPT_VERSIONS : BASE_PROMPT_VERSIONS;
+}
 
 export type WorkflowResource = {
   id: string;
@@ -440,9 +447,12 @@ export function presentRun(
     imports: importProgress.receipts,
     observability: {
       usage: aggregateUsage(attemptUsages(attempts)),
-      timing: Array.isArray(state.timing)
-        ? aggregateProviderTiming(state.timing as Parameters<typeof aggregateProviderTiming>[0])
-        : aggregateAttemptTiming(attempts),
+      timing: aggregateAttemptTiming(
+        attempts,
+        Array.isArray(state.timing)
+          ? (state.timing as Parameters<typeof aggregateAttemptTiming>[1])
+          : undefined,
+      ),
       runtime: runtimeOf(state),
     },
   };
@@ -473,9 +483,13 @@ function runtimeOf(state: Record<string, unknown>): RuntimeMetadata {
   };
 }
 
-function attemptUsages(attempts: ReturnType<WorkflowStore['listAttempts']>): LlmUsage[] {
-  return attempts.flatMap(({ usage }) =>
-    typeof usage === 'object' && usage !== null && !Array.isArray(usage) ? [usage as LlmUsage] : [],
+function attemptUsages(
+  attempts: ReturnType<WorkflowStore['listAttempts']>,
+): Array<LlmUsage | null> {
+  return attempts.map(({ usage }) =>
+    typeof usage === 'object' && usage !== null && !Array.isArray(usage)
+      ? (usage as LlmUsage)
+      : null,
   );
 }
 
@@ -1008,7 +1022,7 @@ function openPersistedRun(
       normalizedInput: request,
       workflowVersion: WORKFLOW_VERSION,
       constraintsVersion: CONSTRAINTS_VERSION,
-      promptVersions: PROMPT_VERSIONS,
+      promptVersions: promptVersionsFor(options.config.experimentalSupervisor),
       modelTag: options.config.ollamaModel,
       initialState: options.config.experimentalSupervisor
         ? { supervisor: createSupervisorState() }
@@ -1324,7 +1338,9 @@ async function assertRecoveryCompatible(
       'The recorded workflow version is not supported.',
     );
   }
-  if (!sameVersions(run.promptVersions, PROMPT_VERSIONS)) {
+  const expectedPromptVersions =
+    run.promptVersions.supervisor === undefined ? BASE_PROMPT_VERSIONS : PROMPT_VERSIONS;
+  if (!sameVersions(run.promptVersions, expectedPromptVersions)) {
     throw new AppError(
       409,
       'PROMPT_VERSION_UNSUPPORTED',

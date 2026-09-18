@@ -199,12 +199,12 @@ export function linksFor(records: readonly TraceContextRecord[] | undefined) {
   }));
 }
 
-export function aggregateUsage(usages: readonly LlmUsage[]): UsageReport {
+export function aggregateUsage(usages: readonly (LlmUsage | null)[]): UsageReport {
   return {
     attempts: usages.length,
-    inputTokens: completeSum(usages.map((usage) => usage.inputTokens)),
-    cachedInputTokens: completeSum(usages.map((usage) => usage.cachedInputTokens)),
-    outputTokens: completeSum(usages.map((usage) => usage.outputTokens)),
+    inputTokens: completeSum(usages.map((usage) => usage?.inputTokens ?? null)),
+    cachedInputTokens: completeSum(usages.map((usage) => usage?.cachedInputTokens ?? null)),
+    outputTokens: completeSum(usages.map((usage) => usage?.outputTokens ?? null)),
     estimatedCostUsd: null,
     costStatus: 'unmeasured_local',
   };
@@ -216,14 +216,22 @@ export function aggregateAttemptTiming(
     finishedAt: number | null;
     usage: unknown;
   }[],
+  checkpointTimings: readonly ProviderTiming[] = [],
 ): AttemptTimingReport {
-  const timings = attempts.map((attempt) => recordOf(attempt.usage));
+  const count = Math.max(attempts.length, checkpointTimings.length);
+  const timings = Array.from({ length: count }, (_, index) => ({
+    ...recordOf(attempts[index]?.usage),
+    ...(checkpointTimings[index] ?? {}),
+  }));
   return {
-    attempts: attempts.length,
+    attempts: count,
     wallDurationMs: sumKnown(
-      attempts.map((attempt) =>
-        attempt.finishedAt === null ? null : Math.max(0, attempt.finishedAt - attempt.startedAt),
-      ),
+      Array.from({ length: count }, (_, index) => {
+        const attempt = attempts[index];
+        return attempt?.finishedAt == null
+          ? null
+          : Math.max(0, attempt.finishedAt - attempt.startedAt);
+      }),
     ),
     loadDurationNs: sumField(timings, 'loadDurationNs'),
     promptEvaluationDurationNs: sumField(timings, 'promptEvaluationDurationNs'),

@@ -102,6 +102,7 @@ export function createApp(options: {
       const readiness = await inspectReadiness({
         config: options.config,
         store: options.store,
+        queue: options.queue,
       });
       res.status(readiness.status === 'ok' ? 200 : 503).json(readiness);
     } catch (err) {
