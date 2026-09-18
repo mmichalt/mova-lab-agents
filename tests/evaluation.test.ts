@@ -139,6 +139,38 @@ test('terminal workflow failures count as completed evaluations', async () => {
   assert.equal(report.summary.failures.MODEL_REFUSED, 3);
 });
 
+test('schema-valid model output is reported separately from content quality', async () => {
+  const report = await evaluateCorpus(
+    { ...corpus, cases: corpus.cases.slice(0, 1), holdoutCaseIds: [] },
+    async () => ({
+      result: validResult('invalid-content'),
+      usage: { calls: 1, outputTokens: 1 },
+    }),
+  );
+  assert.equal(report.runs[0]?.outcomes.rawModelSuccess, true);
+  assert.equal(report.runs[0]?.outcomes.schema, true);
+  assert.equal(report.runs[0]?.outcomes.content, false);
+});
+
+test('mixed runtime identity makes a report incomplete instead of last-value-wins', async () => {
+  let repetition = 0;
+  const report = await evaluateCorpus(
+    { ...corpus, cases: corpus.cases.slice(0, 1), holdoutCaseIds: [] },
+    async () => ({
+      result: validResult(`metadata-${repetition}`),
+      usage: { calls: 1, outputTokens: 1 },
+      metadata: {
+        model: { tag: 'fake', digest: `digest-${repetition++}`, quantization: 'Q4' },
+        runtime: { numCtx: 4096 },
+        hardware: { cpu: 'fake' },
+      },
+    }),
+  );
+  assert.equal(report.status, 'incomplete');
+  assert.ok(report.metadataMismatches?.length);
+  assert.equal(report.metadata?.model?.digest, 'digest-0');
+});
+
 test('provider requests without usage samples report unknown token usage', () => {
   assert.equal(sumTokens([], 1), null);
   assert.equal(sumTokens([], 0), 0);

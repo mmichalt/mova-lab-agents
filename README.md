@@ -60,11 +60,12 @@ requires separate local evaluation and actual therapist review.
 | `REDIS_URL` | `redis://localhost:6379` | BullMQ connection for the API producer and worker. Compose overrides it with `redis://redis:6379`. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
-It does not parse a request body. `GET /ready` is also unauthenticated and
-checks SQLite plus local Ollama model presence with a bounded `GET /api/tags`
-request. It does not generate text, pull weights, or call `/api/chat`.
-Liveness stays independent of readiness: `/health` remains `200` when SQLite or
-Ollama is missing. Process startup opens `SQLITE_PATH`, applies
+It does not parse a request body. API `GET /ready` checks SQLite and its BullMQ
+producer Redis connection when asynchronous queueing is enabled; it does not
+require Ollama. The worker role checks SQLite, Redis, and the configured local
+model with a bounded `GET /api/tags` request. Readiness never generates text,
+pulls weights, or calls `/api/chat`. Liveness stays independent of readiness:
+`/health` remains `200` when a dependency is missing. Process startup opens `SQLITE_PATH`, applies
 SQL migrations, and enables WAL, foreign keys, and a 5000 ms busy timeout.
 Creating the Express app still does not open a port or a database. Persisted
 values are JSON-serializable and include workflow/constraint/prompt versions
@@ -349,6 +350,7 @@ npm test            # node:test tests/**/*.test.ts (no Ollama)
 npm run smoke:local # optional live GPU/model smoke; never part of CI
 npm run smoke:tools # optional live native tool-call smoke with stub search; never part of CI
 npm run smoke:redis # optional Redis/BullMQ recovery smoke with fake HTTP services
+npm run smoke:redis:subprocess # optional worker-death/redelivery/import-idempotency smoke
 npm run eval:local -- --mode deterministic # explicit evaluation; never part of CI
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
@@ -360,6 +362,9 @@ models, Ollama, or cloud credentials, and they do not pull models or invoke
 live inference. `npm run smoke:redis` is separate: it requires a reachable
 Redis instance and verifies reconciliation, asynchronous approval/import, and
 bounded redelivery without live model inference.
+`npm run smoke:redis:subprocess` is also separate and requires Redis; it kills
+a worker during an import request, waits for redelivery, and verifies the
+receiver's idempotency key prevents a duplicate draft.
 
 `npm run eval:local -- --mode single-call|deterministic|supervisor` is the only
 live evaluation command. It requires the local Ollama model, writes a versioned

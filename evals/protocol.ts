@@ -15,6 +15,7 @@ export const qualityIds = [
   'literal-target-letter',
   'assigned-sound-in-request',
   'covers-requested-sounds',
+  'target-sound-distribution',
   'no-application-ids',
 ] as const;
 
@@ -42,8 +43,20 @@ export function assessGeneration(request: ContentRequest, result: unknown): Qual
       id: 'covers-requested-sounds',
       passed: request.targetSounds.every((sound) => proposals.some((p) => p.targetSound === sound)),
     },
+    { id: 'target-sound-distribution', passed: hasEvenTargetSoundDistribution(request, proposals) },
     { id: 'no-application-ids', passed: proposals.every(hasAppLocalId) },
   ];
+}
+
+function hasEvenTargetSoundDistribution(
+  request: ContentRequest,
+  proposals: readonly RecordingProposal[],
+) {
+  if (request.targetSounds.length < 2) return true;
+  const counts = request.targetSounds.map(
+    (sound) => proposals.filter((proposal) => proposal.targetSound === sound).length,
+  );
+  return Math.max(...counts) - Math.min(...counts) <= 1 && counts.every((count) => count > 0);
 }
 
 export function duplicatePhraseCount(result: unknown) {

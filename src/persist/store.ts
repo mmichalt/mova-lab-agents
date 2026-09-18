@@ -69,6 +69,7 @@ export type PersistedRun = {
   ollamaVersion: string | null;
   traceContexts: TraceContextRecord[];
   contentRedactedAt: number | null;
+  terminalAt: number | null;
   limits: PersistedLimits;
   consumed: PersistedConsumed;
   deliveryCounts: PersistedDeliveryCounts;
@@ -283,6 +284,7 @@ type RunRow = {
   ollama_version: string | null;
   trace_contexts: string;
   content_redacted_at: number | null;
+  terminal_at: number | null;
   limits: string;
   consumed: string;
   delivery_counts: string;
@@ -312,11 +314,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     INSERT INTO runs (
       id, owner_id, idempotency_key, input_hash, normalized_input, status, phase,
       state_version, schema_version, workflow_version, constraints_version, prompt_versions,
-      model_tag, model_digest, ollama_version, trace_contexts, limits, consumed, delivery_counts, state, created_at, updated_at
+      model_tag, model_digest, ollama_version, trace_contexts, content_redacted_at, terminal_at, limits, consumed, delivery_counts, state, created_at, updated_at
     ) VALUES (
       @id, @ownerId, @idempotencyKey, @inputHash, @normalizedInput, 'PENDING', 'vocabulary',
       0, @schemaVersion, @workflowVersion, @constraintsVersion, @promptVersions,
-      @modelTag, @modelDigest, @ollamaVersion, @traceContexts, @limits, @consumed, @deliveryCounts, @state, @now, @now
+      @modelTag, @modelDigest, @ollamaVersion, @traceContexts, NULL, NULL, @limits, @consumed, @deliveryCounts, @state, @now, @now
     )
   `);
   const updateCheckpointStmt = db.prepare(`
@@ -340,6 +342,12 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       lease_expires_at = CASE
         WHEN @status IN ('AWAITING_APPROVAL', 'FAILED', 'COMPLETED') THEN NULL
         ELSE lease_expires_at
+      END,
+      terminal_at = CASE
+        WHEN @status = 'COMPLETED'
+          OR (@status = 'FAILED' AND json_extract(@state, '$.error.retryable') IS NOT 1)
+          THEN COALESCE(terminal_at, @now)
+        ELSE terminal_at
       END,
       updated_at = @now
     WHERE id = @id
@@ -399,6 +407,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       status = @status,
       phase = @phase,
       state_version = state_version + 1,
+      terminal_at = CASE WHEN @status = 'REJECTED' THEN @now ELSE terminal_at END,
       updated_at = @now
     WHERE id = @id AND status = 'AWAITING_APPROVAL' AND state_version = @expectedStateVersion
   `);
@@ -676,6 +685,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
             lease_owner = NULL,
             lease_token = NULL,
             lease_expires_at = NULL,
+            terminal_at = COALESCE(terminal_at, @now),
             updated_at = @now
           WHERE id = @id
             AND state_version = @expectedStateVersion
@@ -931,7 +941,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
           `SELECT id FROM runs
            WHERE status IN ('REJECTED', 'COMPLETED', 'FAILED')
              AND content_redacted_at IS NULL
-             AND updated_at <= @cutoff
+             AND COALESCE(terminal_at, updated_at) <= @cutoff
              AND NOT (status = 'FAILED' AND json_extract(state, '$.error.retryable') = 1)`,
         )
         .all({ cutoff: contentCutoff }) as Array<{ id: string }>;
@@ -949,6 +959,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
               model_digest = NULL,
               ollama_version = NULL,
               trace_contexts = '[]',
+              terminal_at = COALESCE(terminal_at, updated_at),
               state = @state,
               content_redacted_at = @now,
               updated_at = @now
@@ -962,7 +973,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
           `DELETE FROM runs
            WHERE status IN ('REJECTED', 'COMPLETED', 'FAILED')
              AND content_redacted_at IS NOT NULL
-             AND content_redacted_at <= @cutoff`,
+             AND COALESCE(terminal_at, content_redacted_at) <= @cutoff`,
         )
         .run({ cutoff: tombstoneCutoff }).changes;
       return { redacted: redactionCandidates.length, deleted };
@@ -1304,6 +1315,7 @@ function mapRun(row: RunRow): PersistedRun {
     ollamaVersion: row.ollama_version,
     traceContexts: unpack(row.trace_contexts) as TraceContextRecord[],
     contentRedactedAt: row.content_redacted_at,
+    terminalAt: row.terminal_at,
     limits: unpack(row.limits) as PersistedLimits,
     consumed: unpack(row.consumed) as PersistedConsumed,
     deliveryCounts: unpack(row.delivery_counts) as PersistedDeliveryCounts,

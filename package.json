@@ -16,6 +16,7 @@
     "smoke:local": "node --env-file-if-exists=.env tests/smoke-local.ts",
     "smoke:tools": "node --env-file-if-exists=.env tests/smoke-tools.ts",
     "smoke:redis": "node --env-file-if-exists=.env tests/smoke-redis.ts",
+    "smoke:redis:subprocess": "node --env-file-if-exists=.env tests/smoke-redis-subprocess.ts",
     "eval:compare": "node evals/comparison.ts",
     "lint": "biome check .",
     "format": "biome check --write .",

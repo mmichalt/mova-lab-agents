@@ -1,3 +1,4 @@
+import { context, trace } from '@opentelemetry/api';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import type { LlmCall } from '../llm/complete.ts';
@@ -212,6 +213,9 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       'workflow.resumed': resume !== undefined,
     },
   });
+  const executionParent = executionSpan
+    ? trace.setSpan(context.active(), executionSpan)
+    : context.active();
   const controller = new AbortController();
   const onExternalAbort = () => {
     if (!controller.signal.aborted) {
@@ -313,6 +317,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
             signal: controller.signal,
             observability: options.observability,
           }),
+        executionParent,
       );
       if (resume && constraints.version !== resume.constraintsVersion) {
         throw new AppError(
@@ -327,7 +332,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       failExpired(state, controller);
     }
     if (state.status === 'RUNNING' && state.supervisor) {
-      await runSupervisorWorkflow(state, llm, options, limits);
+      await context.with(executionParent, () => runSupervisorWorkflow(state, llm, options, limits));
     }
     if (state.status === 'RUNNING' && !state.supervisor) {
       const vocabulary =
@@ -337,6 +342,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
           'workflow.step.vocabulary',
           { attributes: { 'workflow.step': 'vocabulary' } },
           () => selectVocabulary({ ...llm, request: options.request }),
+          executionParent,
         ));
       if (!state.vocabulary) {
         state.vocabulary = vocabulary;
@@ -365,6 +371,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
                 options,
                 limits,
               ),
+            executionParent,
           );
         } else {
           const produced = await withSpan(
@@ -372,6 +379,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
             feedback ? 'workflow.step.revision' : 'workflow.step.generation',
             { attributes: { 'workflow.step': feedback ? 'revision' : 'generation' } },
             () => nextCandidate(state, llm, vocabulary, feedback),
+            executionParent,
           );
           if (expired(controller, limits, clock)) {
             failExpired(state, controller);
@@ -426,6 +434,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
                 options,
                 limits,
               ),
+            executionParent,
           );
         }
         if (expired(controller, limits, clock)) {
@@ -819,7 +828,11 @@ async function executeSupervisorAction(
         'The supervisor requested an invalid search.',
       );
     }
-    const content = await runSearchTool(decision, { config: llm.config, signal: llm.signal });
+    const content = await runSearchTool(decision, {
+      config: llm.config,
+      signal: llm.signal,
+      observability: options.observability,
+    });
     return { status: 'completed', observation: parseObservation(content) };
   }
 
