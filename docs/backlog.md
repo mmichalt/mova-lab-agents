@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, and AG-029 are marked
+**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, AG-026, and AG-029 are marked
 complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
 follow-up is in progress in this working tree; sibling `mova-lab` findings
 remain. AG-024 implementation is complete across both repositories;
@@ -67,8 +67,8 @@ are stable identifiers, not issue numbers from an external tracker.
 
 ### Milestone 4 — Dynamic orchestration and measurement
 
-- [ ] [AG-025 — Experimental constrained supervisor](#ag-025)
-- [ ] [AG-026 — Distributed tracing and cost reporting](#ag-026)
+- [x] [AG-025 — Experimental constrained supervisor](#ag-025)
+- [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
 - [ ] [AG-027 — Budgeted evaluation runner](#ag-027)
 - [ ] [AG-028 — Workflow comparison and findings](#ag-028)
 
@@ -1668,7 +1668,7 @@ frameworks, and model-written executable code.
 **Stage:** 10  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-024](#ag-024)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand how execution traces and usage
 metadata explain slow, failed, and expensive runs across asynchronous boundaries.
@@ -1694,6 +1694,8 @@ and redaction to persisted artifacts and logs.
 
 **Verification:** Use an in-memory trace exporter, known token/duration fixtures,
 missing-data and null-cost cases, redaction probes, and controlled retention time.
+Combined verification passes: `npm test` (263), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check`.
 
 **Out of scope:** Logging hidden model reasoning, billing guarantees, indefinite
 raw-payload retention, and new monitoring microservices.
