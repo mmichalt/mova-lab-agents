@@ -69,7 +69,7 @@ are stable identifiers, not issue numbers from an external tracker.
 
 - [x] [AG-025 — Experimental constrained supervisor](#ag-025)
 - [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
-- [ ] [AG-027 — Budgeted evaluation runner](#ag-027)
+- [x] [AG-027 — Budgeted evaluation runner](#ag-027)
 - [ ] [AG-028 — Workflow comparison and findings](#ag-028)
 
 ## Milestone 1: standalone recording-proposal generator
@@ -1706,7 +1706,7 @@ raw-payload retention, and new monitoring microservices.
 **Stage:** 10  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-006](#ag-006), [AG-011](#ag-011), [AG-026](#ag-026)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Measure stochastic output quality separately
 from deterministic program correctness.
@@ -1734,6 +1734,10 @@ stop if missing usage prevents establishing the remaining token allowance.
 **Verification:** Test report calculations and budget enforcement with deterministic
 fake runs. Perform real local evaluation only through the documented explicit
 command and record actual results without inventing missing samples.
+
+**Verification completed:** `npm test` (266), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check`. Live local evaluation remains opt-in and
+was not run in CI or during this ticket verification.
 
 **Out of scope:** Live inference in CI, production patient data, automatic model
 promotion, and an uncalibrated LLM judge as the sole quality authority.

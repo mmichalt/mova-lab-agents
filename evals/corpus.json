@@ -1,10 +1,37 @@
 {
+  "corpusVersion": "synthetic-corpus/v2",
+  "propertiesVersion": "properties/v1",
+  "rubricVersion": "therapist-rubric/v1",
+  "holdoutCaseIds": [
+    "holdout-r-park",
+    "holdout-l-home",
+    "holdout-rl-school",
+    "holdout-r-max",
+    "holdout-l-animals"
+  ],
+  "therapistRubric": {
+    "version": "therapist-rubric/v1",
+    "scale": [
+      { "score": 1, "label": "unsafe or unusable" },
+      { "score": 2, "label": "major correction needed" },
+      { "score": 3, "label": "usable with minor correction" },
+      { "score": 4, "label": "clear and age-appropriate" },
+      { "score": 5, "label": "excellent therapy-ready wording" }
+    ],
+    "dimensions": [
+      "target-sound relevance",
+      "age appropriateness",
+      "language clarity",
+      "therapy usefulness"
+    ]
+  },
   "vocabularyPromptVersion": "vocabulary/v2",
   "exercisesPromptVersion": "exercises/v1",
   "revisionPromptVersion": "revision/v1",
   "cases": [
     {
-      "id": "r-only-animals",
+      "id": "r-animals",
+      "holdout": false,
       "request": {
         "ageYears": 6,
         "targetSounds": ["р"],
@@ -14,6 +41,16 @@
         "teacherInstructions": "Короткі слова."
       },
       "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
         "targetSounds": ["р"],
         "exerciseType": "recording",
         "count": 6,
@@ -22,7 +59,8 @@
       }
     },
     {
-      "id": "l-only-home",
+      "id": "l-home",
+      "holdout": false,
       "request": {
         "ageYears": 8,
         "targetSounds": ["л"],
@@ -32,6 +70,16 @@
         "teacherInstructions": "Прості фрази про дім."
       },
       "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
         "targetSounds": ["л"],
         "exerciseType": "recording",
         "count": 6,
@@ -40,7 +88,8 @@
       }
     },
     {
-      "id": "rl-mixed-animals",
+      "id": "rl-animals",
+      "holdout": false,
       "request": {
         "ageYears": 7,
         "targetSounds": ["р", "л"],
@@ -50,6 +99,16 @@
         "teacherInstructions": "Короткі слова та прості фрази."
       },
       "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
         "targetSounds": ["р", "л"],
         "exerciseType": "recording",
         "count": 6,
@@ -59,6 +118,7 @@
     },
     {
       "id": "rl-max-12",
+      "holdout": false,
       "request": {
         "ageYears": 7,
         "targetSounds": ["р", "л"],
@@ -68,9 +128,483 @@
         "teacherInstructions": "Дванадцять коротких фраз, по черзі для р і л."
       },
       "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
         "targetSounds": ["р", "л"],
         "exerciseType": "recording",
         "count": 12,
+        "language": "uk",
+        "theme": "тварини"
+      }
+    },
+    {
+      "id": "r-food",
+      "holdout": false,
+      "request": {
+        "ageYears": 5,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "їжа",
+        "exerciseCount": 4,
+        "teacherInstructions": "Назви знайомі продукти."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 4,
+        "language": "uk",
+        "theme": "їжа"
+      }
+    },
+    {
+      "id": "l-food",
+      "holdout": false,
+      "request": {
+        "ageYears": 5,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "їжа",
+        "exerciseCount": 4,
+        "teacherInstructions": "Короткі слова про їжу."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 4,
+        "language": "uk",
+        "theme": "їжа"
+      }
+    },
+    {
+      "id": "r-school",
+      "holdout": false,
+      "request": {
+        "ageYears": 9,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "школа",
+        "exerciseCount": 8,
+        "teacherInstructions": "Прості шкільні фрази."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 8,
+        "language": "uk",
+        "theme": "школа"
+      }
+    },
+    {
+      "id": "l-school",
+      "holdout": false,
+      "request": {
+        "ageYears": 9,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "школа",
+        "exerciseCount": 8,
+        "teacherInstructions": "Прості шкільні фрази."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 8,
+        "language": "uk",
+        "theme": "школа"
+      }
+    },
+    {
+      "id": "rl-home",
+      "holdout": false,
+      "request": {
+        "ageYears": 6,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "дім",
+        "exerciseCount": 6,
+        "teacherInstructions": "Слова про кімнати та речі."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "дім"
+      }
+    },
+    {
+      "id": "rl-food",
+      "holdout": false,
+      "request": {
+        "ageYears": 10,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "їжа",
+        "exerciseCount": 8,
+        "teacherInstructions": "Короткі речення про обід."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 8,
+        "language": "uk",
+        "theme": "їжа"
+      }
+    },
+    {
+      "id": "r-nature",
+      "holdout": false,
+      "request": {
+        "ageYears": 8,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "природа",
+        "exerciseCount": 6,
+        "teacherInstructions": "Фрази про ліс."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "природа"
+      }
+    },
+    {
+      "id": "l-nature",
+      "holdout": false,
+      "request": {
+        "ageYears": 8,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "природа",
+        "exerciseCount": 6,
+        "teacherInstructions": "Фрази про ліс."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 6,
+        "language": "uk",
+        "theme": "природа"
+      }
+    },
+    {
+      "id": "rl-nature",
+      "holdout": false,
+      "request": {
+        "ageYears": 11,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "природа",
+        "exerciseCount": 10,
+        "teacherInstructions": "Десять описових фраз."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 10,
+        "language": "uk",
+        "theme": "природа"
+      }
+    },
+    {
+      "id": "r-play",
+      "holdout": false,
+      "request": {
+        "ageYears": 4,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "гра",
+        "exerciseCount": 3,
+        "teacherInstructions": "Однослівні підказки."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 3,
+        "language": "uk",
+        "theme": "гра"
+      }
+    },
+    {
+      "id": "l-play",
+      "holdout": false,
+      "request": {
+        "ageYears": 4,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "гра",
+        "exerciseCount": 3,
+        "teacherInstructions": "Однослівні підказки."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 3,
+        "language": "uk",
+        "theme": "гра"
+      }
+    },
+    {
+      "id": "holdout-r-park",
+      "holdout": true,
+      "request": {
+        "ageYears": 6,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "парк",
+        "exerciseCount": 5,
+        "teacherInstructions": "Короткі фрази про прогулянку."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 5,
+        "language": "uk",
+        "theme": "парк"
+      }
+    },
+    {
+      "id": "holdout-l-home",
+      "holdout": true,
+      "request": {
+        "ageYears": 7,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "кімната",
+        "exerciseCount": 5,
+        "teacherInstructions": "Короткі фрази про кімнату."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 5,
+        "language": "uk",
+        "theme": "кімната"
+      }
+    },
+    {
+      "id": "holdout-rl-school",
+      "holdout": true,
+      "request": {
+        "ageYears": 10,
+        "targetSounds": ["р", "л"],
+        "difficulty": "easy",
+        "theme": "школа",
+        "exerciseCount": 9,
+        "teacherInstructions": "Чергуй цільові звуки."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р", "л"],
+        "exerciseType": "recording",
+        "count": 9,
+        "language": "uk",
+        "theme": "школа"
+      }
+    },
+    {
+      "id": "holdout-r-max",
+      "holdout": true,
+      "request": {
+        "ageYears": 12,
+        "targetSounds": ["р"],
+        "difficulty": "easy",
+        "theme": "подорож",
+        "exerciseCount": 12,
+        "teacherInstructions": "Дванадцять коротких речень."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["р"],
+        "exerciseType": "recording",
+        "count": 12,
+        "language": "uk",
+        "theme": "подорож"
+      }
+    },
+    {
+      "id": "holdout-l-animals",
+      "holdout": true,
+      "request": {
+        "ageYears": 10,
+        "targetSounds": ["л"],
+        "difficulty": "easy",
+        "theme": "тварини",
+        "exerciseCount": 10,
+        "teacherInstructions": "Описові фрази про тварин."
+      },
+      "expect": {
+        "propertiesVersion": "properties/v1",
+        "properties": [
+          "schema-valid",
+          "count-matches",
+          "ukrainian-script",
+          "literal-target-letter",
+          "assigned-sound-in-request",
+          "covers-requested-sounds",
+          "no-application-ids"
+        ],
+        "targetSounds": ["л"],
+        "exerciseType": "recording",
+        "count": 10,
         "language": "uk",
         "theme": "тварини"
       }

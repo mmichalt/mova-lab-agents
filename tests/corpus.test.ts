@@ -10,7 +10,12 @@ import {
 } from '../src/content/generate.ts';
 import { contentRequestSchema } from '../src/content/schemas.ts';
 import { testEnv } from './drafts-harness.ts';
-import { assessGeneration } from './properties.ts';
+import {
+  assessGeneration,
+  EXPECTED_PROPERTIES_VERSION,
+  qualityIds,
+  THERAPIST_RUBRIC_VERSION,
+} from './properties.ts';
 
 const corpus = JSON.parse(readFileSync(new URL('../evals/corpus.json', import.meta.url), 'utf8'));
 const runtime = JSON.parse(readFileSync(new URL('../evals/runtime.json', import.meta.url), 'utf8'));
@@ -19,8 +24,11 @@ const defaults = loadConfig(testEnv({ SERVICE_TOKEN: 'x' }));
 
 const cases = corpus.cases as Array<{
   id: string;
+  holdout: boolean;
   request: unknown;
   expect: {
+    propertiesVersion: string;
+    properties: string[];
     targetSounds: string[];
     exerciseType: string;
     count: number;
@@ -30,6 +38,14 @@ const cases = corpus.cases as Array<{
 }>;
 
 test('corpus covers Р, Л, and both with property expectations', () => {
+  assert.equal(cases.length, 20);
+  assert.equal(corpus.propertiesVersion, EXPECTED_PROPERTIES_VERSION);
+  assert.equal(corpus.rubricVersion, THERAPIST_RUBRIC_VERSION);
+  assert.equal(corpus.therapistRubric.version, THERAPIST_RUBRIC_VERSION);
+  assert.deepEqual(
+    cases.filter((item) => item.holdout).map((item) => item.id),
+    corpus.holdoutCaseIds,
+  );
   const sounds = new Set(cases.map((c) => c.expect.targetSounds.join('+')));
   assert.ok(sounds.has('р'));
   assert.ok(sounds.has('л'));
@@ -41,6 +57,8 @@ test('corpus covers Р, Л, and both with property expectations', () => {
     assert.equal(request.theme, item.expect.theme);
     assert.equal(item.expect.exerciseType, 'recording');
     assert.equal(item.expect.language, 'uk');
+    assert.equal(item.expect.propertiesVersion, EXPECTED_PROPERTIES_VERSION);
+    assert.deepEqual(item.expect.properties, qualityIds);
   }
 });
 
@@ -114,7 +132,7 @@ test('quality properties judge shape, not exact wording', () => {
     true,
   );
 
-  const mixed = contentRequestSchema.parse(cases.find((c) => c.id === 'rl-mixed-animals')?.request);
+  const mixed = contentRequestSchema.parse(cases.find((c) => c.id === 'rl-animals')?.request);
   const onlyR = {
     ...ok,
     proposals: ok.proposals.map((p) => ({ ...p, targetSound: 'р', phrase: 'Риба пливе' })),
