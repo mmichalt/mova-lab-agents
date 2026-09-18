@@ -2,6 +2,7 @@ import type { Request } from 'express';
 import { z } from 'zod';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
+import type { WorkflowJobProducer } from '../jobs.ts';
 import {
   type AttemptRecorder,
   type Clock,
@@ -157,14 +158,15 @@ export async function createContentGeneration(options: {
   signal?: AbortSignal;
   canReview?: boolean;
   admission?: WorkflowAdmission;
+  queue?: WorkflowJobProducer;
 }): Promise<{ created: boolean; resource: WorkflowResource }> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
     throw new AppError(400, 'VALIDATION_ERROR', 'Invalid content request.');
   }
   const existing = options.store.getRunByIdempotency(options.ownerId, options.idempotencyKey);
-  const release = existing ? undefined : options.admission?.tryAcquire();
-  if (options.admission && !existing && !release) {
+  const release = existing || options.queue ? undefined : options.admission?.tryAcquire();
+  if (options.admission && !options.queue && !existing && !release) {
     const raced = options.store.getRunByIdempotency(options.ownerId, options.idempotencyKey);
     if (raced) {
       return {
@@ -192,7 +194,11 @@ export async function createContentGeneration(options: {
         ),
       };
     }
-    await executePersistedRun(options, opened.run, parsed.data);
+    if (options.queue) {
+      await options.queue.enqueueGeneration(opened.run.id, opened.run.stateVersion);
+    } else {
+      await executePersistedRun(options, opened.run, parsed.data);
+    }
     const latest = options.store.getRun(opened.run.id);
     if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
     return {
@@ -223,6 +229,14 @@ export async function resumeContentGeneration(options: ExecutionOptions & { id: 
     if (!options.canReview) {
       throw new AppError(403, 'FORBIDDEN', 'Content Admin authority is required.');
     }
+  }
+  if (options.queue) {
+    if (importing) {
+      await options.queue.enqueueImport(run.id, run.stateVersion);
+    } else {
+      await options.queue.enqueueGeneration(run.id, run.stateVersion);
+    }
+  } else if (importing) {
     assertImportRecoveryCompatible(options.store, run);
     await executeApprovedImport(options, run);
   } else {
@@ -420,7 +434,11 @@ async function decideContentGeneration(
   const latest = options.store.getRun(run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
   if (decision.decision === 'approved') {
-    await executeApprovedImport(options, latest);
+    if (options.queue) {
+      await options.queue.enqueueImport(latest.id, latest.stateVersion);
+    } else {
+      await executeApprovedImport(options, latest);
+    }
   }
   const imported = options.store.getRun(run.id);
   if (!imported) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');

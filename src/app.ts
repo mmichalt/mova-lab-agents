@@ -12,6 +12,7 @@ import {
 } from './content/runs.ts';
 import { generateContentDrafts } from './content/workflow.ts';
 import { AppError } from './errors.ts';
+import type { WorkflowJobProducer } from './jobs.ts';
 import { type Clock, clientDisconnected } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
 import type { WorkflowStore } from './persist/store.ts';
@@ -39,6 +40,7 @@ export function createApp(options: {
   clock?: Clock;
   maxProviderRequests?: number;
   maxInFlightWorkflows?: number;
+  queue?: WorkflowJobProducer;
 }) {
   const app = express();
   const admission = createInFlightAdmission(options.maxInFlightWorkflows ?? 1);
@@ -101,9 +103,12 @@ export function createApp(options: {
         clock: options.clock,
         maxProviderRequests: options.maxProviderRequests,
         signal,
-        admission,
+        admission: options.queue ? undefined : admission,
+        queue: options.queue,
       });
-      res.status(created.created ? 201 : 200).json(created.resource);
+      res
+        .status(options.queue && created.created ? 202 : created.created ? 201 : 200)
+        .json(created.resource);
     });
   });
   app.get('/workflows/:id', auth, (req, res, next) => {
@@ -123,20 +128,22 @@ export function createApp(options: {
   });
   app.post('/workflows/:id/approve', auth, requireContentAdmin, json, (req, res, next) => {
     void withRequestAbort(res, next, async (signal) => {
-      res.json(
-        await approveContentGeneration({
-          store: requireStore(options.store),
-          config: options.config,
-          logger: res.locals.log as Logger,
-          requestId: res.locals.requestId as string,
-          ownerId: actorIdFrom(req),
-          id: String(req.params.id),
-          body: req.body,
-          clock: options.clock,
-          signal,
-          canReview: true,
-        }),
-      );
+      const store = requireStore(options.store);
+      const existing = store.getApproval(String(req.params.id));
+      const resource = await approveContentGeneration({
+        store,
+        config: options.config,
+        logger: res.locals.log as Logger,
+        requestId: res.locals.requestId as string,
+        ownerId: actorIdFrom(req),
+        id: String(req.params.id),
+        body: req.body,
+        clock: options.clock,
+        signal,
+        canReview: true,
+        queue: options.queue,
+      });
+      res.status(options.queue && !existing ? 202 : 200).json(resource);
     });
   });
   app.post('/workflows/:id/reject', auth, requireContentAdmin, json, (req, res, next) => {
@@ -153,13 +160,14 @@ export function createApp(options: {
           clock: options.clock,
           signal,
           canReview: true,
+          queue: options.queue,
         }),
       );
     });
   });
   app.post('/workflows/:id/resume', auth, (req, res, next) => {
     void withRequestAbort(res, next, async (signal) => {
-      const release = admission.tryAcquire();
+      const release = options.queue ? () => {} : admission.tryAcquire();
       if (!release) throw capacityError();
       try {
         const resource = await resumeContentGeneration({
@@ -173,8 +181,9 @@ export function createApp(options: {
           maxProviderRequests: options.maxProviderRequests,
           signal,
           canReview: isContentAdmin(req),
+          queue: options.queue,
         });
-        res.json(resource);
+        res.status(options.queue ? 202 : 200).json(resource);
       } finally {
         release();
       }

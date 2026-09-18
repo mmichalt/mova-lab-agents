@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "node --env-file-if-exists=.env src/server.ts",
+    "worker": "node --env-file-if-exists=.env src/worker.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=.env dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -19,6 +20,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
+    "bullmq": "^5.81.5",
     "express": "^5.2.1",
     "pino": "^10.3.1",
     "zod": "^4.5.4"
