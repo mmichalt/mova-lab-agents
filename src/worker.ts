@@ -5,20 +5,33 @@ import { closeWorkflowWorker, createWorkflowQueue, createWorkflowWorker } from '
 import { createLogger } from './logger.ts';
 import { getObservability } from './observability.ts';
 import { openWorkflowStore } from './persist/store.ts';
+import { inspectReadiness } from './ready.ts';
 
-export function startWorker(config: Config) {
+export async function startWorker(config: Config) {
   const logger = createLogger(config.logLevel);
   const store = openWorkflowStore(config.sqlitePath);
   const queue = createWorkflowQueue(config.redisUrl, logger);
-  const worker = createWorkflowWorker({
-    config,
-    logger,
-    store,
-    redisUrl: config.redisUrl,
-    queue,
-    observability: getObservability(config),
-  });
-  return { logger, store, queue, worker, observability: getObservability(config) };
+  const observability = getObservability(config);
+  try {
+    const readiness = await inspectReadiness({ config, store, queue, role: 'worker' });
+    if (readiness.status !== 'ok') {
+      throw new Error(`Worker readiness failed: ${JSON.stringify(readiness)}`);
+    }
+    const worker = createWorkflowWorker({
+      config,
+      logger,
+      store,
+      redisUrl: config.redisUrl,
+      queue,
+      observability,
+    });
+    return { logger, store, queue, worker, observability };
+  } catch (err) {
+    await queue.close();
+    store.close();
+    await observability.shutdown();
+    throw err;
+  }
 }
 
 function isEntrypoint() {
@@ -31,7 +44,7 @@ function isEntrypoint() {
 if (isEntrypoint()) {
   try {
     const config = loadConfig();
-    const { logger, store, queue, worker, observability } = startWorker(config);
+    const { logger, store, queue, worker, observability } = await startWorker(config);
     logger.info({ sqlitePath: config.sqlitePath, workerId: worker.id }, 'worker ready');
     let stopping = false;
     const stop = (signal: string) => {

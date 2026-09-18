@@ -183,6 +183,13 @@ export function compareWorkflowReports(
         values: { expected: mode, actual: version.mode },
       });
     }
+    const metadataMismatches = byMode.get(mode)?.metadataMismatches;
+    if (metadataMismatches?.length) {
+      inputMismatches.push({
+        field: `${mode}.metadataMismatches`,
+        values: { [mode]: metadataMismatches },
+      });
+    }
   }
 
   const keys = new Set<string>();
@@ -223,9 +230,10 @@ export function compareWorkflowReports(
     }),
   ) as Record<WorkflowMode, WorkflowSummary | null>;
   const humanReview = buildHumanReview(byMode);
-  const hasIncomplete = runs.some((run) =>
-    WORKFLOW_MODES.some((mode) => run.workflows[mode]?.status === 'incomplete'),
-  );
+  const hasIncomplete =
+    runs.some((run) =>
+      WORKFLOW_MODES.some((mode) => run.workflows[mode]?.status === 'incomplete'),
+    ) || [...byMode.values()].some((report) => report.status === 'incomplete');
 
   return {
     reportVersion: WORKFLOW_COMPARISON_REPORT_VERSION,

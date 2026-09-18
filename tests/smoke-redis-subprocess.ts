@@ -26,8 +26,10 @@ if (process.argv[2] === '--child') {
 
 const queueName = `mova-lab-subprocess-smoke-${process.pid}-${Date.now()}`;
 const queue = new Queue(queueName, { connection: { url: redisUrl } });
-const seenImports = new Set<string>();
+const importedDrafts = new Map<string, string>();
+const responseIds: string[] = [];
 let requestCount = 0;
+let createdDrafts = 0;
 let releaseFirstRequest = () => {};
 const firstRequest = new Promise<void>((resolve) => {
   releaseFirstRequest = resolve;
@@ -41,10 +43,16 @@ const server = createServer(async (request, response) => {
   for await (const chunk of request) body += chunk;
   const { importKey } = JSON.parse(body) as { importKey: string };
   requestCount += 1;
-  seenImports.add(importKey);
+  let draftId = importedDrafts.get(importKey);
+  if (!draftId) {
+    createdDrafts += 1;
+    draftId = `draft-${createdDrafts}`;
+    importedDrafts.set(importKey, draftId);
+  }
+  responseIds.push(draftId);
   if (requestCount === 1) await firstRequest;
   response.writeHead(200, { 'content-type': 'application/json' });
-  response.end(JSON.stringify({ id: 'draft-1' }));
+  response.end(JSON.stringify({ id: draftId }));
 });
 server.listen(0, '127.0.0.1');
 await once(server, 'listening');
@@ -106,7 +114,9 @@ try {
     async () => (await queue.getJob(jobId)) === undefined,
     'redelivered job completion',
   );
-  assert.equal(seenImports.size, 1, 'receiver must not create duplicate drafts');
+  assert.equal(requestCount, 2, 'the import must be redelivered');
+  assert.equal(createdDrafts, 1, 'the receiver must create one draft');
+  assert.deepEqual(responseIds, ['draft-1', 'draft-1'], 'the receiver must reuse the draft');
   console.log('Redis subprocess smoke passed: worker death, redelivery, and idempotent import.');
 } finally {
   child.kill('SIGKILL');

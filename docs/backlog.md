@@ -3,9 +3,9 @@
 **Status:** AG-001 through AG-027 and AG-029 are marked complete. AG-028's
 tooling is implemented, but its live comparison evidence remains pending.
 AG-030 follow-up is implemented in both repositories, while its status/evidence
-still needs reconciliation. AG-024 implementation is complete across both
-repositories; sibling merge/rollout remains pending. AG-031 and MOVA-321 have
-implementation complete, with live/rollout evidence still pending.
+still needs reconciliation. AG-024 and MOVA-321 are merged across both
+repositories; rollout evidence remains pending. AG-031 implementation is
+complete, with live evidence still pending.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -1926,7 +1926,7 @@ priority, P2 normal priority, and P3 low priority.
 - Live local reports and therapist ratings remain explicitly pending until they
   actually exist; once recorded, AG-028 contains an evidence-based conclusion.
 
-**Verification:** Focused regressions plus `npm test` (275 passed),
+**Verification:** Focused regressions plus `npm test` (277 passed),
 `npm run typecheck`, `npm run lint`, and `npm run build` pass. The Redis
 subprocess smoke is available as `npm run smoke:redis:subprocess` but needs a
 reachable Redis instance; the three opt-in local evaluation modes and therapist
@@ -1946,8 +1946,8 @@ validation claims.
 
 **Dependencies:** [AG-024](#ag-024)
 
-**Status:** Implementation complete on current `main`; sibling quality gates and
-rollout evidence remain pending.
+**Status:** Implementation merged to sibling `main`; quality gates pass and
+rollout evidence remains pending.
 
 **Priority:** High for merge/rollout; normal for the UI and HTTP corrections below.
 
@@ -1968,12 +1968,12 @@ the recovery-label, stable-202, and completed-import invalidation corrections.
 
 **Review findings:**
 
-1. **P1 — The completed async handoff is not on `mova-lab` main.** The reviewed
-   branch changes 15 server/client/docs files, while `main` still lacks the AG-024
-   delta for the short async timeout, queued status/polling behavior, and real
-   import-progress presentation. Merge PR #129 (or its reviewed successor), run
-   the sibling quality gates, and verify the deployed Nest configuration points
-   to the queued agents API before calling Milestone 3 rolled out.
+1. **P1 — The completed async handoff was not on `mova-lab` main at review
+   time.** PR [#129](https://github.com/mmichalt/mova-lab/pull/129) merged the
+   AG-024 handoff and PR [#130](https://github.com/mmichalt/mova-lab/pull/130)
+   merged the MOVA-321 corrections; both passed CI. Verify the deployed Nest
+   configuration points to the queued agents API before calling Milestone 3
+   rolled out.
 
 2. **P2 — An expired `RUNNING` lease is still labelled as active work.**
    `content-generation-page.tsx:38-45` only gives resumable `FAILED` runs a recovery
@@ -2010,12 +2010,12 @@ the recovery-label, stable-202, and completed-import invalidation corrections.
 - Owner/non-owner teacher and permitted/non-permitted Content Admin behavior,
   bounded upstream bodies, and safe text rendering keep their current regressions.
 
-**Verification:** Focused generation server/client suites pass (3 server and 10
-client tests). Sibling lint, server tests (569 passed, 2 skipped), client tests
-(323 passed), build, CMS type-check, and harness checks pass. Against the queued
-agents service, verify create `202`, reload/polling, expired lease recovery,
-approval/import, partial receipt links, idempotent replay, and the refreshed
-Content Studio list.
+**Verification:** PRs #129 and #130 are merged to sibling `main` with successful
+CI. Focused generation server/client suites pass (3 server and 10 client tests).
+Sibling lint, server tests (569 passed, 2 skipped), client tests (323 passed),
+build, CMS type-check, and harness checks pass. Against the queued agents service,
+verify create `202`, reload/polling, expired lease recovery, approval/import,
+partial receipt links, idempotent replay, and the refreshed Content Studio list.
 
 **Out of scope:** WebSockets, a generation-review queue redesign, new client state
 libraries, publication automation, and broader Content Studio UI changes.
