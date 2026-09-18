@@ -316,6 +316,7 @@ npm run typecheck   # tsc --noEmit
 npm test            # node:test tests/**/*.test.ts (no Ollama)
 npm run smoke:local # optional live GPU/model smoke; never part of CI
 npm run smoke:tools # optional live native tool-call smoke with stub search; never part of CI
+npm run smoke:redis # optional Redis/BullMQ recovery smoke with fake HTTP services
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
 ```
@@ -323,7 +324,9 @@ npm start           # node --env-file-if-exists=.env dist/server.js
 CI runs `npx biome ci .`, `npm run typecheck`, `npm test`, `npm run build`, and
 `docker compose config`. Ordinary automated tests and CI do not need GPU,
 models, Ollama, or cloud credentials, and they do not pull models or invoke
-live inference.
+live inference. `npm run smoke:redis` is separate: it requires a reachable
+Redis instance and verifies reconciliation, asynchronous approval/import, and
+bounded redelivery without live model inference.
 
 ## Docker
 

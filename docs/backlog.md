@@ -1,10 +1,10 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020 and AG-029 are marked complete. AG-021 has
-implementation awaiting acceptance. AG-030 agents-repo follow-up is in progress
-in this working tree; sibling `mova-lab` findings remain. AG-022 and AG-023
-implementation is in progress pending Redis failure-injection verification and
-review/PR handoff. Other remaining tickets are unstarted.
+**Status:** AG-001 through AG-020, AG-022, AG-023, and AG-029 are marked
+complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
+follow-up is in progress in this working tree; sibling `mova-lab` findings
+remain. AG-024 implementation is complete across both repositories;
+merge/rollout is pending. Other remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -61,9 +61,9 @@ are stable identifiers, not issue numbers from an external tracker.
 
 ### Milestone 3 — Asynchronous execution
 
-- [ ] [AG-022 — Redis/BullMQ producer and worker](#ag-022)
-- [ ] [AG-023 — Reconciliation and bounded redelivery](#ag-023)
-- [ ] [AG-024 — Worker recovery tests and asynchronous UI](#ag-024)
+- [x] [AG-022 — Redis/BullMQ producer and worker](#ag-022)
+- [x] [AG-023 — Reconciliation and bounded redelivery](#ag-023)
+- [x] [AG-024 — Worker recovery tests and asynchronous UI](#ag-024)
 
 ### Milestone 4 — Dynamic orchestration and measurement
 
@@ -1492,8 +1492,7 @@ Accepted work is recoverable, and repeated delivery does not duplicate imports.
 **Stage:** 8  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-020](#ag-020)  
-**Status:** In progress — implementation and local verification complete; Redis
-verification and review/PR handoff remain.
+**Status:** Complete
 
 **Problem and learning objective:** Separate durable acceptance from execution
 and learn producers, consumers, and acknowledgements.
@@ -1519,8 +1518,13 @@ dispatch, and graceful shutdown.
 **Out of scope:** Multiple hosts, BullMQ Flow graphs, separate service repositories,
 queue payload copies of content, and exactly-once delivery.
 
-Recorded locally: the asynchronous endpoint/worker tests pass with fake queues;
-Redis-backed verification remains outstanding.
+Recorded on 2026-09-18: `npm run smoke:redis` passed against Redis 7.4.11 with
+fake Ollama and Mova-Lab HTTP services: a real `202` submission reached the
+persisted approval checkpoint, approval returned `202`, import completed 2/2,
+and the worker shut down within the bounded drain. The smoke also caught and
+fixed the producer startup race by waiting for BullMQ readiness before the first
+command. `npm test` (248 passing), `npm run typecheck`, `npm run lint`, and
+`npm run build` pass without live inference.
 
 ### AG-023
 
@@ -1528,8 +1532,7 @@ Redis-backed verification remains outstanding.
 **Stage:** 8  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-022](#ag-022)  
-**Status:** In progress — implementation and local verification complete; Redis
-failure-injection verification and review/PR handoff remain.
+**Status:** Complete
 
 **Problem and learning objective:** Close the persist-before-enqueue failure window
 and understand why queue locks do not replace workflow idempotency.
@@ -1551,9 +1554,12 @@ Redis-outage behavior.
 expire claims, delete/recreate queue jobs, exhaust attempts, and verify persisted
 limits remain authoritative.
 
-Recorded locally: `npm test` (246 passing), `npm run typecheck`, `npm run lint`,
-and `npm run build`. Redis-backed failure-injection verification has not yet been
-run, so this ticket is not marked complete.
+Recorded on 2026-09-18: the real Redis smoke deleted a committed generation job,
+reconciled it under its stable job ID, and verified a retryable provider failure
+stops at the persisted three-delivery limit without resetting workflow budgets.
+An unavailable Redis endpoint returned `QUEUE_UNAVAILABLE` within the one-second
+readiness bound. `npm run smoke:redis`, `npm test` (248 passing),
+`npm run typecheck`, `npm run lint`, and `npm run build` pass.
 
 **Out of scope:** Transactional outbox, automatic unlimited re-drive, separate
 dead-letter infrastructure, and distributed provider rate limiting.
@@ -1564,7 +1570,8 @@ dead-letter infrastructure, and distributed provider rate limiting.
 **Stage:** 8  
 **Repositories:** `mova-lab-agents` and `mova-lab` — separate changes per repository  
 **Dependencies:** [AG-021](#ag-021), [AG-023](#ag-023)  
-**Status:** Unstarted
+**Status:** Complete — implementation delivered in `mova-lab-agents` PR #23 and
+`mova-lab` PR #129; merge/rollout pending.
 
 **Problem and learning objective:** Prove that accepted work is independent of
 HTTP connections and make asynchronous states understandable to a teacher.
@@ -1585,6 +1592,15 @@ synchronous endpoint after callers migrate.
 **Verification:** Run a failure-injection integration suite with fake LLM calls,
 then sibling UI/API tests for asynchronous responses, refresh/reopen, and failures.
 Keep live model inference disabled.
+
+Recorded on 2026-09-18: agents-repo Redis smoke and the existing persisted
+checkpoint/recovery tests passed; sibling server tests passed (51 focused tests),
+client tests passed (16 focused tests), and both sibling lint/typecheck gates
+passed. The migrated proxy/UI returns `202`, polls `PENDING`/`RUNNING`, preserves
+the idempotency key across reload/reopen, exposes resumable failures, and renders
+partial import progress. The legacy `/content-drafts` route remains
+development-only for direct callers during rollout; the deployed Mova-Lab caller
+uses the asynchronous workflow routes.
 
 **Out of scope:** WebSocket notifications, multi-host load testing, and broader
 Teacher UI redesign.
