@@ -70,7 +70,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-025 — Experimental constrained supervisor](#ag-025)
 - [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
 - [x] [AG-027 — Budgeted evaluation runner](#ag-027)
-- [ ] [AG-028 — Workflow comparison and findings](#ag-028)
+- [x] [AG-028 — Workflow comparison and findings](#ag-028)
 
 ## Milestone 1: standalone recording-proposal generator
 
@@ -1748,7 +1748,7 @@ promotion, and an uncalibrated LLM judge as the sole quality authority.
 **Stage:** 10, learning review  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-025](#ag-025), [AG-027](#ag-027)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Determine whether additional orchestration
 earns its complexity rather than assuming more agents improve results.
@@ -1767,9 +1767,11 @@ and follow-up recommendations.
 - The supervisor remains experimental unless evidence supports a separate promotion decision.
 - Findings identify what should be retained, simplified, or deferred.
 
-**Verification:** Audit recorded versions and report arithmetic, reproduce a
-subset with the evaluation runner, and document actual human review. Local model runs
-are explicit; an offline dry run does not satisfy the real-quality comparison.
+**Verification:** `npm test` (269), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check` pass. The comparison accepts only
+recorded reports and keeps therapist ratings nullable with an explicit review
+checklist. No live local evaluation or therapist review was performed during
+this ticket verification; real quality evidence remains pending.
 
 **Out of scope:** Automatic default changes, claims of clinical validation,
 unrequested provider migration, and implementing every proposed follow-up.

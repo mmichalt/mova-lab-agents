@@ -126,6 +126,12 @@ export type EvaluationCaseReport = {
   status: 'complete' | 'incomplete';
   incompleteReason?: string;
   outcomes: {
+    outcome:
+      | 'initial_success'
+      | 'revision_assisted_success'
+      | 'refusal'
+      | 'operational_failure'
+      | 'incomplete';
     schema: boolean;
     content: boolean;
     targetCoverage: boolean;
@@ -139,6 +145,7 @@ export type EvaluationCaseReport = {
       dimensions: Record<string, number | null>;
       comments: string | null;
     };
+    supervisorActionCounts: Record<string, number>;
     failure: { status: string; code: string | null } | null;
   };
   latencyMs: number | null;
@@ -299,6 +306,7 @@ export async function evaluateCorpus(
               status?: string;
               error?: { code?: string };
               revisionCount?: number;
+              supervisor?: { history?: Array<{ action?: string }> } | null;
             })
           : undefined;
       const errorCode = execution.errorCode ?? null;
@@ -322,6 +330,7 @@ export async function evaluateCorpus(
         status: task.status,
         ...(incompleteReason ? { incompleteReason } : {}),
         outcomes: {
+          outcome: classifyOutcome(task.status, parsed?.status, parsed?.revisionCount, errorCode),
           schema: findings.find((item) => item.id === 'schema-valid')?.passed === true,
           content: findings
             .filter((item) => item.id !== 'schema-valid')
@@ -333,6 +342,7 @@ export async function evaluateCorpus(
           revisions: parsed?.revisionCount ?? null,
           proposals: extractProposals(execution.result),
           therapist: emptyTherapistReview(),
+          supervisorActionCounts: countSupervisorActions(parsed?.supervisor),
           failure:
             parsed?.status === 'FAILED' || errorCode
               ? {
@@ -443,6 +453,7 @@ function incompleteReport(task: Task, reason: string): EvaluationCaseReport {
     status: 'incomplete',
     incompleteReason: reason,
     outcomes: {
+      outcome: 'incomplete',
       schema: false,
       content: false,
       targetCoverage: false,
@@ -451,6 +462,7 @@ function incompleteReport(task: Task, reason: string): EvaluationCaseReport {
       revisions: null,
       proposals: null,
       therapist: emptyTherapistReview(),
+      supervisorActionCounts: {},
       failure: { status: 'incomplete', code: reason },
     },
     latencyMs: null,
@@ -560,7 +572,33 @@ function stateResult(state: GenerationState) {
     proposals: withLocalIds(state.candidate ?? []),
     checks: state.checks,
     requiresHumanApproval: state.status === 'READY_FOR_REVIEW',
+    errorCode: state.error?.code ?? null,
+    supervisor: state.supervisor ?? null,
   };
+}
+
+function classifyOutcome(
+  runStatus: EvaluationCaseReport['status'],
+  workflowStatus: string | undefined,
+  revisionCount: number | undefined,
+  errorCode: string | null,
+): EvaluationCaseReport['outcomes']['outcome'] {
+  if (runStatus === 'incomplete') return 'incomplete';
+  if (workflowStatus === 'READY_FOR_REVIEW') {
+    return revisionCount && revisionCount > 0 ? 'revision_assisted_success' : 'initial_success';
+  }
+  if (workflowStatus === 'REFUSED' || errorCode === 'MODEL_REFUSED') return 'refusal';
+  return 'operational_failure';
+}
+
+function countSupervisorActions(
+  supervisor: { history?: Array<{ action?: string }> } | null | undefined,
+) {
+  const counts: Record<string, number> = {};
+  for (const record of supervisor?.history ?? []) {
+    if (record.action) counts[record.action] = (counts[record.action] ?? 0) + 1;
+  }
+  return counts;
 }
 
 export function sumTokens(values: Array<number | null>, providerRequests = 0) {

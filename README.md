@@ -15,6 +15,31 @@ Copy `.env.example` to `.env` for local use. `npm run dev` and `npm start` load
 it through Node's `--env-file-if-exists=.env`. Compose interpolates the same
 file on the host and does not copy it into the image. Do not commit `.env`.
 
+## Offline workflow comparisons
+
+`npm test`, CI, and the ordinary build never run model inference. After separate
+opt-in local runs have produced one AG-027 report for each mode, compare the
+recorded reports with a manifest:
+
+```json
+{
+  "reports": [
+    { "mode": "single-call", "path": "reports/single-call.json" },
+    { "mode": "deterministic", "path": "reports/deterministic.json" },
+    { "mode": "supervisor", "path": "reports/supervisor.json" }
+  ]
+}
+```
+
+Run `npm run eval:compare -- evals/comparison-input.json` from the repository
+root. Paths are relative to the manifest; redirect the JSON to a versioned
+file under `evals/comparisons/` when retaining a report. The comparison matches
+case and repetition keys, exposes incomplete and holdout runs, checks shared
+corpus/schema/model/runtime inputs, and keeps prompt/workflow versions visible.
+Therapist scores remain nullable until an actual therapist completes the review
+checklist; a dry run is not quality evidence. A completed comparison therefore
+requires separate local evaluation and actual therapist review.
+
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `3001` in `.env.example`; code default `3000` | Host listen port for `npm run dev` / `npm start`. Use `3001` so Mova-Lab's Nest API can keep host port `3000`. Empty values use `3000`, which collides with Nest. `0` binds an ephemeral port. Compose ignores this for publishing: the container always listens on `3000`, and the host mapping is `AGENTS_HOST_PORT` (default `3001`). |
