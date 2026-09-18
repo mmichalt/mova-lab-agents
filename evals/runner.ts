@@ -527,7 +527,7 @@ async function runLive(mode: EvaluationMode) {
         requestId: `${item.id}-${repetition}-${randomUUID()}`,
         request,
         maxProviderRequests: maxCalls,
-        supervisor: config.experimentalSupervisor,
+        supervisor: mode === 'supervisor',
         observability,
       });
       return {
