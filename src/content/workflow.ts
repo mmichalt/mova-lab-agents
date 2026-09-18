@@ -137,6 +137,7 @@ type RunOptions = {
   request: ContentRequest;
   clock?: Clock;
   maxProviderRequests?: number;
+  outputTokenBudget?: { remaining: number; reserved?: number; parallel?: number };
   maxRevisions?: number;
   signal?: AbortSignal;
   resume?: WorkflowResume;
@@ -276,6 +277,7 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     signal: controller.signal,
     clock,
     usage: state.usage,
+    outputTokenBudget: options.outputTokenBudget,
     attempts: options.attempts,
     observed: {
       modelTag: state.modelTag,
@@ -583,13 +585,20 @@ async function runChecks(
     request: state.request,
     proposals,
   };
-  const agePromise = existing.get('age') ?? reviewAge(review).then(remember);
-  const languagePromise = existing.get('language') ?? reviewLanguage(review).then(remember);
-  const [age, language] = await settleReviews(
-    Promise.resolve(agePromise),
-    Promise.resolve(languagePromise),
-  );
-  return [content, age, language];
+  const budget = options.outputTokenBudget;
+  const parallelReviews = budget && !existing.has('age') && !existing.has('language');
+  if (parallelReviews) budget.parallel = 2;
+  try {
+    const agePromise = existing.get('age') ?? reviewAge(review).then(remember);
+    const languagePromise = existing.get('language') ?? reviewLanguage(review).then(remember);
+    const [age, language] = await settleReviews(
+      Promise.resolve(agePromise),
+      Promise.resolve(languagePromise),
+    );
+    return [content, age, language];
+  } finally {
+    if (parallelReviews) delete budget.parallel;
+  }
 }
 
 function tryRevise(

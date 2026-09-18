@@ -58,6 +58,7 @@ export async function ollamaChat(options: {
   tools?: unknown[];
   allowToolCalls?: boolean;
   temperature: number;
+  numPredict?: number;
   signal: AbortSignal;
   workflowSignal: AbortSignal;
   now?: number;
@@ -71,7 +72,7 @@ export async function ollamaChat(options: {
     options: {
       temperature: options.temperature,
       num_ctx: config.ollamaNumCtx,
-      num_predict: config.ollamaNumPredict,
+      num_predict: options.numPredict ?? config.ollamaNumPredict,
     },
   };
   if (options.format !== undefined) payload.format = options.format;

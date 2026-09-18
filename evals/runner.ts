@@ -293,10 +293,6 @@ export async function evaluateCorpus(
       if ('metadata' in execution && execution.metadata) {
         observedMetadata = { ...observedMetadata, ...execution.metadata };
       }
-      const errorCode = execution.errorCode ?? null;
-      const findings = errorCode
-        ? assessGeneration(task.case.request, undefined)
-        : assessGeneration(task.case.request, execution.result);
       const parsed =
         typeof execution.result === 'object' && execution.result !== null
           ? (execution.result as {
@@ -305,13 +301,19 @@ export async function evaluateCorpus(
               revisionCount?: number;
             })
           : undefined;
+      const errorCode = execution.errorCode ?? null;
+      const findings =
+        errorCode && parsed?.status !== 'FAILED'
+          ? assessGeneration(task.case.request, undefined)
+          : assessGeneration(task.case.request, execution.result);
       const incompleteReason =
-        errorCode ??
-        (typeof outputTokens !== 'number'
+        typeof outputTokens !== 'number'
           ? 'missing_usage'
           : callBudgetExceeded || tokenBudgetExceeded
             ? 'budget_exceeded'
-            : undefined);
+            : errorCode && parsed?.status !== 'FAILED'
+              ? errorCode
+              : undefined;
       task.status = incompleteReason ? 'incomplete' : 'complete';
       task.report = {
         caseId: task.case.id,
@@ -483,13 +485,10 @@ async function runLive() {
       const state = await runContentWorkflow({
         config: {
           ...config,
-          ollamaNumPredict: Math.min(
-            config.ollamaNumPredict,
-            Math.max(1, Math.floor(maxGeneratedTokens / Math.max(1, maxCalls))),
-          ),
           llmAttemptTimeoutMs: timeoutMs,
           workflowTimeoutMs: timeoutMs,
         },
+        outputTokenBudget: { remaining: maxGeneratedTokens },
         logger,
         requestId: `${item.id}-${repetition}-${randomUUID()}`,
         request,
@@ -503,9 +502,18 @@ async function runLive() {
         errorCode: state.error?.code ?? null,
         usage: {
           calls: state.providerRequests,
-          inputTokens: sumTokens(state.usage.map((item) => item.inputTokens)),
-          cachedInputTokens: sumTokens(state.usage.map((item) => item.cachedInputTokens)),
-          outputTokens: sumTokens(state.usage.map((item) => item.outputTokens)),
+          inputTokens: sumTokens(
+            state.usage.map((item) => item.inputTokens),
+            state.providerRequests,
+          ),
+          cachedInputTokens: sumTokens(
+            state.usage.map((item) => item.cachedInputTokens),
+            state.providerRequests,
+          ),
+          outputTokens: sumTokens(
+            state.usage.map((item) => item.outputTokens),
+            state.providerRequests,
+          ),
           estimatedCostUsd: null,
         },
         metadata: {
@@ -555,10 +563,12 @@ function stateResult(state: GenerationState) {
   };
 }
 
-function sumTokens(values: Array<number | null>) {
-  return values.every((value) => value !== null)
-    ? values.reduce((sum, value) => sum + (value ?? 0), 0)
-    : null;
+export function sumTokens(values: Array<number | null>, providerRequests = 0) {
+  return providerRequests > 0 && values.length === 0
+    ? null
+    : values.every((value) => value !== null)
+      ? values.reduce((sum, value) => sum + (value ?? 0), 0)
+      : null;
 }
 
 if (process.argv[1]?.endsWith('/evals/runner.ts') && process.argv.includes('--live')) {

@@ -42,6 +42,7 @@ export type LlmCall = {
   };
   observability?: Observability;
   timing?: ProviderTiming[];
+  outputTokenBudget?: { remaining: number; reserved?: number; parallel?: number };
   expectedModelTag?: string | null;
   expectedModelDigest?: string | null;
 };
@@ -115,9 +116,24 @@ async function chatOnce(
 ): Promise<ChatAttempt> {
   const attemptId = randomUUID();
   const started = options.clock.now();
+  const usageStart = options.usage.length;
+  let reservedOutputTokens: number | undefined;
+  const outputTokenBudget = options.outputTokenBudget;
+  const settleOutputTokenBudget = () => {
+    if (reservedOutputTokens === undefined) return;
+    const outputTokens = options.usage[usageStart]?.outputTokens;
+    if (outputTokens != null && outputTokenBudget) {
+      outputTokenBudget.remaining += reservedOutputTokens - outputTokens;
+    }
+    if (outputTokenBudget) {
+      outputTokenBudget.reserved = (outputTokenBudget.reserved ?? 0) - reservedOutputTokens;
+    }
+    reservedOutputTokens = undefined;
+  };
   let attempt: ChatAttempt;
   let timingRecorded = false;
   try {
+    reservedOutputTokens = reserveOutputTokens(options);
     attempt = await withSpan(
       options.observability,
       'llm.provider_attempt',
@@ -142,6 +158,7 @@ async function chatOnce(
           tools: options.tools,
           allowToolCalls: options.allowToolCalls,
           temperature: options.temperature,
+          numPredict: reservedOutputTokens,
           signal: attemptSignal(options.limits, options.signal, options.clock.now()),
           workflowSignal: options.signal,
           now: options.clock.now(),
@@ -161,6 +178,7 @@ async function chatOnce(
         return result;
       },
     );
+    settleOutputTokenBudget();
     attempt = { ...attempt, wallDurationMs: Math.max(0, options.clock.now() - started) };
     options.timing?.push({
       wallDurationMs: attempt.wallDurationMs ?? null,
@@ -197,6 +215,7 @@ async function chatOnce(
     options.observed.ollamaVersion ??= attempt.ollamaVersion;
     options.observed.quantization ??= attempt.quantization;
   } catch (err) {
+    settleOutputTokenBudget();
     if (!timingRecorded) {
       options.timing?.push({
         wallDurationMs: Math.max(0, options.clock.now() - started),
@@ -221,6 +240,19 @@ async function chatOnce(
   }
   if (finish) finishAttempt(options, reservation, attempt);
   return attempt;
+}
+
+function reserveOutputTokens(options: LlmCall) {
+  if (!options.outputTokenBudget) return undefined;
+  const parallel = Math.max(1, options.outputTokenBudget.parallel ?? 1);
+  const available = options.outputTokenBudget.remaining + (options.outputTokenBudget.reserved ?? 0);
+  const reserved = Math.min(options.config.ollamaNumPredict, Math.floor(available / parallel));
+  if (reserved < 1) {
+    throw new AppError(503, 'PROVIDER_BUDGET_EXHAUSTED', 'The output token budget was exhausted.');
+  }
+  options.outputTokenBudget.remaining -= reserved;
+  options.outputTokenBudget.reserved = (options.outputTokenBudget.reserved ?? 0) + reserved;
+  return reserved;
 }
 
 function parseStructured<T>(schema: z.ZodType<T>, options: ChatOptions, content: string): T {

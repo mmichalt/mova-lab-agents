@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { evaluateCorpus, loadCorpus } from '../evals/runner.ts';
+import { evaluateCorpus, loadCorpus, sumTokens } from '../evals/runner.ts';
 
 const corpus = loadCorpus();
 const validResult = (requestId: string, revisionCount = 1) => ({
@@ -121,4 +121,25 @@ test('missing generated-token usage stops before the next submission', async () 
   assert.equal(report.status, 'incomplete');
   assert.equal(report.summary.incompleteRuns, 3);
   assert.equal(report.incomplete[0]?.reason, 'missing_usage');
+});
+
+test('terminal workflow failures count as completed evaluations', async () => {
+  const report = await evaluateCorpus(
+    { ...corpus, cases: corpus.cases.slice(0, 1), holdoutCaseIds: [] },
+    async () => ({
+      result: { ...validResult('failed'), status: 'FAILED' },
+      errorCode: 'MODEL_REFUSED',
+      usage: { calls: 1, outputTokens: 1 },
+    }),
+  );
+
+  assert.equal(report.status, 'complete');
+  assert.equal(report.summary.completedRuns, 3);
+  assert.equal(report.summary.incompleteRuns, 0);
+  assert.equal(report.summary.failures.MODEL_REFUSED, 3);
+});
+
+test('provider requests without usage samples report unknown token usage', () => {
+  assert.equal(sumTokens([], 1), null);
+  assert.equal(sumTokens([], 0), 0);
 });
