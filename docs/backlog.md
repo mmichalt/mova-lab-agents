@@ -3,8 +3,8 @@
 **Status:** AG-001 through AG-020, AG-022, AG-023, and AG-029 are marked
 complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
 follow-up is in progress in this working tree; sibling `mova-lab` findings
-remain. AG-024 is in progress across both repositories. Other remaining
-tickets are unstarted.
+remain. AG-024 implementation is complete across both repositories;
+merge/rollout is pending. Other remaining tickets are unstarted.
 
 Read the [architecture and learning plan](architecture-plan.md) for the complete
 design and rationale. Start with AG-001 and follow dependencies. Ticket numbers
@@ -63,7 +63,7 @@ are stable identifiers, not issue numbers from an external tracker.
 
 - [x] [AG-022 — Redis/BullMQ producer and worker](#ag-022)
 - [x] [AG-023 — Reconciliation and bounded redelivery](#ag-023)
-- [ ] [AG-024 — Worker recovery tests and asynchronous UI](#ag-024)
+- [x] [AG-024 — Worker recovery tests and asynchronous UI](#ag-024)
 
 ### Milestone 4 — Dynamic orchestration and measurement
 
@@ -1570,7 +1570,8 @@ dead-letter infrastructure, and distributed provider rate limiting.
 **Stage:** 8  
 **Repositories:** `mova-lab-agents` and `mova-lab` — separate changes per repository  
 **Dependencies:** [AG-021](#ag-021), [AG-023](#ag-023)  
-**Status:** Unstarted
+**Status:** Complete — implementation delivered in `mova-lab-agents` PR #23 and
+`mova-lab` PR #129; merge/rollout pending.
 
 **Problem and learning objective:** Prove that accepted work is independent of
 HTTP connections and make asynchronous states understandable to a teacher.
@@ -1591,6 +1592,15 @@ synchronous endpoint after callers migrate.
 **Verification:** Run a failure-injection integration suite with fake LLM calls,
 then sibling UI/API tests for asynchronous responses, refresh/reopen, and failures.
 Keep live model inference disabled.
+
+Recorded on 2026-09-18: agents-repo Redis smoke and the existing persisted
+checkpoint/recovery tests passed; sibling server tests passed (51 focused tests),
+client tests passed (16 focused tests), and both sibling lint/typecheck gates
+passed. The migrated proxy/UI returns `202`, polls `PENDING`/`RUNNING`, preserves
+the idempotency key across reload/reopen, exposes resumable failures, and renders
+partial import progress. The legacy `/content-drafts` route remains
+development-only for direct callers during rollout; the deployed Mova-Lab caller
+uses the asynchronous workflow routes.
 
 **Out of scope:** WebSocket notifications, multi-host load testing, and broader
 Teacher UI redesign.
