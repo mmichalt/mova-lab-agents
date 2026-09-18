@@ -44,10 +44,15 @@ export function createWorkflowQueue(redisUrl: string, logger?: Logger): Workflow
     try {
       const jobId = workflowJobId(name, runId, stateVersion);
       const existing = await queue.getJob(jobId);
-      if (existing && (await existing.getState()) === 'failed') {
-        await existing.retry('failed');
-      } else {
+      if (!existing) {
         await queue.add(name, { runId }, { jobId });
+      } else {
+        const state = await existing.getState();
+        if (state === 'failed') await existing.retry('failed');
+        if (state === 'completed') {
+          await existing.remove();
+          await queue.add(name, { runId }, { jobId });
+        }
       }
     } catch {
       throw new AppError(503, 'QUEUE_UNAVAILABLE', 'Workflow queue is unavailable.');

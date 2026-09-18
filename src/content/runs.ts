@@ -295,18 +295,26 @@ export async function resumeContentGeneration(
       }
       throw new AppError(409, 'RUN_ALREADY_CLAIMED', 'The workflow is already being resumed.');
     }
-    if (options.queueDelivery) {
-      await assertRecoveryCompatible(options.config, options.signal, run);
+    let request: ContentRequest;
+    try {
+      if (options.queueDelivery) {
+        await assertRecoveryCompatible(options.config, options.signal, run);
+      }
+      const parsed = contentRequestSchema.safeParse(run.normalizedInput);
+      if (!parsed.success) {
+        throw new AppError(
+          409,
+          'WORKFLOW_INPUT_UNSUPPORTED',
+          'The recorded workflow input is invalid.',
+        );
+      }
+      request = parsed.data;
+    } catch (err) {
+      if (!options.queueDelivery || !(err instanceof AppError)) throw err;
+      const failed = saveQueuedFailure(options, run, claimToken, err, clock.now());
+      return presentRun(options.store, failed, options.ownerId, clock.now(), options.canReview);
     }
-    const request = contentRequestSchema.safeParse(run.normalizedInput);
-    if (!request.success) {
-      throw new AppError(
-        409,
-        'WORKFLOW_INPUT_UNSUPPORTED',
-        'The recorded workflow input is invalid.',
-      );
-    }
-    await executePersistedRun(options, run, request.data, claimToken);
+    await executePersistedRun(options, run, request, claimToken);
   }
   const latest = options.store.getRun(run.id);
   if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
@@ -543,7 +551,6 @@ async function executeApprovedImport(
   }
   const current = options.store.getRun(run.id);
   if (!current) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
-  const payload = approved ?? approvedPayload(options.store.getApproval(run.id));
 
   let latest = current;
   let activeReceipt: ImportReceiptRecord | undefined;
@@ -574,6 +581,7 @@ async function executeApprovedImport(
   );
 
   try {
+    const payload = approved ?? assertImportRecoveryCompatible(options.store, current);
     latest = saveImportCheckpoint(options.store, latest, claimToken, 'RUNNING', null, clock.now());
     for (const proposal of payload.proposals) {
       const importKey = `${run.id}:${proposal.localId}`;
@@ -718,6 +726,41 @@ function saveImportCheckpoint(
     },
     now,
     claimToken,
+    modelTag: run.modelTag,
+    modelDigest: run.modelDigest,
+    ollamaVersion: run.ollamaVersion,
+  });
+}
+
+function saveQueuedFailure(
+  options: ExecutionOptions,
+  run: PersistedRun,
+  claimToken: string,
+  err: AppError,
+  now: number,
+) {
+  const error = {
+    code: err.code,
+    message: err.message,
+    retryable: err.retryable || err.status >= 500,
+  };
+  return options.store.saveCheckpoint({
+    runId: run.id,
+    expectedStateVersion: run.stateVersion,
+    status: 'FAILED',
+    phase: 'finished',
+    consumed: run.consumed,
+    state: {
+      ...asState(run.state),
+      status: 'FAILED',
+      phase: 'finished',
+      error,
+    },
+    now,
+    claimToken,
+    modelTag: run.modelTag,
+    modelDigest: run.modelDigest,
+    ollamaVersion: run.ollamaVersion,
   });
 }
 
@@ -782,7 +825,7 @@ function assertImportRecoveryCompatible(store: WorkflowStore, run: PersistedRun)
       'The recorded generation constraints are no longer available.',
     );
   }
-  approvedPayload(store.getApproval(run.id));
+  return approvedPayload(store.getApproval(run.id));
 }
 
 function importProgressOf(
