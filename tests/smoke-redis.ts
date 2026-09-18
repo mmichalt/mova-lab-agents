@@ -6,12 +6,7 @@ import path from 'node:path';
 import { Queue } from 'bullmq';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
-import {
-  closeWorkflowWorker,
-  createWorkflowQueue,
-  createWorkflowWorker,
-  WORKFLOW_QUEUE_NAME,
-} from '../src/jobs.ts';
+import { closeWorkflowWorker, createWorkflowQueue, createWorkflowWorker } from '../src/jobs.ts';
 import { createLogger } from '../src/logger.ts';
 import { CONSTRAINTS_VERSION, openWorkflowStore, type PersistedRun } from '../src/persist/store.ts';
 import { shutDown } from '../src/server.ts';
@@ -62,8 +57,9 @@ const failingConfig = loadConfig(
     LLM_ATTEMPT_TIMEOUT_MS: '2000',
   }),
 );
-const queue = createWorkflowQueue(redisUrl, logger);
-const redisQueue = new Queue(WORKFLOW_QUEUE_NAME, { connection: { url: redisUrl } });
+const queueName = `mova-lab-workflows-smoke-${process.pid}-${Date.now()}`;
+const queue = createWorkflowQueue(redisUrl, logger, queueName);
+const redisQueue = new Queue(queueName, { connection: { url: redisUrl } });
 let worker: ReturnType<typeof createWorkflowWorker> | undefined;
 let server: Server | undefined;
 
@@ -117,6 +113,7 @@ try {
     logger,
     store,
     redisUrl,
+    queueName,
     queue,
     reconcileIntervalMs: 100,
   });
@@ -136,6 +133,7 @@ try {
     logger,
     store,
     redisUrl,
+    queueName,
     queue,
     reconcileIntervalMs: 100,
   });
