@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Config } from '../config.ts';
 import { AppError } from '../errors.ts';
 import { isCancellation } from '../llm/execution.ts';
+import type { Observability } from '../observability.ts';
 import {
   type RecordingSearchResult,
   SEARCH_QUERY_MAX_LENGTH,
@@ -101,12 +102,13 @@ export function decideToolCall(raw: unknown, auditId = randomUUID()): ToolDecisi
 
 export async function runSearchTool(
   decision: Extract<ToolDecision, { status: 'execute' }>,
-  options: { config: Config; signal: AbortSignal },
+  options: { config: Config; signal: AbortSignal; observability?: Observability },
 ): Promise<string> {
   try {
     const result = await searchRecordingExercises({
       config: options.config,
       signal: options.signal,
+      observability: options.observability,
       q: decision.args.q,
       limit: decision.args.limit,
     });

@@ -15,6 +15,31 @@ Copy `.env.example` to `.env` for local use. `npm run dev` and `npm start` load
 it through Node's `--env-file-if-exists=.env`. Compose interpolates the same
 file on the host and does not copy it into the image. Do not commit `.env`.
 
+## Offline workflow comparisons
+
+`npm test`, CI, and the ordinary build never run model inference. After separate
+opt-in local runs have produced one AG-027 report for each mode, compare the
+recorded reports with a manifest:
+
+```json
+{
+  "reports": [
+    { "mode": "single-call", "path": "reports/single-call.json" },
+    { "mode": "deterministic", "path": "reports/deterministic.json" },
+    { "mode": "supervisor", "path": "reports/supervisor.json" }
+  ]
+}
+```
+
+Run `npm run eval:compare -- evals/comparison-input.json` from the repository
+root. Paths are relative to the manifest; redirect the JSON to a versioned
+file under `evals/comparisons/` when retaining a report. The comparison matches
+case and repetition keys, exposes incomplete and holdout runs, checks shared
+corpus/schema/model/runtime inputs, and keeps prompt/workflow versions visible.
+Therapist scores remain nullable until an actual therapist completes the review
+checklist; a dry run is not quality evidence. A completed comparison therefore
+requires separate local evaluation and actual therapist review.
+
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PORT` | `3001` in `.env.example`; code default `3000` | Host listen port for `npm run dev` / `npm start`. Use `3001` so Mova-Lab's Nest API can keep host port `3000`. Empty values use `3000`, which collides with Nest. `0` binds an ephemeral port. Compose ignores this for publishing: the container always listens on `3000`, and the host mapping is `AGENTS_HOST_PORT` (default `3001`). |
@@ -30,6 +55,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. Must be `1`–`2147483647` so Node timers do not overflow. |
 | `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Must be `1`–`2147483647`. Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
+| `EXPERIMENTAL_SUPERVISOR` | `false` | Opt-in Stage 9 experiment. Only search, vocabulary, generate, revise, and finish actions are allowed; deterministic orchestration remains the default. |
 | `SQLITE_PATH` | `data/workflows.sqlite` | Local SQLite file for workflow artifacts (runs, attempts, candidate revisions, approvals, import receipts). Empty values use the default. `:memory:` is rejected. The Compose `agents` service always uses `/data/workflows.sqlite` on the `workflows` volume. |
 | `REDIS_URL` | `redis://localhost:6379` | BullMQ connection for the API producer and worker. Compose overrides it with `redis://redis:6379`. |
 
@@ -104,6 +130,12 @@ return `503 QUEUE_UNAVAILABLE` if durable dispatch cannot be confirmed. Stale
 job versions and human-review or terminal runs are skipped. The legacy
 `/content-drafts` endpoint remains synchronous and retains
 its request-lifetime cancellation behavior.
+When `EXPERIMENTAL_SUPERVISOR=true`, new runs use the bounded experimental
+supervisor. Its action history and version are checkpointed with existing
+workflow state, and it shares the eight-decision and provider budgets with the
+workflow. Finish still reaches mandatory checks and the human-approval
+checkpoint; planner failure does not start another workflow. Resumed runs keep
+their recorded mode.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
@@ -317,6 +349,7 @@ npm test            # node:test tests/**/*.test.ts (no Ollama)
 npm run smoke:local # optional live GPU/model smoke; never part of CI
 npm run smoke:tools # optional live native tool-call smoke with stub search; never part of CI
 npm run smoke:redis # optional Redis/BullMQ recovery smoke with fake HTTP services
+npm run eval:local -- --mode deterministic # explicit evaluation; never part of CI
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
 ```
@@ -327,6 +360,34 @@ models, Ollama, or cloud credentials, and they do not pull models or invoke
 live inference. `npm run smoke:redis` is separate: it requires a reachable
 Redis instance and verifies reconciliation, asynchronous approval/import, and
 bounded redelivery without live model inference.
+
+`npm run eval:local -- --mode single-call|deterministic|supervisor` is the only
+live evaluation command. It requires the local Ollama model, writes a versioned
+report under `evals/reports/`, reserves call/token budgets before concurrent
+submissions, and keeps unstarted or missing-usage runs visible as incomplete.
+The synthetic corpus has 20 cases, three repetitions, and an explicit holdout
+subset. The therapist rubric is a structured human-review aid, not an automated
+clinical judge.
+
+### Observability
+
+AG-026 uses explicit OpenTelemetry spans from the Node SDK. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to opt into OTLP export; without it, spans are
+created but discarded. HTTP requests, queue jobs, workflow steps, provider
+attempts, Mova-Lab calls, approvals, and imports use correlation IDs and links
+across async boundaries. Approval waiting never keeps a span open.
+
+Usage reports keep input, cached-input, and output tokens separate. Missing
+measurements remain `null`; local Ollama has no per-token API bill, so
+`estimatedCostUsd` is always `null` with `costStatus: "unmeasured_local"`.
+Runtime reports retain model digest/quantization, Ollama version, context/output
+settings, host metadata, and explicit millisecond/nanosecond duration units.
+
+`DIAGNOSTIC_CAPTURE=redacted` enables bounded redacted diagnostic attributes;
+raw prompts and responses are never retained by default. Terminal workflow
+payloads are scrubbed after 30 days, idempotency tombstones after 90 days, and
+pending human reviews are preserved. The worker runs `store.purgeRetention()`
+on startup and every six hours; no monitoring service or billing table is added.
 
 ## Docker
 

@@ -189,6 +189,7 @@ async function selectVocabularyMessages(
       const content = await runSearchTool(decision, {
         config: options.config,
         signal: options.signal,
+        observability: options.observability,
       });
       toolsUsed += 1;
       options.logger.info(

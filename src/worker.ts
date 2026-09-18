@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { type Config, loadConfig } from './config.ts';
 import { closeWorkflowWorker, createWorkflowQueue, createWorkflowWorker } from './jobs.ts';
 import { createLogger } from './logger.ts';
+import { getObservability } from './observability.ts';
 import { openWorkflowStore } from './persist/store.ts';
 
 export function startWorker(config: Config) {
@@ -15,8 +16,9 @@ export function startWorker(config: Config) {
     store,
     redisUrl: config.redisUrl,
     queue,
+    observability: getObservability(config),
   });
-  return { logger, store, queue, worker };
+  return { logger, store, queue, worker, observability: getObservability(config) };
 }
 
 function isEntrypoint() {
@@ -29,7 +31,7 @@ function isEntrypoint() {
 if (isEntrypoint()) {
   try {
     const config = loadConfig();
-    const { logger, store, queue, worker } = startWorker(config);
+    const { logger, store, queue, worker, observability } = startWorker(config);
     logger.info({ sqlitePath: config.sqlitePath, workerId: worker.id }, 'worker ready');
     let stopping = false;
     const stop = (signal: string) => {
@@ -40,6 +42,7 @@ if (isEntrypoint()) {
         async () => {
           await queue.close();
           store.close();
+          await observability.shutdown();
           process.exit(0);
         },
         async (err: unknown) => {
@@ -47,6 +50,7 @@ if (isEntrypoint()) {
           try {
             await queue.close();
             store.close();
+            await observability.shutdown();
           } finally {
             process.exit(1);
           }

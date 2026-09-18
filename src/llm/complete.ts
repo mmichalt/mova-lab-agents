@@ -5,6 +5,12 @@ import type { LlmUsage } from '../content/schemas.ts';
 import { AppError } from '../errors.ts';
 import type { Logger } from '../logger.ts';
 import {
+  diagnosticAttributes,
+  type Observability,
+  type ProviderTiming,
+  withSpan,
+} from '../observability.ts';
+import {
   type AttemptRecorder,
   type AttemptReservation,
   attemptSignal,
@@ -28,7 +34,15 @@ export type LlmCall = {
   usage: LlmUsage[];
   attempts?: AttemptRecorder;
   candidateVersion?: number | null;
-  observed?: { modelTag: string | null; modelDigest: string | null; ollamaVersion?: string | null };
+  observed?: {
+    modelTag: string | null;
+    modelDigest: string | null;
+    ollamaVersion?: string | null;
+    quantization?: string | null;
+  };
+  observability?: Observability;
+  timing?: ProviderTiming[];
+  outputTokenBudget?: { remaining: number; reserved?: number; parallel?: number };
   expectedModelTag?: string | null;
   expectedModelDigest?: string | null;
 };
@@ -102,25 +116,77 @@ async function chatOnce(
 ): Promise<ChatAttempt> {
   const attemptId = randomUUID();
   const started = options.clock.now();
+  const usageStart = options.usage.length;
+  let reservedOutputTokens: number | undefined;
+  const outputTokenBudget = options.outputTokenBudget;
+  const settleOutputTokenBudget = () => {
+    if (reservedOutputTokens === undefined) return;
+    const outputTokens = options.usage[usageStart]?.outputTokens;
+    if (outputTokens != null && outputTokenBudget) {
+      outputTokenBudget.remaining += reservedOutputTokens - outputTokens;
+    }
+    if (outputTokenBudget) {
+      outputTokenBudget.reserved = (outputTokenBudget.reserved ?? 0) - reservedOutputTokens;
+    }
+    reservedOutputTokens = undefined;
+  };
   let attempt: ChatAttempt;
+  let timingRecorded = false;
   try {
-    attempt = await ollamaChat({
-      config: options.config,
-      messages:
-        options.messages ??
-        ([
-          { role: 'system', content: options.system ?? '' },
-          { role: 'user', content: JSON.stringify(options.user) },
-        ] satisfies ChatMessage[]),
-      format: options.format,
-      tools: options.tools,
-      allowToolCalls: options.allowToolCalls,
-      temperature: options.temperature,
-      signal: attemptSignal(options.limits, options.signal, options.clock.now()),
-      workflowSignal: options.signal,
-      now: options.clock.now(),
-      usage: options.usage,
+    reservedOutputTokens = reserveOutputTokens(options);
+    attempt = await withSpan(
+      options.observability,
+      'llm.provider_attempt',
+      {
+        attributes: {
+          'llm.step': options.step,
+          'llm.prompt_version': options.promptVersion,
+          'llm.attempt_id': attemptId,
+          ...diagnosticAttributes(options.observability, { step: options.step }),
+        },
+      },
+      async (span) => {
+        const result = await ollamaChat({
+          config: options.config,
+          messages:
+            options.messages ??
+            ([
+              { role: 'system', content: options.system ?? '' },
+              { role: 'user', content: JSON.stringify(options.user) },
+            ] satisfies ChatMessage[]),
+          format: options.format,
+          tools: options.tools,
+          allowToolCalls: options.allowToolCalls,
+          temperature: options.temperature,
+          numPredict: reservedOutputTokens,
+          signal: attemptSignal(options.limits, options.signal, options.clock.now()),
+          workflowSignal: options.signal,
+          now: options.clock.now(),
+          usage: options.usage,
+        });
+        for (const [name, value] of Object.entries({
+          'llm.input_tokens': result.usage.inputTokens,
+          'llm.cached_input_tokens': result.usage.cachedInputTokens,
+          'llm.output_tokens': result.usage.outputTokens,
+          'llm.load_duration_ns': result.loadDurationNs,
+          'llm.prompt_evaluation_duration_ns': result.promptEvaluationDurationNs,
+          'llm.generation_duration_ns': result.generationDurationNs,
+        })) {
+          if (value !== null) span.setAttribute(name, value);
+        }
+        span.setAttribute('llm.duration_units', 'nanoseconds');
+        return result;
+      },
+    );
+    settleOutputTokenBudget();
+    attempt = { ...attempt, wallDurationMs: Math.max(0, options.clock.now() - started) };
+    options.timing?.push({
+      wallDurationMs: attempt.wallDurationMs ?? null,
+      loadDurationNs: attempt.loadDurationNs,
+      promptEvaluationDurationNs: attempt.promptEvaluationDurationNs,
+      generationDurationNs: attempt.generationDurationNs,
     });
+    timingRecorded = true;
     if (options.expectedModelTag && attempt.model !== options.expectedModelTag) {
       throw new AppError(409, 'MODEL_TAG_CHANGED', 'The model tag changed during recovery.');
     }
@@ -147,7 +213,17 @@ async function chatOnce(
     options.observed.modelTag = attempt.model;
     options.observed.modelDigest ??= attempt.modelDigest;
     options.observed.ollamaVersion ??= attempt.ollamaVersion;
+    options.observed.quantization ??= attempt.quantization;
   } catch (err) {
+    settleOutputTokenBudget();
+    if (!timingRecorded) {
+      options.timing?.push({
+        wallDurationMs: Math.max(0, options.clock.now() - started),
+        loadDurationNs: null,
+        promptEvaluationDurationNs: null,
+        generationDurationNs: null,
+      });
+    }
     failAttempt(options, reservation, err);
     options.logger.warn(
       {
@@ -164,6 +240,19 @@ async function chatOnce(
   }
   if (finish) finishAttempt(options, reservation, attempt);
   return attempt;
+}
+
+function reserveOutputTokens(options: LlmCall) {
+  if (!options.outputTokenBudget) return undefined;
+  const parallel = Math.max(1, options.outputTokenBudget.parallel ?? 1);
+  const available = options.outputTokenBudget.remaining + (options.outputTokenBudget.reserved ?? 0);
+  const reserved = Math.min(options.config.ollamaNumPredict, Math.floor(available / parallel));
+  if (reserved < 1) {
+    throw new AppError(503, 'PROVIDER_BUDGET_EXHAUSTED', 'The output token budget was exhausted.');
+  }
+  options.outputTokenBudget.remaining -= reserved;
+  options.outputTokenBudget.reserved = (options.outputTokenBudget.reserved ?? 0) + reserved;
+  return reserved;
 }
 
 function parseStructured<T>(schema: z.ZodType<T>, options: ChatOptions, content: string): T {

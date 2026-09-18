@@ -4,16 +4,18 @@ import { resumeContentGeneration } from './content/runs.ts';
 import { AppError } from './errors.ts';
 import { clientDisconnected } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
+import { linksFor, type Observability, rootContext, withSpan } from './observability.ts';
 import type { PersistedRun, WorkflowStore } from './persist/store.ts';
 
 export const WORKFLOW_QUEUE_NAME = 'mova-lab-workflows';
 export const WORKFLOW_DRAIN_MS = 10_000;
 export const MAX_WORKFLOW_DELIVERIES = 3;
 export const WORKFLOW_RECONCILE_MS = 5_000;
+export const WORKFLOW_RETENTION_MS = 6 * 60 * 60 * 1000;
 const WORKFLOW_QUEUE_READY_TIMEOUT_MS = 1_000;
 
 export type WorkflowJobName = 'generation' | 'import';
-export type WorkflowJobData = { runId: string };
+export type WorkflowJobData = { runId: string; enqueuedAt?: number };
 
 export type WorkflowJobProducer = {
   enqueueGeneration: (runId: string, stateVersion: number) => Promise<void>;
@@ -50,7 +52,7 @@ export function createWorkflowQueue(
       const jobId = workflowJobId(name, runId, stateVersion);
       const existing = await queue.getJob(jobId);
       if (!existing) {
-        await queue.add(name, { runId }, { jobId });
+        await queue.add(name, { runId, enqueuedAt: Date.now() }, { jobId });
       } else {
         const state = await existing.getState();
         if (state === 'failed') await existing.retry('failed');
@@ -115,6 +117,7 @@ export function createWorkflowWorker(options: {
   queueName?: string;
   queue?: WorkflowJobProducer;
   reconcileIntervalMs?: number;
+  observability?: Observability;
 }) {
   const worker = new Worker<WorkflowJobData, void, WorkflowJobName>(
     options.queueName ?? WORKFLOW_QUEUE_NAME,
@@ -161,6 +164,17 @@ export function createWorkflowWorker(options: {
     workerTimers.set(worker, reconcileTimer);
     void reconcile();
   }
+  const purgeRetention = () => {
+    try {
+      options.store.purgeRetention({ now: Date.now() });
+    } catch (err) {
+      options.logger.error({ err }, 'workflow retention purge failed');
+    }
+  };
+  const retentionTimer = setInterval(purgeRetention, WORKFLOW_RETENTION_MS);
+  retentionTimer.unref();
+  retentionTimers.set(worker, retentionTimer);
+  purgeRetention();
   return worker;
 }
 
@@ -172,6 +186,11 @@ export async function closeWorkflowWorker(
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     workerTimers.delete(worker);
+  }
+  const retentionTimer = retentionTimers.get(worker);
+  if (retentionTimer) {
+    clearInterval(retentionTimer);
+    retentionTimers.delete(worker);
   }
   worker.cancelAllJobs('worker shutdown');
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -209,18 +228,35 @@ async function processWorkflowJob(
   if (workerSignal?.aborted) onWorkerAbort();
   else workerSignal?.addEventListener('abort', onWorkerAbort, { once: true });
   try {
-    await resumeContentGeneration({
-      store: options.store,
-      config: options.config,
-      logger: options.logger,
-      requestId: `worker:${job.id}`,
-      ownerId: run.ownerId,
-      id: run.id,
-      signal: signalController.signal,
-      canReview: job.name === 'import',
-      queueDelivery: { stateVersion: run.stateVersion, phase: job.name },
-    });
-    await redeliverIfNeeded(run, job.name, options);
+    await withSpan(
+      options.observability,
+      'workflow.job',
+      {
+        links: linksFor(run.traceContexts),
+        attributes: {
+          'queue.job_name': job.name,
+          'queue.job_id': String(job.id),
+          'workflow.id': run.id,
+          'queue.wait.ms': Math.max(0, Date.now() - (job.data.enqueuedAt ?? run.updatedAt)),
+        },
+      },
+      async () => {
+        await resumeContentGeneration({
+          store: options.store,
+          config: options.config,
+          logger: options.logger,
+          requestId: `worker:${job.id}`,
+          ownerId: run.ownerId,
+          id: run.id,
+          signal: signalController.signal,
+          canReview: job.name === 'import',
+          queueDelivery: { stateVersion: run.stateVersion, phase: job.name },
+          observability: options.observability,
+        });
+        await redeliverIfNeeded(run, job.name, options);
+      },
+      rootContext(),
+    );
   } finally {
     workerSignal?.removeEventListener('abort', onWorkerAbort);
   }
@@ -249,6 +285,7 @@ async function redeliverIfNeeded(
 }
 
 const workerTimers = new WeakMap<object, ReturnType<typeof setInterval>>();
+const retentionTimers = new WeakMap<object, ReturnType<typeof setInterval>>();
 
 function workflowJobId(name: WorkflowJobName, runId: string, stateVersion: number) {
   return `${name}-${runId}-${stateVersion}`;

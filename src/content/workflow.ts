@@ -13,6 +13,15 @@ import {
   workflowTimeout,
 } from '../llm/execution.ts';
 import type { Logger } from '../logger.ts';
+import {
+  initialRuntime,
+  type Observability,
+  type ProviderTiming,
+  type RuntimeMetadata,
+  withSpan,
+} from '../observability.ts';
+import { hashNormalizedInput } from '../persist/store.ts';
+import { decideToolCall, runSearchTool, SEARCH_EXISTING_EXERCISES } from '../tools/dispatch.ts';
 import { readGenerationConstraints } from '../tools/mova-lab.ts';
 import { generateExercises, reviseExercises, selectVocabulary } from './generate.ts';
 import { reviewAge, reviewLanguage, settleReviews } from './review.ts';
@@ -26,6 +35,16 @@ import {
   type ValidationIssue,
   type Vocabulary,
 } from './schemas.ts';
+import {
+  createSupervisorState,
+  MAX_SUPERVISOR_DECISIONS,
+  planSupervisorAction,
+  type SupervisorAction,
+  type SupervisorActionRecord,
+  type SupervisorState,
+  supervisorActionKey,
+  supervisorStateSchema,
+} from './supervisor.ts';
 import { validateCandidate } from './validation.ts';
 
 export const MAX_REVISIONS = 2;
@@ -87,6 +106,9 @@ export type GenerationState = {
   modelTag: string | null;
   modelDigest: string | null;
   ollamaVersion: string | null;
+  supervisor?: SupervisorState;
+  runtime: RuntimeMetadata;
+  timing: ProviderTiming[];
   error?: WorkflowError;
 };
 
@@ -104,6 +126,7 @@ export type WorkflowResume = {
   modelTag: string | null;
   modelDigest: string | null;
   ollamaVersion: string | null;
+  ollamaQuantization?: string | null;
   invalidCandidates: Array<{ proposals: GeneratedProposal[]; checks: CheckResult[] }>;
 };
 
@@ -114,11 +137,15 @@ type RunOptions = {
   request: ContentRequest;
   clock?: Clock;
   maxProviderRequests?: number;
+  outputTokenBudget?: { remaining: number; reserved?: number; parallel?: number };
   maxRevisions?: number;
   signal?: AbortSignal;
   resume?: WorkflowResume;
+  initialState?: unknown;
   attempts?: AttemptRecorder;
   onCheckpoint?: (state: GenerationState) => void;
+  supervisor?: boolean;
+  observability?: Observability;
 };
 
 export async function generateContentDrafts(options: {
@@ -129,6 +156,7 @@ export async function generateContentDrafts(options: {
   clock?: Clock;
   maxProviderRequests?: number;
   signal?: AbortSignal;
+  observability?: Observability;
 }): Promise<GenerationResult> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -144,6 +172,8 @@ export async function generateContentDrafts(options: {
       clock: options.clock,
       maxProviderRequests: options.maxProviderRequests,
       signal: options.signal,
+      supervisor: options.config.experimentalSupervisor,
+      observability: options.observability,
     }),
   );
 }
@@ -171,7 +201,17 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         clock.now(),
         options.maxProviderRequests ?? MAX_PROVIDER_REQUESTS,
       );
-  const checkpointState = recordOf(resume?.checkpoint);
+  const checkpointState = recordOf(resume ? resume.checkpoint : options.initialState);
+  const storedSupervisor = checkpointState.supervisor;
+  const parsedSupervisor =
+    storedSupervisor == null ? undefined : supervisorStateSchema.safeParse(storedSupervisor);
+  const supervisorVersionError = storedSupervisor != null && !parsedSupervisor?.success;
+  const executionSpan = options.observability?.startSpan('workflow.execution', {
+    attributes: {
+      'workflow.request_id': options.requestId,
+      'workflow.resumed': resume !== undefined,
+    },
+  });
   const controller = new AbortController();
   const onExternalAbort = () => {
     if (!controller.signal.aborted) {
@@ -201,11 +241,29 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       ? (checkpointState.history as AttemptSummary[])
       : [],
     usage: Array.isArray(checkpointState.usage) ? (checkpointState.usage as LlmUsage[]) : [],
+    timing: Array.isArray(checkpointState.timing)
+      ? (checkpointState.timing as ProviderTiming[])
+      : [],
     modelTag: resume?.modelTag ?? config.ollamaModel,
     modelDigest: resume?.modelDigest ?? null,
     ollamaVersion:
       resume?.ollamaVersion ??
       (typeof checkpointState.ollamaVersion === 'string' ? checkpointState.ollamaVersion : null),
+    supervisor: parsedSupervisor?.success
+      ? parsedSupervisor.data
+      : storedSupervisor == null &&
+          options.initialState === undefined &&
+          !resume &&
+          options.supervisor
+        ? createSupervisorState()
+        : undefined,
+    runtime:
+      (checkpointState.runtime as RuntimeMetadata | undefined) ??
+      initialRuntime({
+        modelTag: resume?.modelTag ?? config.ollamaModel,
+        contextTokens: config.ollamaNumCtx,
+        outputTokens: config.ollamaNumPredict,
+      }),
     vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
     candidate: Array.isArray(checkpointState.candidate)
       ? (checkpointState.candidate as GeneratedProposal[])
@@ -219,23 +277,43 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     signal: controller.signal,
     clock,
     usage: state.usage,
+    outputTokenBudget: options.outputTokenBudget,
     attempts: options.attempts,
     observed: {
       modelTag: state.modelTag,
       modelDigest: state.modelDigest,
       ollamaVersion: state.ollamaVersion,
+      quantization: state.runtime.quantization,
     },
+    observability: options.observability,
+    timing: state.timing,
     expectedModelTag: resume?.modelTag,
     expectedModelDigest: resume?.modelDigest,
   };
   try {
     if (expired(controller, limits, clock)) {
       failExpired(state, controller);
+    } else if (supervisorVersionError) {
+      fail(
+        state,
+        new AppError(
+          409,
+          'SUPERVISOR_VERSION_UNSUPPORTED',
+          'The recorded supervisor version is not supported.',
+        ),
+      );
     } else {
-      const constraints = await readGenerationConstraints({
-        config,
-        signal: controller.signal,
-      });
+      const constraints = await withSpan(
+        options.observability,
+        'workflow.step.constraints',
+        { attributes: { 'workflow.step': 'constraints' } },
+        () =>
+          readGenerationConstraints({
+            config,
+            signal: controller.signal,
+            observability: options.observability,
+          }),
+      );
       if (resume && constraints.version !== resume.constraintsVersion) {
         throw new AppError(
           409,
@@ -248,9 +326,18 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     if (state.status === 'RUNNING' && expired(controller, limits, clock)) {
       failExpired(state, controller);
     }
-    if (state.status === 'RUNNING') {
+    if (state.status === 'RUNNING' && state.supervisor) {
+      await runSupervisorWorkflow(state, llm, options, limits);
+    }
+    if (state.status === 'RUNNING' && !state.supervisor) {
       const vocabulary =
-        state.vocabulary ?? (await selectVocabulary({ ...llm, request: options.request }));
+        state.vocabulary ??
+        (await withSpan(
+          options.observability,
+          'workflow.step.vocabulary',
+          { attributes: { 'workflow.step': 'vocabulary' } },
+          () => selectVocabulary({ ...llm, request: options.request }),
+        ));
       if (!state.vocabulary) {
         state.vocabulary = vocabulary;
         checkpoint(state, limits, options, llm);
@@ -265,9 +352,27 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         let mark: string | undefined;
         if (state.phase === 'checks' && state.candidate) {
           mark = fingerprint(state.candidate);
-          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
+          state.checks = await withSpan(
+            options.observability,
+            'workflow.step.checks',
+            { attributes: { 'workflow.step': 'checks' } },
+            () =>
+              runChecks(
+                state,
+                llm,
+                vocabulary,
+                state.candidate as GeneratedProposal[],
+                options,
+                limits,
+              ),
+          );
         } else {
-          const produced = await nextCandidate(state, llm, vocabulary, feedback);
+          const produced = await withSpan(
+            options.observability,
+            feedback ? 'workflow.step.revision' : 'workflow.step.generation',
+            { attributes: { 'workflow.step': feedback ? 'revision' : 'generation' } },
+            () => nextCandidate(state, llm, vocabulary, feedback),
+          );
           if (expired(controller, limits, clock)) {
             failExpired(state, controller);
             break;
@@ -308,7 +413,20 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
             );
             break;
           }
-          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
+          state.checks = await withSpan(
+            options.observability,
+            'workflow.step.checks',
+            { attributes: { 'workflow.step': 'checks' } },
+            () =>
+              runChecks(
+                state,
+                llm,
+                vocabulary,
+                state.candidate as GeneratedProposal[],
+                options,
+                limits,
+              ),
+          );
         }
         if (expired(controller, limits, clock)) {
           failExpired(state, controller);
@@ -359,6 +477,15 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     state.modelTag = llm.observed?.modelTag ?? state.modelTag;
     state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
     state.ollamaVersion = llm.observed?.ollamaVersion ?? state.ollamaVersion;
+    state.runtime = {
+      ...state.runtime,
+      modelTag: state.modelTag,
+      modelDigest: state.modelDigest,
+      ollamaVersion: state.ollamaVersion,
+      quantization: llm.observed?.quantization ?? state.runtime.quantization,
+    };
+    executionSpan?.setAttribute('workflow.status', state.status);
+    executionSpan?.end();
   }
 
   options.logger.info(
@@ -458,13 +585,20 @@ async function runChecks(
     request: state.request,
     proposals,
   };
-  const agePromise = existing.get('age') ?? reviewAge(review).then(remember);
-  const languagePromise = existing.get('language') ?? reviewLanguage(review).then(remember);
-  const [age, language] = await settleReviews(
-    Promise.resolve(agePromise),
-    Promise.resolve(languagePromise),
-  );
-  return [content, age, language];
+  const budget = options.outputTokenBudget;
+  const parallelReviews = budget && !existing.has('age') && !existing.has('language');
+  if (parallelReviews) budget.parallel = 2;
+  try {
+    const agePromise = existing.get('age') ?? reviewAge(review).then(remember);
+    const languagePromise = existing.get('language') ?? reviewLanguage(review).then(remember);
+    const [age, language] = await settleReviews(
+      Promise.resolve(agePromise),
+      Promise.resolve(languagePromise),
+    );
+    return [content, age, language];
+  } finally {
+    if (parallelReviews) delete budget.parallel;
+  }
 }
 
 function tryRevise(
@@ -563,6 +697,289 @@ function checkpoint(
   state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
   state.ollamaVersion = llm.observed?.ollamaVersion ?? state.ollamaVersion;
   options.onCheckpoint?.(state);
+}
+
+async function runSupervisorWorkflow(
+  state: GenerationState,
+  llm: LlmCall,
+  options: RunOptions,
+  limits: ExecutionLimits,
+) {
+  const supervisor = state.supervisor;
+  if (!supervisor) return;
+  while (state.status === 'RUNNING') {
+    if (supervisor.decisions >= MAX_SUPERVISOR_DECISIONS) {
+      fail(
+        state,
+        new AppError(
+          422,
+          'SUPERVISOR_DECISIONS_EXHAUSTED',
+          'The supervisor decision limit was exhausted.',
+        ),
+      );
+      checkpoint(state, limits, options, llm);
+      return;
+    }
+
+    const action = await planSupervisorAction({
+      ...llm,
+      request: state.request,
+      context: supervisorContext(state),
+    });
+    supervisor.decisions += 1;
+    checkpoint(state, limits, options, llm);
+
+    try {
+      const result = await executeSupervisorAction(state, action, llm, options, limits);
+      const repeated = supervisor.history.some(
+        (record) =>
+          JSON.stringify({ action: record.action, args: record.args }) ===
+            supervisorActionKey(action) &&
+          JSON.stringify(record.observation) === JSON.stringify(result.observation),
+      );
+      if (repeated) {
+        appendSupervisorAction(supervisor, action, 'repeated', result.observation);
+        fail(
+          state,
+          new AppError(
+            422,
+            'SUPERVISOR_NO_PROGRESS',
+            'The supervisor repeated an ineffective action.',
+          ),
+        );
+        checkpoint(state, limits, options, llm);
+        return;
+      }
+
+      if (result.status === 'ready') state.status = 'READY_FOR_REVIEW';
+      if (result.status === 'rejected') {
+        fail(
+          state,
+          new AppError(
+            422,
+            'SUPERVISOR_PREREQUISITE_MISSING',
+            'The supervisor selected an action whose prerequisites are not met.',
+          ),
+        );
+      }
+      if (result.status === 'failed' && result.error) fail(state, result.error);
+      appendSupervisorAction(
+        supervisor,
+        action,
+        result.status === 'ready' ? 'completed' : result.status,
+        result.observation,
+      );
+      checkpoint(state, limits, options, llm);
+      if (state.status !== 'RUNNING') return;
+      if (supervisor.decisions >= MAX_SUPERVISOR_DECISIONS) {
+        fail(
+          state,
+          new AppError(
+            422,
+            'SUPERVISOR_DECISIONS_EXHAUSTED',
+            'The supervisor decision limit was exhausted.',
+          ),
+        );
+        checkpoint(state, limits, options, llm);
+        return;
+      }
+    } catch (err) {
+      const error =
+        err instanceof AppError
+          ? err
+          : new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+      appendSupervisorAction(supervisor, action, 'failed', { errorCode: error.code });
+      fail(state, error);
+      checkpoint(state, limits, options, llm);
+      return;
+    }
+  }
+}
+
+async function executeSupervisorAction(
+  state: GenerationState,
+  action: SupervisorAction,
+  llm: LlmCall,
+  options: RunOptions,
+  limits: ExecutionLimits,
+): Promise<
+  | { status: 'completed'; observation: unknown }
+  | { status: 'ready'; observation: unknown }
+  | { status: 'rejected'; observation: unknown }
+  | { status: 'failed'; observation: unknown; error: AppError }
+> {
+  if (action.action === 'search') {
+    const decision = decideToolCall({
+      function: { name: SEARCH_EXISTING_EXERCISES, arguments: action.args },
+    });
+    if (decision.status !== 'execute') {
+      throw new AppError(
+        502,
+        'PROVIDER_INVALID_OUTPUT',
+        'The supervisor requested an invalid search.',
+      );
+    }
+    const content = await runSearchTool(decision, { config: llm.config, signal: llm.signal });
+    return { status: 'completed', observation: parseObservation(content) };
+  }
+
+  if (action.action === 'vocabulary') {
+    if (state.candidate) {
+      return rejectedSupervisorAction('A candidate already exists.');
+    }
+    const selected = await selectVocabulary({ ...llm, request: state.request });
+    const next = mergeVocabulary(state.vocabulary, selected);
+    state.vocabulary = next;
+    state.phase = 'vocabulary';
+    state.checks = [];
+    return {
+      status: 'completed',
+      observation: { vocabularyFingerprint: hashNormalizedInput(next) },
+    };
+  }
+
+  if (action.action === 'generate') {
+    if (!state.vocabulary) return rejectedSupervisorAction('Vocabulary is required.');
+    if (state.candidate) return rejectedSupervisorAction('A candidate already exists.');
+    const proposals = await generateExercises({
+      ...llm,
+      candidateVersion: state.candidateVersion,
+      request: state.request,
+      vocabulary: state.vocabulary,
+    });
+    const nextFingerprint = hashNormalizedInput(proposals);
+    if (nextFingerprint !== hashNormalizedInput(state.candidate ?? null)) {
+      state.candidate = proposals;
+      state.candidateVersion += 1;
+      state.phase = 'checks';
+      state.checks = [];
+    }
+    return { status: 'completed', observation: { candidateFingerprint: nextFingerprint } };
+  }
+
+  if (action.action === 'revise') {
+    if (!state.vocabulary || !state.candidate) {
+      return rejectedSupervisorAction('A candidate and vocabulary are required.');
+    }
+    const feedback = blockingIssues(state.checks);
+    if (feedback.length === 0) {
+      return rejectedSupervisorAction('Failed checks are required before revision.');
+    }
+    if (state.revisionCount >= (options.maxRevisions ?? MAX_REVISIONS)) {
+      return {
+        status: 'failed',
+        observation: { errorCode: 'CONTENT_VALIDATION_EXHAUSTED' },
+        error: new AppError(
+          422,
+          'CONTENT_VALIDATION_EXHAUSTED',
+          'Unable to produce a valid draft within the configured limits.',
+        ),
+      };
+    }
+    state.revisionCount += 1;
+    state.phase = 'revision';
+    checkpoint(state, limits, options, llm);
+    const proposals = await reviseExercises({
+      ...llm,
+      candidateVersion: state.candidateVersion,
+      request: state.request,
+      vocabulary: state.vocabulary,
+      previous: state.candidate,
+      feedback,
+    });
+    const nextFingerprint = hashNormalizedInput(proposals);
+    if (nextFingerprint !== hashNormalizedInput(state.candidate)) {
+      state.candidate = proposals;
+      state.candidateVersion += 1;
+      state.phase = 'checks';
+      state.checks = [];
+    }
+    return { status: 'completed', observation: { candidateFingerprint: nextFingerprint } };
+  }
+
+  if (!state.vocabulary || !state.candidate) {
+    return rejectedSupervisorAction('A candidate and vocabulary are required before finish.');
+  }
+  state.checks = await runChecks(state, llm, state.vocabulary, state.candidate, options, limits);
+  const decision = decide(state.checks);
+  const observation = {
+    checks: state.checks.map((check) => ({ name: check.name, status: check.status })),
+  };
+  if (decision === 'pass') {
+    state.phase = 'finished';
+    return { status: 'ready', observation };
+  }
+  if (decision === 'unavailable') {
+    return {
+      status: 'failed',
+      observation,
+      error: new AppError(200, 'REVIEW_UNAVAILABLE', 'A required review is unavailable.'),
+    };
+  }
+  if (decision === 'refused') {
+    return {
+      status: 'failed',
+      observation,
+      error: new AppError(200, 'REVIEW_REFUSED', 'A reviewer refused to judge the candidate.'),
+    };
+  }
+  return { status: 'completed', observation };
+}
+
+function rejectedSupervisorAction(message: string) {
+  return {
+    status: 'rejected' as const,
+    observation: { errorCode: 'SUPERVISOR_PREREQUISITE_MISSING', message },
+  };
+}
+
+function appendSupervisorAction(
+  state: SupervisorState,
+  action: SupervisorAction,
+  outcome: SupervisorActionRecord['outcome'],
+  observation: unknown,
+) {
+  state.history.push({
+    decision: state.decisions,
+    action: action.action,
+    args: action.args,
+    outcome,
+    observation,
+  });
+}
+
+function supervisorContext(state: GenerationState) {
+  return {
+    phase: state.phase,
+    candidateVersion: state.candidateVersion,
+    revisionCount: state.revisionCount,
+    vocabulary: state.vocabulary ?? null,
+    candidate: state.candidate ?? null,
+    checks: state.checks,
+    supervisor: state.supervisor,
+  };
+}
+
+function mergeVocabulary(existing: Vocabulary | undefined, selected: Vocabulary): Vocabulary {
+  const items = [...(existing?.items ?? [])];
+  for (const item of selected.items) {
+    if (
+      !items.some(
+        (current) => current.word === item.word && current.targetSound === item.targetSound,
+      )
+    ) {
+      items.push(item);
+    }
+  }
+  return { items: items.slice(0, 24) };
+}
+
+function parseObservation(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return { value: value.slice(0, 2048) };
+  }
 }
 
 function fail(state: GenerationState, err: AppError) {

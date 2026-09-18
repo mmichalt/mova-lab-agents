@@ -134,6 +134,7 @@ test('opens WAL files with foreign keys, busy timeout, and idempotent migrations
     { name: '001_workflow_persistence' },
     { name: '002_run_ollama_version' },
     { name: '003_run_delivery_counts' },
+    { name: '004_observability_metadata' },
   ]);
 });
 

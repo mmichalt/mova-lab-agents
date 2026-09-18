@@ -13,6 +13,16 @@ import {
 import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
+  aggregateAttemptTiming,
+  aggregateProviderTiming,
+  aggregateUsage,
+  linksFor,
+  type Observability,
+  type RuntimeMetadata,
+  spanContextRecord,
+  type TraceContextRecord,
+} from '../observability.ts';
+import {
   type ApprovalRecord,
   CONSTRAINTS_VERSION,
   type DeliveryPhase,
@@ -39,8 +49,10 @@ import {
   checkResultSchema,
   contentRequestSchema,
   type GeneratedProposal,
+  type LlmUsage,
   recordingProposalSchema,
 } from './schemas.ts';
+import { createSupervisorState, SUPERVISOR_PROMPT_VERSION } from './supervisor.ts';
 import {
   type GenerationState,
   MAX_REVISIONS,
@@ -71,6 +83,7 @@ export const PROMPT_VERSIONS = {
   revision: REVISION_PROMPT_VERSION,
   age: AGE_PROMPT_VERSION,
   language: LANGUAGE_PROMPT_VERSION,
+  supervisor: SUPERVISOR_PROMPT_VERSION,
 };
 
 export type WorkflowResource = {
@@ -132,6 +145,11 @@ export type WorkflowResource = {
     }>;
   };
   imports: WorkflowResource['importProgress']['receipts'];
+  observability: {
+    usage: ReturnType<typeof aggregateUsage>;
+    timing: ReturnType<typeof aggregateAttemptTiming>;
+    runtime: RuntimeMetadata;
+  };
 };
 
 const approveRequestSchema = z.strictObject({
@@ -165,6 +183,8 @@ export async function createContentGeneration(options: {
   canReview?: boolean;
   admission?: WorkflowAdmission;
   queue?: WorkflowJobProducer;
+  observability?: Observability;
+  traceContext?: TraceContextRecord;
 }): Promise<{ created: boolean; resource: WorkflowResource }> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -378,6 +398,7 @@ export function presentRun(
     : [];
   const checks = z.array(checkResultSchema).safeParse(state.checks).data ?? [];
   const importProgress = importProgressOf(run, approval, receipts);
+  const attempts = store.listAttempts(run.id);
   return {
     id: run.id,
     status: run.status,
@@ -417,7 +438,45 @@ export function presentRun(
     })),
     importProgress,
     imports: importProgress.receipts,
+    observability: {
+      usage: aggregateUsage(attemptUsages(attempts)),
+      timing: Array.isArray(state.timing)
+        ? aggregateProviderTiming(state.timing as Parameters<typeof aggregateProviderTiming>[0])
+        : aggregateAttemptTiming(attempts),
+      runtime: runtimeOf(state),
+    },
   };
+}
+
+function runtimeOf(state: Record<string, unknown>): RuntimeMetadata {
+  const runtime = state.runtime;
+  if (typeof runtime === 'object' && runtime !== null && !Array.isArray(runtime)) {
+    return runtime as RuntimeMetadata;
+  }
+  return {
+    modelTag: null,
+    modelDigest: null,
+    quantization: null,
+    ollamaVersion: null,
+    contextTokens: null,
+    outputTokens: null,
+    hardware: {
+      platform: null,
+      arch: null,
+      cpuModel: null,
+      cpuCount: null,
+      memoryBytes: null,
+      gpu: null,
+    },
+    durationUnits: 'wall_ms',
+    loadDurationUnits: 'nanoseconds',
+  };
+}
+
+function attemptUsages(attempts: ReturnType<WorkflowStore['listAttempts']>): LlmUsage[] {
+  return attempts.flatMap(({ usage }) =>
+    typeof usage === 'object' && usage !== null && !Array.isArray(usage) ? [usage as LlmUsage] : [],
+  );
 }
 
 async function decideContentGeneration(
@@ -466,6 +525,7 @@ async function decideContentGeneration(
     const categories = await listGenerationCategories({
       config: options.config,
       signal: options.signal ?? new AbortController().signal,
+      observability: options.observability,
     });
     if (!categories.items.some((category) => category.id === decision.categoryId)) {
       throw new AppError(409, 'CATEGORY_NOT_FOUND', 'The selected category is not available.');
@@ -473,17 +533,30 @@ async function decideContentGeneration(
   }
 
   try {
-    options.store.recordApproval({
-      runId: run.id,
-      actorId: options.ownerId,
-      candidateVersion: decision.candidateVersion,
-      payloadHash,
-      decidedAt: clock.now(),
-      expectedStateVersion: run.stateVersion,
-      ...(decision.decision === 'approved'
-        ? { decision: 'approved' as const, categoryId: decision.categoryId, frozenPayload }
-        : { decision: 'rejected' as const }),
+    const approvalSpan = options.observability?.startSpan('workflow.approval', {
+      links: linksFor(run.traceContexts),
+      attributes: {
+        'workflow.id': run.id,
+        'approval.decision': decision.decision,
+      },
     });
+    try {
+      options.store.recordApproval({
+        runId: run.id,
+        actorId: options.ownerId,
+        candidateVersion: decision.candidateVersion,
+        payloadHash,
+        decidedAt: clock.now(),
+        expectedStateVersion: run.stateVersion,
+        ...(decision.decision === 'approved'
+          ? { decision: 'approved' as const, categoryId: decision.categoryId, frozenPayload }
+          : { decision: 'rejected' as const }),
+      });
+      if (approvalSpan)
+        options.store.appendTraceContext(run.id, spanContextRecord(approvalSpan), clock.now());
+    } finally {
+      approvalSpan?.end();
+    }
   } catch (err) {
     const raced = options.store.getApproval(run.id);
     if (raced && sameDecision(raced, decision, payloadHash)) {
@@ -579,6 +652,13 @@ async function executeApprovedImport(
   const signal = AbortSignal.any(
     [options.signal, leaseLost.signal].filter((item): item is AbortSignal => item !== undefined),
   );
+  const importSpan = options.observability?.startSpan('workflow.import', {
+    links: linksFor(run.traceContexts),
+    attributes: {
+      'workflow.id': run.id,
+      'workflow.import.proposals': approved?.proposals.length ?? -1,
+    },
+  });
 
   try {
     const payload = approved ?? assertImportRecoveryCompatible(options.store, current);
@@ -624,6 +704,7 @@ async function executeApprovedImport(
       const imported = await importRecordingDraft({
         config: options.config,
         signal,
+        observability: options.observability,
         actorId: approval.actorId,
         sourceImportKey: importKey,
         payloadHash: approval.payloadHash,
@@ -701,6 +782,7 @@ async function executeApprovedImport(
     return latest;
   } finally {
     clearInterval(heartbeat);
+    importSpan?.end();
   }
 }
 
@@ -928,6 +1010,10 @@ function openPersistedRun(
       constraintsVersion: CONSTRAINTS_VERSION,
       promptVersions: PROMPT_VERSIONS,
       modelTag: options.config.ollamaModel,
+      initialState: options.config.experimentalSupervisor
+        ? { supervisor: createSupervisorState() }
+        : { supervisor: null },
+      traceContexts: options.traceContext ? [options.traceContext] : [],
       limits: {
         maxProviderRequests: execution.maxProviderRequests,
         maxRevisions: MAX_REVISIONS,
@@ -1070,7 +1156,7 @@ async function executePersistedRun(
         status: 'RUNNING',
         phase: 'vocabulary',
         consumed: current.consumed,
-        state: {},
+        state: current.state,
       });
     }
     const state = await runContentWorkflow({
@@ -1082,11 +1168,14 @@ async function executePersistedRun(
       attempts,
       maxProviderRequests: current.limits.maxProviderRequests,
       maxRevisions: current.limits.maxRevisions,
+      initialState: current.state,
+      supervisor: options.config.experimentalSupervisor,
       signal: AbortSignal.any(
         [options.signal, leaseLost.signal].filter(
           (signal): signal is AbortSignal => signal !== undefined,
         ),
       ),
+      observability: options.observability,
       resume: fresh
         ? undefined
         : {
@@ -1152,11 +1241,14 @@ function snapshot(state: GenerationState) {
     checks: state.checks,
     history: state.history,
     usage: state.usage,
+    timing: state.timing,
     error: state.error ?? null,
     providerRequests: state.providerRequests,
     modelTag: state.modelTag,
     modelDigest: state.modelDigest,
     ollamaVersion: state.ollamaVersion,
+    supervisor: state.supervisor ?? null,
+    runtime: state.runtime,
   };
 }
 

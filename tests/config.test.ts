@@ -33,6 +33,7 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
   assert.equal(config.workflowTimeoutMs, 600000);
   assert.equal(config.sqlitePath, 'data/workflows.sqlite');
   assert.equal(config.redisUrl, 'redis://localhost:6379');
+  assert.equal(config.experimentalSupervisor, false);
 });
 
 test('loadConfig rejects missing, empty, or invalid values', () => {
@@ -89,6 +90,8 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
     () => loadConfig(env({ REDIS_URL: 'http://localhost:6379' })),
     /Invalid configuration/,
   );
+  assert.equal(loadConfig(env({ EXPERIMENTAL_SUPERVISOR: 'true' })).experimentalSupervisor, true);
+  assert.throws(() => loadConfig(env({ EXPERIMENTAL_SUPERVISOR: 'yes' })), /Invalid configuration/);
   assert.equal(
     loadConfig(env({ SQLITE_PATH: ' /tmp/workflows.sqlite ' })).sqlitePath,
     '/tmp/workflows.sqlite',

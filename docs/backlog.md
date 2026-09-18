@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020, AG-022, AG-023, and AG-029 are marked
+**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, AG-026, AG-027, and AG-029 are marked
 complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
 follow-up is in progress in this working tree; sibling `mova-lab` findings
 remain. AG-024 implementation is complete across both repositories;
@@ -26,7 +26,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, ask GPT-5.6-Sol medium to review it, then fix the issues with the starting model, create branch from main (name should include the ticket tag) and open a PR.
+- After a ticket is implemented, ask GPT-5.6-Sol medium to review it, fix the findings with the starting model, then create a ticket branch (including the ticket tag) and open its PR. Milestone 4 follows the stacked workflow below.
 
 ## Ticket index
 
@@ -67,9 +67,9 @@ are stable identifiers, not issue numbers from an external tracker.
 
 ### Milestone 4 — Dynamic orchestration and measurement
 
-- [ ] [AG-025 — Experimental constrained supervisor](#ag-025)
-- [ ] [AG-026 — Distributed tracing and cost reporting](#ag-026)
-- [ ] [AG-027 — Budgeted evaluation runner](#ag-027)
+- [x] [AG-025 — Experimental constrained supervisor](#ag-025)
+- [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
+- [x] [AG-027 — Budgeted evaluation runner](#ag-027)
 - [ ] [AG-028 — Workflow comparison and findings](#ag-028)
 
 ## Milestone 1: standalone recording-proposal generator
@@ -1610,13 +1610,32 @@ Teacher UI redesign.
 **Exit criteria:** Architecture changes can be assessed against repeatable
 quality and operational measurements; the deterministic workflow remains the default.
 
+**Agent and PR workflow:**
+
+- Assign AG-025 through AG-028 to separate agents, one ticket and one branch per
+  agent. An agent changes only its ticket's implementation, tests, and required
+  documentation; dependency-blocked tickets wait for their prerequisites.
+- Keep the agent branches independently reviewable. Run the ticket's acceptance
+  checks, complete the GPT-5.6-Sol medium review/fix pass, and hand off the
+  verified branch before stacking it.
+- Use GitHub's [stacked pull requests](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/creating-stacked-pull-requests)
+  in this order: `main` → `AG-025` → `AG-026` → `AG-027` → `AG-028`. Each PR
+  targets the branch immediately below it, so every PR shows only its ticket's
+  diff; this linear ancestry is for review and does not add a code dependency
+  between AG-025 and AG-026. Merge from the bottom upward.
+- AG-025 and AG-026 may be implemented in parallel because both depend only on
+  AG-024. When the work is ready, rebase/link their branches into the stack;
+  AG-027 waits for AG-026 and AG-028 waits for AG-025 and AG-027.
+- Do not mark a ticket complete or merge its layer until its own acceptance
+  criteria and verification pass.
+
 ### AG-025
 
 **Title:** Add an experimental constrained supervisor  
 **Stage:** 9  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-024](#ag-024)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Compare code-selected steps with model-selected
 actions while keeping business guarantees outside model control.
@@ -1649,7 +1668,7 @@ frameworks, and model-written executable code.
 **Stage:** 10  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-024](#ag-024)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Understand how execution traces and usage
 metadata explain slow, failed, and expensive runs across asynchronous boundaries.
@@ -1675,6 +1694,8 @@ and redaction to persisted artifacts and logs.
 
 **Verification:** Use an in-memory trace exporter, known token/duration fixtures,
 missing-data and null-cost cases, redaction probes, and controlled retention time.
+Combined verification passes: `npm test` (263), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check`.
 
 **Out of scope:** Logging hidden model reasoning, billing guarantees, indefinite
 raw-payload retention, and new monitoring microservices.
@@ -1685,7 +1706,7 @@ raw-payload retention, and new monitoring microservices.
 **Stage:** 10  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-006](#ag-006), [AG-011](#ag-011), [AG-026](#ag-026)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Measure stochastic output quality separately
 from deterministic program correctness.
@@ -1714,6 +1735,10 @@ stop if missing usage prevents establishing the remaining token allowance.
 fake runs. Perform real local evaluation only through the documented explicit
 command and record actual results without inventing missing samples.
 
+**Verification completed:** `npm test` (266), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check`. Live local evaluation remains opt-in and
+was not run in CI or during this ticket verification.
+
 **Out of scope:** Live inference in CI, production patient data, automatic model
 promotion, and an uncalibrated LLM judge as the sole quality authority.
 
@@ -1723,7 +1748,8 @@ promotion, and an uncalibrated LLM judge as the sole quality authority.
 **Stage:** 10, learning review  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-025](#ag-025), [AG-027](#ag-027)  
-**Status:** Unstarted
+**Status:** In progress — comparison tooling is implemented; live local reports,
+therapist review, and evidence-based findings remain pending.
 
 **Problem and learning objective:** Determine whether additional orchestration
 earns its complexity rather than assuming more agents improve results.
@@ -1742,9 +1768,12 @@ and follow-up recommendations.
 - The supervisor remains experimental unless evidence supports a separate promotion decision.
 - Findings identify what should be retained, simplified, or deferred.
 
-**Verification:** Audit recorded versions and report arithmetic, reproduce a
-subset with the evaluation runner, and document actual human review. Local model runs
-are explicit; an offline dry run does not satisfy the real-quality comparison.
+**Verification:** `npm test` (269), `npm run typecheck`, `npm run lint`,
+`npm run build`, and `git diff --check` pass. The comparison accepts only
+recorded reports and keeps therapist ratings nullable with an explicit review
+checklist. No live local evaluation or therapist review was performed during
+this ticket verification; real quality evidence remains pending, so AG-028 is
+not yet complete.
 
 **Out of scope:** Automatic default changes, claims of clinical validation,
 unrequested provider migration, and implementing every proposed follow-up.

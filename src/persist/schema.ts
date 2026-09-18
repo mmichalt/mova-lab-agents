@@ -116,4 +116,12 @@ ALTER TABLE runs ADD COLUMN ollama_version TEXT;
 ALTER TABLE runs ADD COLUMN delivery_counts TEXT NOT NULL DEFAULT '{"generation":0,"import":0}' CHECK (json_valid(delivery_counts));
 `,
   },
+  {
+    id: 4,
+    name: '004_observability_metadata',
+    sql: `
+ALTER TABLE runs ADD COLUMN trace_contexts TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(trace_contexts));
+ALTER TABLE runs ADD COLUMN content_redacted_at INTEGER;
+`,
+  },
 ] as const;

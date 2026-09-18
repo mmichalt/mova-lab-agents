@@ -16,10 +16,16 @@
     "smoke:local": "node --env-file-if-exists=.env tests/smoke-local.ts",
     "smoke:tools": "node --env-file-if-exists=.env tests/smoke-tools.ts",
     "smoke:redis": "node --env-file-if-exists=.env tests/smoke-redis.ts",
+    "eval:compare": "node evals/comparison.ts",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "eval:local": "node --env-file-if-exists=.env evals/runner.ts --live"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
     "better-sqlite3": "^13.0.3",
     "bullmq": "^5.81.5",
     "express": "^5.2.1",

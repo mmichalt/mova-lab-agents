@@ -5,6 +5,7 @@ import { createApp } from './app.ts';
 import { type Config, loadConfig } from './config.ts';
 import { createWorkflowQueue, type WorkflowJobProducer } from './jobs.ts';
 import { createLogger, type Logger } from './logger.ts';
+import { getObservability, type Observability } from './observability.ts';
 import { openWorkflowStore, type WorkflowStore } from './persist/store.ts';
 
 export const SHUTDOWN_DRAIN_MS = 10_000;
@@ -14,8 +15,9 @@ export function startServer(
   logger: Logger,
   store: WorkflowStore,
   queue?: WorkflowJobProducer,
+  observability?: Observability,
 ) {
-  const app = createApp({ config, logger, store, queue });
+  const app = createApp({ config, logger, store, queue, observability });
   const server = app.listen(config.port);
   server.on('listening', () => {
     logger.info({ port: listeningPort(server) }, 'listening');
@@ -54,9 +56,10 @@ if (isEntrypoint()) {
     const config = loadConfig();
     const store = openWorkflowStore(config.sqlitePath);
     const logger = createLogger(config.logLevel);
+    const observability = getObservability(config);
     const queue = createWorkflowQueue(config.redisUrl, logger);
     logger.info({ sqlitePath: config.sqlitePath }, 'sqlite ready');
-    const server = startServer(config, logger, store, queue);
+    const server = startServer(config, logger, store, queue, observability);
     const closeStore = () => {
       try {
         store.close();
@@ -81,12 +84,14 @@ if (isEntrypoint()) {
         async () => {
           await closeQueue();
           closeStore();
+          await observability.shutdown();
           process.exit(0);
         },
         async (err: unknown) => {
           logger.error({ err }, 'shutdown failed');
           await closeQueue();
           closeStore();
+          await observability.shutdown();
           process.exit(1);
         },
       );
