@@ -31,6 +31,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. Must be `1`–`2147483647` so Node timers do not overflow. |
 | `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Must be `1`–`2147483647`. Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
 | `SQLITE_PATH` | `data/workflows.sqlite` | Local SQLite file for workflow artifacts (runs, attempts, candidate revisions, approvals, import receipts). Empty values use the default. `:memory:` is rejected. The Compose `agents` service always uses `/data/workflows.sqlite` on the `workflows` volume. |
+| `REDIS_URL` | `redis://localhost:6379` | BullMQ connection for the API producer and worker. Compose overrides it with `redis://redis:6379`. |
 
 `GET /health` is unauthenticated process liveness and makes no external calls.
 It does not parse a request body. `GET /ready` is also unauthenticated and
@@ -56,13 +57,14 @@ comes from that authenticated backend context, not from the JSON body or
 model output. The key is scoped to the actor and this create operation.
 The service hashes the normalized request: the same actor, key, and input
 return the existing run (`200`); a different input under the same key returns
-`409 IDEMPOTENCY_CONFLICT` without changing the original. A new run executes
-synchronously, checkpoints vocabulary, candidates, and checks, and returns
-`201` with the persisted-run representation. Successful generation reaches
-`AWAITING_APPROVAL`; execution failure is stored as `FAILED` and returned on
-the same resource. `GET /workflows/:id` returns that representation for the
-owning actor; a trusted Content Admin may review another teacher's run, while
-inaccessible runs remain `404`. Lease tokens are not
+`409 IDEMPOTENCY_CONFLICT` without changing the original. A new run is committed
+as `PENDING`, then its run ID is queued durably and returned as `202`; the worker
+loads SQLite, claims the run, and checkpoints vocabulary, candidates, and checks
+before completing its job. Successful generation reaches
+`AWAITING_APPROVAL`; execution failure is stored as `FAILED` on the same
+resource. `GET /workflows/:id` returns that representation for the owning actor;
+a trusted Content Admin may review another teacher's run, while inaccessible
+runs remain `404`. Lease tokens are not
 serialized. Active executions hold a 30-second expiring lease and heartbeat;
 an expired `RUNNING` lease is resumable through the authenticated
 `POST /workflows/:id/resume` endpoint. Explicitly retryable `FAILED` runs can
@@ -75,8 +77,9 @@ provider response but before its checkpoint commits, that LLM call may repeat.
 `POST /workflows/:id/approve` and `/reject` require the trusted Mova-Lab
 authorization context: `X-Actor-Id` plus `X-Content-Admin: true`. Approval accepts
 only the current `candidateVersion` and a real category returned by Mova-Lab,
-freezes the candidate payload and hash, then sequentially imports its recording
-proposals as unpublished drafts through the fixed Mova-Lab receiver. Each proposal
+freezes the candidate payload and hash, queues an import job, and returns `202`.
+The worker sequentially imports its recording proposals as unpublished drafts
+through the fixed Mova-Lab receiver. Each proposal
 uses `runId:proposalLocalId` as its stable source key and stores the returned draft
 ID as a durable, claim-fenced receipt. The run is `COMPLETED` only after every receipt is
 confirmed; partial failures retain successful receipts and are resumable, retrying
@@ -86,11 +89,11 @@ different decision returns `409`. The response exposes the durable `approval`
 record, including actor, timestamp, decision, category, frozen payload, and hash.
 The resource includes both `importProgress.receipts` and a top-level `imports`
 array with the same confirmed draft IDs so callers can render Content Studio links.
-A browser or proxy abort during synchronous generation is stored as retryable
-`CLIENT_DISCONNECTED` (`resumable: true`) inside the original deadline and budgets;
-it does not start background work. At most one workflow is admitted per process by default across create, resume,
-and the legacy endpoint; a full process returns `429 WORKFLOW_CAPACITY_EXCEEDED`.
-Duplicate-key retrieval remains available while capacity is full.
+A browser or proxy disconnect does not cancel an accepted queued run. The worker
+has concurrency one, so only one run uses the local Ollama instance at a time;
+queue wait is durable in Redis and workflow state remains authoritative in
+SQLite. The legacy `/content-drafts` endpoint remains synchronous and retains
+its request-lifetime cancellation behavior.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
@@ -287,14 +290,15 @@ curl -sS http://127.0.0.1:3001/content-drafts \
   -d @docs/examples/content-request.json
 ```
 
-SIGTERM/SIGINT stop accepting connections, drain for **10 seconds**, then abort
-remaining in-flight work.
+SIGTERM/SIGINT stop accepting connections; the API closes its queue producer, and
+the worker drains or interrupts active work within **10 seconds**.
 
 ## Commands
 
 ```sh
 npm install
 npm run dev         # native TypeScript: node --env-file-if-exists=.env src/server.ts
+npm run worker      # native TypeScript worker: node --env-file-if-exists=.env src/worker.ts
 npm run lint        # biome check .
 npm run format      # biome check --write .
 npx biome ci .      # CI: lint, format, and import sorting
@@ -316,8 +320,9 @@ live inference.
 Copy `.env.example` to `.env` first. Compose interpolates `SERVICE_TOKEN` from
 that file even for `config` and the `local-model` profile.
 
-The documented two-service topology is Nest on host port **3000** and agents on
-host port **3001**. Compose publishes `127.0.0.1:${AGENTS_HOST_PORT:-3001}:3000`
+The documented topology is Nest on host port **3000**, the agents API on host
+port **3001**, one agents worker, and Redis. Compose publishes
+`127.0.0.1:${AGENTS_HOST_PORT:-3001}:3000`
 and sends Mova-Lab traffic to `http://host.docker.internal:3000`. Updating only
 the host `PORT` variable does not change that mapping or the in-container listen
 port (`PORT=3000`).

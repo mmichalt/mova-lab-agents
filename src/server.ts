@@ -3,13 +3,19 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createApp } from './app.ts';
 import { type Config, loadConfig } from './config.ts';
+import { createWorkflowQueue, type WorkflowJobProducer } from './jobs.ts';
 import { createLogger, type Logger } from './logger.ts';
 import { openWorkflowStore, type WorkflowStore } from './persist/store.ts';
 
 export const SHUTDOWN_DRAIN_MS = 10_000;
 
-export function startServer(config: Config, logger: Logger, store: WorkflowStore) {
-  const app = createApp({ config, logger, store });
+export function startServer(
+  config: Config,
+  logger: Logger,
+  store: WorkflowStore,
+  queue?: WorkflowJobProducer,
+) {
+  const app = createApp({ config, logger, store, queue });
   const server = app.listen(config.port);
   server.on('listening', () => {
     logger.info({ port: listeningPort(server) }, 'listening');
@@ -48,8 +54,9 @@ if (isEntrypoint()) {
     const config = loadConfig();
     const store = openWorkflowStore(config.sqlitePath);
     const logger = createLogger(config.logLevel);
+    const queue = createWorkflowQueue(config.redisUrl, logger);
     logger.info({ sqlitePath: config.sqlitePath }, 'sqlite ready');
-    const server = startServer(config, logger, store);
+    const server = startServer(config, logger, store, queue);
     const closeStore = () => {
       try {
         store.close();
@@ -57,8 +64,11 @@ if (isEntrypoint()) {
         logger.error({ err }, 'sqlite close failed');
       }
     };
+    const closeQueue = () =>
+      queue.close().catch((err) => logger.error({ err }, 'queue close failed'));
     server.on('error', (err) => {
       logger.error({ err }, 'listen failed');
+      void closeQueue();
       closeStore();
       process.exit(1);
     });
@@ -68,12 +78,14 @@ if (isEntrypoint()) {
       stopping = true;
       logger.info({ signal, drainMs: SHUTDOWN_DRAIN_MS }, 'shutting down');
       void shutDown(server).then(
-        () => {
+        async () => {
+          await closeQueue();
           closeStore();
           process.exit(0);
         },
-        (err: unknown) => {
+        async (err: unknown) => {
           logger.error({ err }, 'shutdown failed');
+          await closeQueue();
           closeStore();
           process.exit(1);
         },

@@ -32,6 +32,7 @@ test('loadConfig defaults empty PORT and LOG_LEVEL', () => {
   assert.equal(config.llmAttemptTimeoutMs, 120000);
   assert.equal(config.workflowTimeoutMs, 600000);
   assert.equal(config.sqlitePath, 'data/workflows.sqlite');
+  assert.equal(config.redisUrl, 'redis://localhost:6379');
 });
 
 test('loadConfig rejects missing, empty, or invalid values', () => {
@@ -84,6 +85,10 @@ test('loadConfig rejects missing, empty, or invalid values', () => {
   );
   assert.equal(loadConfig(env({ SQLITE_PATH: '' })).sqlitePath, 'data/workflows.sqlite');
   assert.throws(() => loadConfig(env({ SQLITE_PATH: ':memory:' })), /Invalid configuration/);
+  assert.throws(
+    () => loadConfig(env({ REDIS_URL: 'http://localhost:6379' })),
+    /Invalid configuration/,
+  );
   assert.equal(
     loadConfig(env({ SQLITE_PATH: ' /tmp/workflows.sqlite ' })).sqlitePath,
     '/tmp/workflows.sqlite',

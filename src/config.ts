@@ -15,6 +15,8 @@ const httpOrigin = z.url({ protocol: /^https?$/ }).transform((value, ctx) => {
   return url.origin;
 });
 
+const redisUrl = z.url({ protocol: /^rediss?$/ });
+
 const positiveInt = z.coerce.number().int().positive();
 /** Node `setTimeout` / `AbortSignal.timeout` treat values above this as 1 ms. */
 export const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
@@ -38,6 +40,7 @@ const schema = z.object({
     .trim()
     .min(1)
     .refine((value) => value !== ':memory:', { error: 'Must be a filesystem path' }),
+  REDIS_URL: redisUrl,
 });
 
 export type Config = {
@@ -54,6 +57,7 @@ export type Config = {
   llmAttemptTimeoutMs: number;
   workflowTimeoutMs: number;
   sqlitePath: string;
+  redisUrl: string;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -71,6 +75,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     LLM_ATTEMPT_TIMEOUT_MS: env.LLM_ATTEMPT_TIMEOUT_MS?.trim() || '120000',
     WORKFLOW_TIMEOUT_MS: env.WORKFLOW_TIMEOUT_MS?.trim() || '600000',
     SQLITE_PATH: env.SQLITE_PATH?.trim() || 'data/workflows.sqlite',
+    REDIS_URL: env.REDIS_URL?.trim() || 'redis://localhost:6379',
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${z.prettifyError(parsed.error)}`);
@@ -89,5 +94,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     llmAttemptTimeoutMs: parsed.data.LLM_ATTEMPT_TIMEOUT_MS,
     workflowTimeoutMs: parsed.data.WORKFLOW_TIMEOUT_MS,
     sqlitePath: parsed.data.SQLITE_PATH,
+    redisUrl: parsed.data.REDIS_URL,
   };
 }
