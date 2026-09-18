@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, AG-026, and AG-029 are marked
+**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, AG-026, AG-027, and AG-029 are marked
 complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
 follow-up is in progress in this working tree; sibling `mova-lab` findings
 remain. AG-024 implementation is complete across both repositories;

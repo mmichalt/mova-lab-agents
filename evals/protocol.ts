@@ -3,6 +3,7 @@ import {
   generationResultSchema,
   type RecordingProposal,
 } from '../src/content/schemas.ts';
+import { phraseTokens } from '../src/content/validation.ts';
 
 export const EXPECTED_PROPERTIES_VERSION = 'properties/v1';
 export const THERAPIST_RUBRIC_VERSION = 'therapist-rubric/v1';
@@ -48,9 +49,7 @@ export function assessGeneration(request: ContentRequest, result: unknown): Qual
 export function duplicatePhraseCount(result: unknown) {
   const parsed = generationResultSchema.safeParse(result);
   if (!parsed.success) return 0;
-  const phrases = parsed.data.proposals.map((proposal) =>
-    proposal.phrase.trim().toLocaleLowerCase('uk'),
-  );
+  const phrases = parsed.data.proposals.map((proposal) => phraseTokens(proposal.phrase).join(' '));
   return phrases.length - new Set(phrases).size;
 }
 

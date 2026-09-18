@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { loadConfig } from '../src/config.ts';
 import { PROMPT_VERSIONS } from '../src/content/runs.ts';
-import { type ContentRequest, contentRequestSchema } from '../src/content/schemas.ts';
+import {
+  type ContentRequest,
+  contentRequestSchema,
+  generationResultSchema,
+  type RecordingProposal,
+} from '../src/content/schemas.ts';
 import { type GenerationState, runContentWorkflow, withLocalIds } from '../src/content/workflow.ts';
 import { createLogger } from '../src/logger.ts';
 import { getObservability } from '../src/observability.ts';
@@ -73,6 +78,7 @@ export const DEFAULT_BUDGET: EvaluationBudget = {
 export type EvaluationExecution = {
   result: unknown;
   elapsedMs?: number | null;
+  errorCode?: string | null;
   usage?: {
     calls?: number;
     inputTokens?: number | null;
@@ -126,17 +132,31 @@ export type EvaluationCaseReport = {
     properties: QualityFinding[];
     duplicates: number;
     revisions: number | null;
+    proposals: RecordingProposal[] | null;
+    therapist: {
+      rubricVersion: string;
+      score: number | null;
+      dimensions: Record<string, number | null>;
+      comments: string | null;
+    };
     failure: { status: string; code: string | null } | null;
   };
   latencyMs: number | null;
   usage: EvaluationExecution['usage'] | null;
+  metadata: Partial<EvaluationMetadata> | null;
   cost: { estimatedCostUsd: number | null; status: 'unmeasured_local' | 'reported' };
 };
 
 export type EvaluationReport = {
   reportVersion: string;
   protocolVersion: string;
-  corpus: { version: string; cases: number; holdoutCaseIds: string[] };
+  corpus: {
+    version: string;
+    propertiesVersion: string;
+    rubricVersion: string;
+    cases: number;
+    holdoutCaseIds: string[];
+  };
   budget: EvaluationBudget;
   status: 'complete' | 'incomplete';
   metadata: EvaluationMetadata;
@@ -150,7 +170,7 @@ export type EvaluationReport = {
     revisions: number;
     failures: Record<string, number>;
     latencyMs: { min: number | null; max: number | null; mean: number | null };
-    usage: { calls: number; outputTokens: number | null; estimatedCostUsd: number | null };
+    usage: { calls: number | null; outputTokens: number | null; estimatedCostUsd: number | null };
   };
   runs: EvaluationCaseReport[];
   incomplete: Array<{ caseId: string; repetition: number; reason: string }>;
@@ -179,6 +199,10 @@ export async function evaluateCorpus(
   const deadline = startedAt + budget.maxElapsedMs;
   let usedCalls = 0;
   let usedTokens = 0;
+  let measuredCalls = 0;
+  let measuredCallsKnown = true;
+  let measuredOutputTokens = 0;
+  let measuredOutputTokensKnown = true;
   let reservedCalls = 0;
   let reservedTokens = 0;
   let stopReason: string | undefined;
@@ -236,7 +260,10 @@ export async function evaluateCorpus(
               elapsedMs: null,
               usage: undefined,
               metadata: undefined,
-              error: error instanceof Error ? error.message : String(error),
+              errorCode:
+                typeof error === 'object' && error !== null && 'code' in error
+                  ? String((error as { code: unknown }).code)
+                  : 'EVALUATION_EXECUTION_FAILED',
             },
           };
         }
@@ -252,18 +279,22 @@ export async function evaluateCorpus(
       const tokenBudgetExceeded =
         typeof outputTokens === 'number' && outputTokens > reservation.tokens;
       usedCalls += typeof calls === 'number' ? calls : reservation.calls;
+      if (typeof calls === 'number') measuredCalls += calls;
+      else measuredCallsKnown = false;
       if (typeof outputTokens === 'number') {
         usedTokens += outputTokens;
+        measuredOutputTokens += outputTokens;
       } else {
         usedTokens += reservation.tokens;
+        measuredOutputTokensKnown = false;
         stopReason = 'missing_usage';
       }
       if (callBudgetExceeded || tokenBudgetExceeded) stopReason = 'budget_exceeded';
       if ('metadata' in execution && execution.metadata) {
         observedMetadata = { ...observedMetadata, ...execution.metadata };
       }
-      const error = 'error' in execution ? execution.error : undefined;
-      const findings = error
+      const errorCode = execution.errorCode ?? null;
+      const findings = errorCode
         ? assessGeneration(task.case.request, undefined)
         : assessGeneration(task.case.request, execution.result);
       const parsed =
@@ -275,7 +306,7 @@ export async function evaluateCorpus(
             })
           : undefined;
       const incompleteReason =
-        error ??
+        errorCode ??
         (typeof outputTokens !== 'number'
           ? 'missing_usage'
           : callBudgetExceeded || tokenBudgetExceeded
@@ -298,16 +329,19 @@ export async function evaluateCorpus(
           properties: findings,
           duplicates: duplicatePhraseCount(execution.result),
           revisions: parsed?.revisionCount ?? null,
+          proposals: extractProposals(execution.result),
+          therapist: emptyTherapistReview(),
           failure:
-            parsed?.status === 'FAILED' || error
+            parsed?.status === 'FAILED' || errorCode
               ? {
                   status: parsed?.status ?? 'operational_failure',
-                  code: parsed?.error?.code ?? null,
+                  code: parsed?.error?.code ?? errorCode,
                 }
               : null,
         },
         latencyMs: execution.elapsedMs ?? null,
         usage: execution.usage ?? null,
+        metadata: execution.metadata ?? null,
         cost: {
           estimatedCostUsd: execution.usage?.estimatedCostUsd ?? null,
           status: execution.usage?.estimatedCostUsd == null ? 'unmeasured_local' : 'reported',
@@ -334,9 +368,7 @@ export async function evaluateCorpus(
     const key = run.outcomes.failure?.code ?? run.incompleteReason;
     if (key) failures[key] = (failures[key] ?? 0) + 1;
   }
-  const outputTokens = runs.every((run) => run.usage?.outputTokens != null)
-    ? runs.reduce((sum, run) => sum + (run.usage?.outputTokens ?? 0), 0)
-    : null;
+  const outputTokens = measuredOutputTokensKnown ? measuredOutputTokens : null;
   const estimatedCostUsd = runs.every((run) => run.usage?.estimatedCostUsd != null)
     ? runs.reduce((sum, run) => sum + (run.usage?.estimatedCostUsd ?? 0), 0)
     : null;
@@ -356,6 +388,8 @@ export async function evaluateCorpus(
     protocolVersion: EVALUATION_PROTOCOL_VERSION,
     corpus: {
       version: corpus.corpusVersion,
+      propertiesVersion: corpus.propertiesVersion,
+      rubricVersion: corpus.rubricVersion,
       cases: corpus.cases.length,
       holdoutCaseIds: corpus.holdoutCaseIds,
     },
@@ -382,7 +416,11 @@ export async function evaluateCorpus(
           ? latencies.reduce((sum, value) => sum + value, 0) / latencies.length
           : null,
       },
-      usage: { calls: usedCalls, outputTokens, estimatedCostUsd },
+      usage: {
+        calls: measuredCallsKnown ? measuredCalls : null,
+        outputTokens,
+        estimatedCostUsd,
+      },
     },
     runs,
     incomplete: runs
@@ -409,10 +447,13 @@ function incompleteReport(task: Task, reason: string): EvaluationCaseReport {
       properties: assessGeneration(task.case.request, undefined),
       duplicates: 0,
       revisions: null,
+      proposals: null,
+      therapist: emptyTherapistReview(),
       failure: { status: 'incomplete', code: reason },
     },
     latencyMs: null,
     usage: null,
+    metadata: null,
     cost: { estimatedCostUsd: null, status: 'unmeasured_local' },
   };
 }
@@ -442,8 +483,12 @@ async function runLive() {
       const state = await runContentWorkflow({
         config: {
           ...config,
-          ollamaNumPredict: Math.min(config.ollamaNumPredict, maxGeneratedTokens),
+          ollamaNumPredict: Math.min(
+            config.ollamaNumPredict,
+            Math.max(1, Math.floor(maxGeneratedTokens / Math.max(1, maxCalls))),
+          ),
           llmAttemptTimeoutMs: timeoutMs,
+          workflowTimeoutMs: timeoutMs,
         },
         logger,
         requestId: `${item.id}-${repetition}-${randomUUID()}`,
@@ -455,6 +500,7 @@ async function runLive() {
       return {
         result: stateResult(state),
         elapsedMs: Date.now() - started,
+        errorCode: state.error?.code ?? null,
         usage: {
           calls: state.providerRequests,
           inputTokens: sumTokens(state.usage.map((item) => item.inputTokens)),
@@ -480,6 +526,20 @@ async function runLive() {
   writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${path}\n${JSON.stringify(report.summary, null, 2)}\n`);
   await observability.shutdown();
+}
+
+function extractProposals(result: unknown): RecordingProposal[] | null {
+  const parsed = generationResultSchema.safeParse(result);
+  return parsed.success && parsed.data.status === 'READY_FOR_REVIEW' ? parsed.data.proposals : null;
+}
+
+function emptyTherapistReview() {
+  return {
+    rubricVersion: THERAPIST_RUBRIC_VERSION,
+    score: null,
+    dimensions: {},
+    comments: null,
+  };
 }
 
 function stateResult(state: GenerationState) {
