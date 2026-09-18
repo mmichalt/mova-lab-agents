@@ -3,6 +3,7 @@ import type { Config } from '../config.ts';
 import { normalizePhrase } from '../content/validation.ts';
 import { AppError } from '../errors.ts';
 import { abortError } from '../llm/execution.ts';
+import { type Observability, withSpan } from '../observability.ts';
 
 export const GENERATION_CONTRACT_VERSION = 'recording-generation/v1';
 export const SEARCH_QUERY_MAX_LENGTH = 120;
@@ -116,6 +117,7 @@ export type ImportedRecordingDraft = z.infer<typeof importedDraftSchema>;
 type LabCall = {
   config: Config;
   signal: AbortSignal;
+  observability?: Observability;
 };
 
 export async function readGenerationConstraints(options: LabCall): Promise<GenerationConstraints> {
@@ -205,23 +207,30 @@ async function getJson<T>(
   if (workflowSignal.aborted) throw abortError(workflowSignal);
   const signal = AbortSignal.any([workflowSignal, AbortSignal.timeout(config.movaLabTimeoutMs)]);
   const url = apiUrl(config.movaLabBaseUrl, path, query);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${config.movaLabServiceToken}`,
-      },
-      signal,
-    });
-  } catch (err) {
-    throw mapFetchError(err, workflowSignal);
-  }
+  return withSpan(
+    options.observability,
+    `mova_lab.${path.split('/').pop() ?? 'request'}`,
+    { attributes: { 'http.request.method': 'GET', 'mova_lab.path': path } },
+    async () => {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            accept: 'application/json',
+            authorization: `Bearer ${config.movaLabServiceToken}`,
+          },
+          signal,
+        });
+      } catch (err) {
+        throw mapFetchError(err, workflowSignal);
+      }
 
-  const raw = await readBody(response, signal, workflowSignal);
-  if (!response.ok) throw mapStatus(response.status);
-  return parseJson(raw, schema);
+      const raw = await readBody(response, signal, workflowSignal);
+      if (!response.ok) throw mapStatus(response.status);
+      return parseJson(raw, schema);
+    },
+  );
 }
 
 async function postJson<T>(
@@ -234,26 +243,33 @@ async function postJson<T>(
   const { config, signal: workflowSignal } = options;
   if (workflowSignal.aborted) throw abortError(workflowSignal);
   const signal = AbortSignal.any([workflowSignal, AbortSignal.timeout(config.movaLabTimeoutMs)]);
-  let response: Response;
-  try {
-    response = await fetch(apiUrl(config.movaLabBaseUrl, path), {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${config.movaLabServiceToken}`,
-        'content-type': 'application/json',
-        'x-actor-id': actorId,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err) {
-    throw mapFetchError(err, workflowSignal);
-  }
+  return withSpan(
+    options.observability,
+    `mova_lab.${path.split('/').pop() ?? 'request'}`,
+    { attributes: { 'http.request.method': 'POST', 'mova_lab.path': path } },
+    async () => {
+      let response: Response;
+      try {
+        response = await fetch(apiUrl(config.movaLabBaseUrl, path), {
+          method: 'POST',
+          headers: {
+            accept: 'application/json',
+            authorization: `Bearer ${config.movaLabServiceToken}`,
+            'content-type': 'application/json',
+            'x-actor-id': actorId,
+          },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch (err) {
+        throw mapFetchError(err, workflowSignal);
+      }
 
-  const raw = await readBody(response, signal, workflowSignal);
-  if (!response.ok) throw mapPostStatus(response.status);
-  return parseJson(raw, schema);
+      const raw = await readBody(response, signal, workflowSignal);
+      if (!response.ok) throw mapPostStatus(response.status);
+      return parseJson(raw, schema);
+    },
+  );
 }
 
 function parseJson<T>(raw: string, schema: z.ZodType<T>): T {

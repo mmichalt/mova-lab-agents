@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
+import type { TraceContextRecord } from '../observability.ts';
 import { MIGRATIONS, SCHEMA_VERSION, SQLITE_BUSY_TIMEOUT_MS } from './schema.ts';
 
 export {
@@ -66,6 +67,8 @@ export type PersistedRun = {
   modelTag: string | null;
   modelDigest: string | null;
   ollamaVersion: string | null;
+  traceContexts: TraceContextRecord[];
+  contentRedactedAt: number | null;
   limits: PersistedLimits;
   consumed: PersistedConsumed;
   deliveryCounts: PersistedDeliveryCounts;
@@ -138,6 +141,7 @@ export type CreateRunInput = {
   modelDigest?: string | null;
   ollamaVersion?: string | null;
   initialState?: unknown;
+  traceContexts?: TraceContextRecord[];
   limits: PersistedLimits;
   now: number;
 };
@@ -253,6 +257,12 @@ export type WorkflowStore = {
   backupTo: (destinationPath: string) => string;
   sqliteSettings: () => { journalMode: string; foreignKeys: number; busyTimeout: number };
   close: () => void;
+  appendTraceContext: (runId: string, traceContext: TraceContextRecord, now: number) => void;
+  purgeRetention: (input: {
+    now: number;
+    contentRetentionMs?: number;
+    tombstoneRetentionMs?: number;
+  }) => { redacted: number; deleted: number };
 };
 
 type RunRow = {
@@ -271,6 +281,8 @@ type RunRow = {
   model_tag: string | null;
   model_digest: string | null;
   ollama_version: string | null;
+  trace_contexts: string;
+  content_redacted_at: number | null;
   limits: string;
   consumed: string;
   delivery_counts: string;
@@ -300,11 +312,11 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     INSERT INTO runs (
       id, owner_id, idempotency_key, input_hash, normalized_input, status, phase,
       state_version, schema_version, workflow_version, constraints_version, prompt_versions,
-      model_tag, model_digest, ollama_version, limits, consumed, delivery_counts, state, created_at, updated_at
+      model_tag, model_digest, ollama_version, trace_contexts, limits, consumed, delivery_counts, state, created_at, updated_at
     ) VALUES (
       @id, @ownerId, @idempotencyKey, @inputHash, @normalizedInput, 'PENDING', 'vocabulary',
       0, @schemaVersion, @workflowVersion, @constraintsVersion, @promptVersions,
-      @modelTag, @modelDigest, @ollamaVersion, @limits, @consumed, @deliveryCounts, @state, @now, @now
+      @modelTag, @modelDigest, @ollamaVersion, @traceContexts, @limits, @consumed, @deliveryCounts, @state, @now, @now
     )
   `);
   const updateCheckpointStmt = db.prepare(`
@@ -506,6 +518,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         modelTag: input.modelTag ?? null,
         modelDigest: input.modelDigest ?? null,
         ollamaVersion: input.ollamaVersion ?? null,
+        traceContexts: jsonText(input.traceContexts ?? []),
         limits: jsonText(input.limits),
         consumed: jsonText({ providerRequests: 0, revisionCount: 0 }),
         deliveryCounts: jsonText({ generation: 0, import: 0 }),
@@ -891,6 +904,70 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
       return next;
     });
 
+  const appendTraceContext: WorkflowStore['appendTraceContext'] = (runId, traceContext, now) =>
+    wrap(() => {
+      const run = readRun(runId);
+      if (!run) throw new PersistError('NOT_FOUND', 'Run not found.');
+      if (
+        run.traceContexts.some(
+          (current) =>
+            current.traceId === traceContext.traceId && current.spanId === traceContext.spanId,
+        )
+      ) {
+        return;
+      }
+      const traceContexts = [...run.traceContexts, traceContext].slice(-8);
+      db.prepare(
+        'UPDATE runs SET trace_contexts = @traceContexts, updated_at = @now WHERE id = @id',
+      ).run({ id: runId, traceContexts: jsonText(traceContexts), now });
+    });
+
+  const purgeRetention: WorkflowStore['purgeRetention'] = (input) =>
+    wrap(() => {
+      const contentCutoff = input.now - (input.contentRetentionMs ?? 30 * 24 * 60 * 60 * 1000);
+      const tombstoneCutoff = input.now - (input.tombstoneRetentionMs ?? 90 * 24 * 60 * 60 * 1000);
+      const redactionCandidates = db
+        .prepare(
+          `SELECT id FROM runs
+           WHERE status IN ('REJECTED', 'COMPLETED', 'FAILED')
+             AND content_redacted_at IS NULL
+             AND updated_at <= @cutoff
+             AND NOT (status = 'FAILED' AND json_extract(state, '$.error.retryable') = 1)`,
+        )
+        .all({ cutoff: contentCutoff }) as Array<{ id: string }>;
+      const redact = db.transaction(() => {
+        for (const { id } of redactionCandidates) {
+          db.prepare('DELETE FROM step_attempts WHERE run_id = ?').run(id);
+          db.prepare('DELETE FROM candidate_revisions WHERE run_id = ?').run(id);
+          db.prepare('DELETE FROM approvals WHERE run_id = ?').run(id);
+          db.prepare('DELETE FROM import_receipts WHERE run_id = ?').run(id);
+          db.prepare(
+            `UPDATE runs SET
+              normalized_input = 'null',
+              prompt_versions = '{}',
+              model_tag = NULL,
+              model_digest = NULL,
+              ollama_version = NULL,
+              trace_contexts = '[]',
+              state = @state,
+              content_redacted_at = @now,
+              updated_at = @now
+             WHERE id = @id`,
+          ).run({ id, state: jsonText({ redacted: true }), now: input.now });
+        }
+      });
+      redact();
+      const deleted = db
+        .prepare(
+          `DELETE FROM runs
+           WHERE status IN ('REJECTED', 'COMPLETED', 'FAILED')
+             AND content_redacted_at IS NOT NULL
+             AND content_redacted_at <= @cutoff`,
+        )
+        .run({ cutoff: tombstoneCutoff }).changes;
+      return { redacted: redactionCandidates.length, deleted };
+    });
+
   const finishAttempt: WorkflowStore['finishAttempt'] = (input) =>
     wrap(() => {
       const updated = finishAttemptStmt.run({
@@ -971,6 +1048,8 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
     saveImportReceipt: (input) => receiptSaveTx(input),
     updateImportReceipt: (input) => receiptUpdateTx(input),
     completeImport: (input) => importCompleteTx(input),
+    appendTraceContext,
+    purgeRetention,
     backupTo: (destinationPath) => {
       const dest = resolve(destinationPath);
       mkdirSync(dirname(dest), { recursive: true });
@@ -1223,6 +1302,8 @@ function mapRun(row: RunRow): PersistedRun {
     modelTag: row.model_tag,
     modelDigest: row.model_digest,
     ollamaVersion: row.ollama_version,
+    traceContexts: unpack(row.trace_contexts) as TraceContextRecord[],
+    contentRedactedAt: row.content_redacted_at,
     limits: unpack(row.limits) as PersistedLimits,
     consumed: unpack(row.consumed) as PersistedConsumed,
     deliveryCounts: unpack(row.delivery_counts) as PersistedDeliveryCounts,

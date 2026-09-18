@@ -335,6 +335,26 @@ live inference. `npm run smoke:redis` is separate: it requires a reachable
 Redis instance and verifies reconciliation, asynchronous approval/import, and
 bounded redelivery without live model inference.
 
+### Observability
+
+AG-026 uses explicit OpenTelemetry spans from the Node SDK. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to opt into OTLP export; without it, spans are
+created but discarded. HTTP requests, queue jobs, workflow steps, provider
+attempts, Mova-Lab calls, approvals, and imports use correlation IDs and links
+across async boundaries. Approval waiting never keeps a span open.
+
+Usage reports keep input, cached-input, and output tokens separate. Missing
+measurements remain `null`; local Ollama has no per-token API bill, so
+`estimatedCostUsd` is always `null` with `costStatus: "unmeasured_local"`.
+Runtime reports retain model digest/quantization, Ollama version, context/output
+settings, host metadata, and explicit millisecond/nanosecond duration units.
+
+`DIAGNOSTIC_CAPTURE=redacted` enables bounded redacted diagnostic attributes;
+raw prompts and responses are never retained by default. Terminal workflow
+payloads are scrubbed after 30 days, idempotency tombstones after 90 days, and
+pending human reviews are preserved. The worker runs `store.purgeRetention()`
+on startup and every six hours; no monitoring service or billing table is added.
+
 ## Docker
 
 Copy `.env.example` to `.env` first. Compose interpolates `SERVICE_TOKEN` from

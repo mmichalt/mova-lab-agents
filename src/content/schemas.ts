@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { AttemptTimingReport, RuntimeMetadata, UsageReport } from '../observability.ts';
 
 export const limits = {
   title: 160,
@@ -208,7 +209,46 @@ export const workflowResourceSchema = z.strictObject({
     providerRequests: z.int().nonnegative(),
     revisionCount: z.int().nonnegative(),
   }),
-  request: contentRequestSchema,
+  observability: z
+    .strictObject({
+      usage: z.strictObject({
+        attempts: z.int().nonnegative(),
+        inputTokens: tokenCount,
+        cachedInputTokens: tokenCount,
+        outputTokens: tokenCount,
+        estimatedCostUsd: z.null(),
+        costStatus: z.literal('unmeasured_local'),
+      }),
+      timing: z.strictObject({
+        attempts: z.int().nonnegative(),
+        wallDurationMs: z.number().nonnegative().nullable(),
+        loadDurationNs: z.number().nonnegative().nullable(),
+        promptEvaluationDurationNs: z.number().nonnegative().nullable(),
+        generationDurationNs: z.number().nonnegative().nullable(),
+        coldAttempts: z.int().nonnegative(),
+        warmAttempts: z.int().nonnegative(),
+      }),
+      runtime: z.strictObject({
+        modelTag: z.string().min(1).nullable(),
+        modelDigest: z.string().min(1).nullable(),
+        quantization: z.string().min(1).nullable(),
+        ollamaVersion: z.string().min(1).nullable(),
+        contextTokens: z.int().positive(),
+        outputTokens: z.int().positive(),
+        hardware: z.strictObject({
+          platform: z.string().min(1),
+          arch: z.string().min(1),
+          cpuModel: z.string().min(1).nullable(),
+          cpuCount: z.int().positive(),
+          memoryBytes: z.number().positive(),
+          gpu: z.null(),
+        }),
+        durationUnits: z.literal('wall_ms'),
+        loadDurationUnits: z.literal('nanoseconds'),
+      }),
+    })
+    .optional(),
+  request: contentRequestSchema.nullable(),
   result: z.strictObject({
     status: z.enum(['PENDING', 'RUNNING', 'AWAITING_APPROVAL', 'REJECTED', 'COMPLETED', 'FAILED']),
     candidateVersion: z.int().nonnegative(),
@@ -266,3 +306,8 @@ export type ValidationIssue = z.infer<typeof validationIssueSchema>;
 export type CheckResult = z.infer<typeof checkResultSchema>;
 export type LlmUsage = z.infer<typeof llmUsageSchema>;
 export type GenerationResult = z.infer<typeof generationResultSchema>;
+export type ObservabilityReport = {
+  usage: UsageReport;
+  timing: AttemptTimingReport;
+  runtime: RuntimeMetadata;
+};

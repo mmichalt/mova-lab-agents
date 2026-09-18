@@ -1,4 +1,12 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  type Context,
+  context,
+  propagation,
+  ROOT_CONTEXT,
+  SpanKind,
+  trace,
+} from '@opentelemetry/api';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Config } from './config.ts';
 import {
@@ -15,6 +23,12 @@ import { AppError } from './errors.ts';
 import type { WorkflowJobProducer } from './jobs.ts';
 import { type Clock, clientDisconnected } from './llm/execution.ts';
 import type { Logger } from './logger.ts';
+import {
+  getObservability,
+  type Observability,
+  safeException,
+  spanContextRecord,
+} from './observability.ts';
 import type { WorkflowStore } from './persist/store.ts';
 import { inspectReadiness } from './ready.ts';
 
@@ -41,16 +55,44 @@ export function createApp(options: {
   maxProviderRequests?: number;
   maxInFlightWorkflows?: number;
   queue?: WorkflowJobProducer;
+  observability?: Observability;
 }) {
   const app = express();
+  const observability = options.observability ?? getObservability(options.config);
   const admission = createInFlightAdmission(options.maxInFlightWorkflows ?? 1);
   app.disable('x-powered-by');
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     const requestId = randomUUID();
+    const parent = propagation.extract(ROOT_CONTEXT, req.headers, headerGetter);
+    const span = observability.startSpan(
+      'http.request',
+      {
+        kind: SpanKind.SERVER,
+        attributes: {
+          'http.request.method': req.method,
+          'url.path': req.path,
+          'service.request_id': requestId,
+        },
+      },
+      parent,
+    );
+    const spanContext = trace.setSpan(parent, span);
+    let ended = false;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      span.setAttribute('http.response.status_code', res.statusCode);
+      span.end();
+    };
+    res.once('finish', end);
+    res.once('close', end);
     res.locals.requestId = requestId;
     res.locals.log = options.logger.child({ requestId });
+    res.locals.observability = observability;
+    res.locals.traceContext = spanContext;
+    res.locals.traceRecord = spanContextRecord(span);
     res.setHeader('x-request-id', requestId);
-    next();
+    context.with(spanContext, next);
   });
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -83,6 +125,7 @@ export function createApp(options: {
             clock: options.clock,
             maxProviderRequests: options.maxProviderRequests,
             signal,
+            observability,
           }),
         );
       } finally {
@@ -103,6 +146,8 @@ export function createApp(options: {
         clock: options.clock,
         maxProviderRequests: options.maxProviderRequests,
         signal,
+        observability,
+        traceContext: res.locals.traceRecord,
         admission: options.queue ? undefined : admission,
         queue: options.queue,
       });
@@ -142,6 +187,8 @@ export function createApp(options: {
         signal,
         canReview: true,
         queue: options.queue,
+        observability,
+        traceContext: res.locals.traceRecord,
       });
       res.status(options.queue && !existing ? 202 : 200).json(resource);
     });
@@ -161,6 +208,8 @@ export function createApp(options: {
           signal,
           canReview: true,
           queue: options.queue,
+          observability,
+          traceContext: res.locals.traceRecord,
         }),
       );
     });
@@ -182,6 +231,7 @@ export function createApp(options: {
           signal,
           canReview: isContentAdmin(req),
           queue: options.queue,
+          observability,
         });
         res.status(options.queue ? 202 : 200).json(resource);
       } finally {
@@ -261,6 +311,11 @@ function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunc
   }
   const mapped = mapError(err);
   if (mapped.status >= 500) {
+    const span = trace.getSpan(res.locals.traceContext as Context);
+    span?.recordException(
+      safeException(err, (res.locals.observability as Observability).diagnosticCapture),
+    );
+    span?.setStatus({ code: 2 });
     (res.locals.log as Logger | undefined)?.error({ err }, 'request failed');
   }
   res.status(mapped.status).json({
@@ -272,6 +327,15 @@ function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunc
     },
   });
 }
+
+const headerGetter = {
+  get(carrier: Record<string, string | string[] | undefined>, key: string) {
+    return carrier[key];
+  },
+  keys(carrier: Record<string, string | string[] | undefined>) {
+    return Object.keys(carrier);
+  },
+};
 
 function withRequestAbort(
   res: Response,

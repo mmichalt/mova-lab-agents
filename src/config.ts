@@ -16,6 +16,11 @@ const httpOrigin = z.url({ protocol: /^https?$/ }).transform((value, ctx) => {
 });
 
 const redisUrl = z.url({ protocol: /^rediss?$/ });
+const optionalHttpUrl = z
+  .url({ protocol: /^https?$/ })
+  .nullable()
+  .optional()
+  .transform((value) => value ?? null);
 
 const positiveInt = z.coerce.number().int().positive();
 const booleanEnv = z.enum(['true', 'false']).transform((value) => value === 'true');
@@ -43,6 +48,9 @@ const schema = z.object({
     .refine((value) => value !== ':memory:', { error: 'Must be a filesystem path' }),
   REDIS_URL: redisUrl,
   EXPERIMENTAL_SUPERVISOR: booleanEnv,
+  OTEL_EXPORTER_OTLP_ENDPOINT: optionalHttpUrl,
+  OTEL_SERVICE_NAME: z.string().trim().min(1).regex(/^\S+$/),
+  DIAGNOSTIC_CAPTURE: z.enum(['off', 'redacted']),
 });
 
 export type Config = {
@@ -61,6 +69,9 @@ export type Config = {
   sqlitePath: string;
   redisUrl: string;
   experimentalSupervisor: boolean;
+  otelExporterOtlpEndpoint: string | null;
+  otelServiceName: string;
+  diagnosticCapture: boolean;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -80,6 +91,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     SQLITE_PATH: env.SQLITE_PATH?.trim() || 'data/workflows.sqlite',
     REDIS_URL: env.REDIS_URL?.trim() || 'redis://localhost:6379',
     EXPERIMENTAL_SUPERVISOR: env.EXPERIMENTAL_SUPERVISOR?.trim() || 'false',
+    OTEL_EXPORTER_OTLP_ENDPOINT: env.OTEL_EXPORTER_OTLP_ENDPOINT?.trim() || null,
+    OTEL_SERVICE_NAME: env.OTEL_SERVICE_NAME?.trim() || 'mova-lab-agents',
+    DIAGNOSTIC_CAPTURE: env.DIAGNOSTIC_CAPTURE?.trim() || 'off',
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${z.prettifyError(parsed.error)}`);
@@ -100,5 +114,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sqlitePath: parsed.data.SQLITE_PATH,
     redisUrl: parsed.data.REDIS_URL,
     experimentalSupervisor: parsed.data.EXPERIMENTAL_SUPERVISOR,
+    otelExporterOtlpEndpoint: parsed.data.OTEL_EXPORTER_OTLP_ENDPOINT,
+    otelServiceName: parsed.data.OTEL_SERVICE_NAME,
+    diagnosticCapture: parsed.data.DIAGNOSTIC_CAPTURE === 'redacted',
   };
 }

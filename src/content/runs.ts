@@ -13,6 +13,17 @@ import {
 import { ollamaModelInfo } from '../llm/ollama.ts';
 import type { Logger } from '../logger.ts';
 import {
+  aggregateAttemptTiming,
+  aggregateProviderTiming,
+  aggregateUsage,
+  initialRuntime,
+  linksFor,
+  type Observability,
+  type RuntimeMetadata,
+  spanContextRecord,
+  type TraceContextRecord,
+} from '../observability.ts';
+import {
   type ApprovalRecord,
   CONSTRAINTS_VERSION,
   type DeliveryPhase,
@@ -39,6 +50,7 @@ import {
   checkResultSchema,
   contentRequestSchema,
   type GeneratedProposal,
+  type LlmUsage,
   recordingProposalSchema,
 } from './schemas.ts';
 import { createSupervisorState, SUPERVISOR_PROMPT_VERSION } from './supervisor.ts';
@@ -134,6 +146,11 @@ export type WorkflowResource = {
     }>;
   };
   imports: WorkflowResource['importProgress']['receipts'];
+  observability: {
+    usage: ReturnType<typeof aggregateUsage>;
+    timing: ReturnType<typeof aggregateAttemptTiming>;
+    runtime: RuntimeMetadata;
+  };
 };
 
 const approveRequestSchema = z.strictObject({
@@ -167,6 +184,8 @@ export async function createContentGeneration(options: {
   canReview?: boolean;
   admission?: WorkflowAdmission;
   queue?: WorkflowJobProducer;
+  observability?: Observability;
+  traceContext?: TraceContextRecord;
 }): Promise<{ created: boolean; resource: WorkflowResource }> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -419,7 +438,26 @@ export function presentRun(
     })),
     importProgress,
     imports: importProgress.receipts,
+    observability: {
+      usage: aggregateUsage(Array.isArray(state.usage) ? (state.usage as LlmUsage[]) : []),
+      timing: Array.isArray(state.timing)
+        ? aggregateProviderTiming(state.timing as Parameters<typeof aggregateProviderTiming>[0])
+        : aggregateAttemptTiming(store.listAttempts(run.id)),
+      runtime: runtimeOf(run, state),
+    },
   };
+}
+
+function runtimeOf(run: PersistedRun, state: Record<string, unknown>): RuntimeMetadata {
+  const runtime = state.runtime;
+  if (typeof runtime === 'object' && runtime !== null && !Array.isArray(runtime)) {
+    return runtime as RuntimeMetadata;
+  }
+  return initialRuntime({
+    modelTag: run.modelTag,
+    contextTokens: run.limits.ollamaNumCtx,
+    outputTokens: run.limits.ollamaNumPredict,
+  });
 }
 
 async function decideContentGeneration(
@@ -468,6 +506,7 @@ async function decideContentGeneration(
     const categories = await listGenerationCategories({
       config: options.config,
       signal: options.signal ?? new AbortController().signal,
+      observability: options.observability,
     });
     if (!categories.items.some((category) => category.id === decision.categoryId)) {
       throw new AppError(409, 'CATEGORY_NOT_FOUND', 'The selected category is not available.');
@@ -475,17 +514,30 @@ async function decideContentGeneration(
   }
 
   try {
-    options.store.recordApproval({
-      runId: run.id,
-      actorId: options.ownerId,
-      candidateVersion: decision.candidateVersion,
-      payloadHash,
-      decidedAt: clock.now(),
-      expectedStateVersion: run.stateVersion,
-      ...(decision.decision === 'approved'
-        ? { decision: 'approved' as const, categoryId: decision.categoryId, frozenPayload }
-        : { decision: 'rejected' as const }),
+    const approvalSpan = options.observability?.startSpan('workflow.approval', {
+      links: linksFor(run.traceContexts),
+      attributes: {
+        'workflow.id': run.id,
+        'approval.decision': decision.decision,
+      },
     });
+    try {
+      options.store.recordApproval({
+        runId: run.id,
+        actorId: options.ownerId,
+        candidateVersion: decision.candidateVersion,
+        payloadHash,
+        decidedAt: clock.now(),
+        expectedStateVersion: run.stateVersion,
+        ...(decision.decision === 'approved'
+          ? { decision: 'approved' as const, categoryId: decision.categoryId, frozenPayload }
+          : { decision: 'rejected' as const }),
+      });
+      if (approvalSpan)
+        options.store.appendTraceContext(run.id, spanContextRecord(approvalSpan), clock.now());
+    } finally {
+      approvalSpan?.end();
+    }
   } catch (err) {
     const raced = options.store.getApproval(run.id);
     if (raced && sameDecision(raced, decision, payloadHash)) {
@@ -581,6 +633,13 @@ async function executeApprovedImport(
   const signal = AbortSignal.any(
     [options.signal, leaseLost.signal].filter((item): item is AbortSignal => item !== undefined),
   );
+  const importSpan = options.observability?.startSpan('workflow.import', {
+    links: linksFor(run.traceContexts),
+    attributes: {
+      'workflow.id': run.id,
+      'workflow.import.proposals': approved?.proposals.length ?? -1,
+    },
+  });
 
   try {
     const payload = approved ?? assertImportRecoveryCompatible(options.store, current);
@@ -626,6 +685,7 @@ async function executeApprovedImport(
       const imported = await importRecordingDraft({
         config: options.config,
         signal,
+        observability: options.observability,
         actorId: approval.actorId,
         sourceImportKey: importKey,
         payloadHash: approval.payloadHash,
@@ -703,6 +763,7 @@ async function executeApprovedImport(
     return latest;
   } finally {
     clearInterval(heartbeat);
+    importSpan?.end();
   }
 }
 
@@ -933,6 +994,7 @@ function openPersistedRun(
       initialState: options.config.experimentalSupervisor
         ? { supervisor: createSupervisorState() }
         : { supervisor: null },
+      traceContexts: options.traceContext ? [options.traceContext] : [],
       limits: {
         maxProviderRequests: execution.maxProviderRequests,
         maxRevisions: MAX_REVISIONS,
@@ -1094,6 +1156,7 @@ async function executePersistedRun(
           (signal): signal is AbortSignal => signal !== undefined,
         ),
       ),
+      observability: options.observability,
       resume: fresh
         ? undefined
         : {
@@ -1159,12 +1222,14 @@ function snapshot(state: GenerationState) {
     checks: state.checks,
     history: state.history,
     usage: state.usage,
+    timing: state.timing,
     error: state.error ?? null,
     providerRequests: state.providerRequests,
     modelTag: state.modelTag,
     modelDigest: state.modelDigest,
     ollamaVersion: state.ollamaVersion,
     supervisor: state.supervisor ?? null,
+    runtime: state.runtime,
   };
 }
 

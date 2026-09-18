@@ -13,6 +13,13 @@ import {
   workflowTimeout,
 } from '../llm/execution.ts';
 import type { Logger } from '../logger.ts';
+import {
+  initialRuntime,
+  type Observability,
+  type ProviderTiming,
+  type RuntimeMetadata,
+  withSpan,
+} from '../observability.ts';
 import { hashNormalizedInput } from '../persist/store.ts';
 import { decideToolCall, runSearchTool, SEARCH_EXISTING_EXERCISES } from '../tools/dispatch.ts';
 import { readGenerationConstraints } from '../tools/mova-lab.ts';
@@ -100,6 +107,8 @@ export type GenerationState = {
   modelDigest: string | null;
   ollamaVersion: string | null;
   supervisor?: SupervisorState;
+  runtime: RuntimeMetadata;
+  timing: ProviderTiming[];
   error?: WorkflowError;
 };
 
@@ -117,6 +126,7 @@ export type WorkflowResume = {
   modelTag: string | null;
   modelDigest: string | null;
   ollamaVersion: string | null;
+  ollamaQuantization?: string | null;
   invalidCandidates: Array<{ proposals: GeneratedProposal[]; checks: CheckResult[] }>;
 };
 
@@ -134,6 +144,7 @@ type RunOptions = {
   attempts?: AttemptRecorder;
   onCheckpoint?: (state: GenerationState) => void;
   supervisor?: boolean;
+  observability?: Observability;
 };
 
 export async function generateContentDrafts(options: {
@@ -144,6 +155,7 @@ export async function generateContentDrafts(options: {
   clock?: Clock;
   maxProviderRequests?: number;
   signal?: AbortSignal;
+  observability?: Observability;
 }): Promise<GenerationResult> {
   const parsed = contentRequestSchema.safeParse(options.body);
   if (!parsed.success) {
@@ -160,6 +172,7 @@ export async function generateContentDrafts(options: {
       maxProviderRequests: options.maxProviderRequests,
       signal: options.signal,
       supervisor: options.config.experimentalSupervisor,
+      observability: options.observability,
     }),
   );
 }
@@ -192,6 +205,12 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
   const parsedSupervisor =
     storedSupervisor == null ? undefined : supervisorStateSchema.safeParse(storedSupervisor);
   const supervisorVersionError = storedSupervisor != null && !parsedSupervisor?.success;
+  const executionSpan = options.observability?.startSpan('workflow.execution', {
+    attributes: {
+      'workflow.request_id': options.requestId,
+      'workflow.resumed': resume !== undefined,
+    },
+  });
   const controller = new AbortController();
   const onExternalAbort = () => {
     if (!controller.signal.aborted) {
@@ -221,6 +240,9 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       ? (checkpointState.history as AttemptSummary[])
       : [],
     usage: Array.isArray(checkpointState.usage) ? (checkpointState.usage as LlmUsage[]) : [],
+    timing: Array.isArray(checkpointState.timing)
+      ? (checkpointState.timing as ProviderTiming[])
+      : [],
     modelTag: resume?.modelTag ?? config.ollamaModel,
     modelDigest: resume?.modelDigest ?? null,
     ollamaVersion:
@@ -234,6 +256,13 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
           options.supervisor
         ? createSupervisorState()
         : undefined,
+    runtime:
+      (checkpointState.runtime as RuntimeMetadata | undefined) ??
+      initialRuntime({
+        modelTag: resume?.modelTag ?? config.ollamaModel,
+        contextTokens: config.ollamaNumCtx,
+        outputTokens: config.ollamaNumPredict,
+      }),
     vocabulary: checkpointState.vocabulary as Vocabulary | undefined,
     candidate: Array.isArray(checkpointState.candidate)
       ? (checkpointState.candidate as GeneratedProposal[])
@@ -252,7 +281,10 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
       modelTag: state.modelTag,
       modelDigest: state.modelDigest,
       ollamaVersion: state.ollamaVersion,
+      quantization: state.runtime.quantization,
     },
+    observability: options.observability,
+    timing: state.timing,
     expectedModelTag: resume?.modelTag,
     expectedModelDigest: resume?.modelDigest,
   };
@@ -269,10 +301,17 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         ),
       );
     } else {
-      const constraints = await readGenerationConstraints({
-        config,
-        signal: controller.signal,
-      });
+      const constraints = await withSpan(
+        options.observability,
+        'workflow.step.constraints',
+        { attributes: { 'workflow.step': 'constraints' } },
+        () =>
+          readGenerationConstraints({
+            config,
+            signal: controller.signal,
+            observability: options.observability,
+          }),
+      );
       if (resume && constraints.version !== resume.constraintsVersion) {
         throw new AppError(
           409,
@@ -290,7 +329,13 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     }
     if (state.status === 'RUNNING' && !state.supervisor) {
       const vocabulary =
-        state.vocabulary ?? (await selectVocabulary({ ...llm, request: options.request }));
+        state.vocabulary ??
+        (await withSpan(
+          options.observability,
+          'workflow.step.vocabulary',
+          { attributes: { 'workflow.step': 'vocabulary' } },
+          () => selectVocabulary({ ...llm, request: options.request }),
+        ));
       if (!state.vocabulary) {
         state.vocabulary = vocabulary;
         checkpoint(state, limits, options, llm);
@@ -305,9 +350,27 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
         let mark: string | undefined;
         if (state.phase === 'checks' && state.candidate) {
           mark = fingerprint(state.candidate);
-          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
+          state.checks = await withSpan(
+            options.observability,
+            'workflow.step.checks',
+            { attributes: { 'workflow.step': 'checks' } },
+            () =>
+              runChecks(
+                state,
+                llm,
+                vocabulary,
+                state.candidate as GeneratedProposal[],
+                options,
+                limits,
+              ),
+          );
         } else {
-          const produced = await nextCandidate(state, llm, vocabulary, feedback);
+          const produced = await withSpan(
+            options.observability,
+            feedback ? 'workflow.step.revision' : 'workflow.step.generation',
+            { attributes: { 'workflow.step': feedback ? 'revision' : 'generation' } },
+            () => nextCandidate(state, llm, vocabulary, feedback),
+          );
           if (expired(controller, limits, clock)) {
             failExpired(state, controller);
             break;
@@ -348,7 +411,20 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
             );
             break;
           }
-          state.checks = await runChecks(state, llm, vocabulary, state.candidate, options, limits);
+          state.checks = await withSpan(
+            options.observability,
+            'workflow.step.checks',
+            { attributes: { 'workflow.step': 'checks' } },
+            () =>
+              runChecks(
+                state,
+                llm,
+                vocabulary,
+                state.candidate as GeneratedProposal[],
+                options,
+                limits,
+              ),
+          );
         }
         if (expired(controller, limits, clock)) {
           failExpired(state, controller);
@@ -399,6 +475,15 @@ export async function runContentWorkflow(options: RunOptions): Promise<Generatio
     state.modelTag = llm.observed?.modelTag ?? state.modelTag;
     state.modelDigest = llm.observed?.modelDigest ?? state.modelDigest;
     state.ollamaVersion = llm.observed?.ollamaVersion ?? state.ollamaVersion;
+    state.runtime = {
+      ...state.runtime,
+      modelTag: state.modelTag,
+      modelDigest: state.modelDigest,
+      ollamaVersion: state.ollamaVersion,
+      quantization: llm.observed?.quantization ?? state.runtime.quantization,
+    };
+    executionSpan?.setAttribute('workflow.status', state.status);
+    executionSpan?.end();
   }
 
   options.logger.info(

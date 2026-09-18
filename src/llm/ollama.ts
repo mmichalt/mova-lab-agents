@@ -17,6 +17,9 @@ const envelopeSchema = z.object({
   done: z.boolean(),
   done_reason: z.string().optional(),
   load_duration: z.number().nonnegative().optional(),
+  total_duration: z.number().nonnegative().optional(),
+  prompt_eval_duration: z.number().nonnegative().optional(),
+  eval_duration: z.number().nonnegative().optional(),
   prompt_eval_count: z.int().nonnegative().optional(),
   prompt_eval_cached_count: z.int().nonnegative().optional(),
   eval_count: z.int().nonnegative().optional(),
@@ -40,6 +43,11 @@ export type ChatAttempt = {
   modelDigest: string | null;
   ollamaVersion: string | null;
   loadDurationNs: number | null;
+  promptEvaluationDurationNs: number | null;
+  generationDurationNs: number | null;
+  totalDurationNs: number | null;
+  quantization: string | null;
+  wallDurationMs?: number;
   usage: LlmUsage;
 };
 
@@ -126,6 +134,10 @@ export async function ollamaChat(options: {
     modelDigest: runtime.digest,
     ollamaVersion: runtime.version,
     loadDurationNs: envelope.load_duration ?? null,
+    promptEvaluationDurationNs: envelope.prompt_eval_duration ?? null,
+    generationDurationNs: envelope.eval_duration ?? null,
+    totalDurationNs: envelope.total_duration ?? null,
+    quantization: runtime.quantization,
     usage,
   };
 }
@@ -180,11 +192,10 @@ async function readRuntime(
   const version = versionRes?.ok
     ? stringField(await readMetaJson(versionRes, meta, signal, workflowSignal), 'version')
     : null;
-  const digest = tagsRes?.ok
-    ? modelDigest(await readMetaJson(tagsRes, meta, signal, workflowSignal), model)
-    : null;
+  const tags = tagsRes?.ok ? await readMetaJson(tagsRes, meta, signal, workflowSignal) : undefined;
+  const digest = modelDigest(tags, model);
   throwIfCancelled(signal, workflowSignal);
-  return { version, digest };
+  return { version, digest, quantization: modelQuantization(tags, model) };
 }
 
 async function readMetaJson(
@@ -235,6 +246,13 @@ function listedModel(value: unknown, model: string) {
 function modelDigest(value: unknown, model: string) {
   const found = listedModel(value, model);
   return typeof found?.digest === 'string' && found.digest.length > 0 ? found.digest : null;
+}
+
+function modelQuantization(value: unknown, model: string) {
+  const details = listedModel(value, model)?.details;
+  if (typeof details !== 'object' || details === null) return null;
+  const quantization = (details as Record<string, unknown>).quantization_level;
+  return typeof quantization === 'string' && quantization.length > 0 ? quantization : null;
 }
 
 export async function ollamaModelReady(

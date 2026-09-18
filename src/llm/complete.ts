@@ -5,6 +5,12 @@ import type { LlmUsage } from '../content/schemas.ts';
 import { AppError } from '../errors.ts';
 import type { Logger } from '../logger.ts';
 import {
+  diagnosticAttributes,
+  type Observability,
+  type ProviderTiming,
+  withSpan,
+} from '../observability.ts';
+import {
   type AttemptRecorder,
   type AttemptReservation,
   attemptSignal,
@@ -28,7 +34,14 @@ export type LlmCall = {
   usage: LlmUsage[];
   attempts?: AttemptRecorder;
   candidateVersion?: number | null;
-  observed?: { modelTag: string | null; modelDigest: string | null; ollamaVersion?: string | null };
+  observed?: {
+    modelTag: string | null;
+    modelDigest: string | null;
+    ollamaVersion?: string | null;
+    quantization?: string | null;
+  };
+  observability?: Observability;
+  timing?: ProviderTiming[];
   expectedModelTag?: string | null;
   expectedModelDigest?: string | null;
 };
@@ -103,24 +116,57 @@ async function chatOnce(
   const attemptId = randomUUID();
   const started = options.clock.now();
   let attempt: ChatAttempt;
+  let timingRecorded = false;
   try {
-    attempt = await ollamaChat({
-      config: options.config,
-      messages:
-        options.messages ??
-        ([
-          { role: 'system', content: options.system ?? '' },
-          { role: 'user', content: JSON.stringify(options.user) },
-        ] satisfies ChatMessage[]),
-      format: options.format,
-      tools: options.tools,
-      allowToolCalls: options.allowToolCalls,
-      temperature: options.temperature,
-      signal: attemptSignal(options.limits, options.signal, options.clock.now()),
-      workflowSignal: options.signal,
-      now: options.clock.now(),
-      usage: options.usage,
+    attempt = await withSpan(
+      options.observability,
+      'llm.provider_attempt',
+      {
+        attributes: {
+          'llm.step': options.step,
+          'llm.prompt_version': options.promptVersion,
+          'llm.attempt_id': attemptId,
+          ...diagnosticAttributes(options.observability, { step: options.step }),
+        },
+      },
+      async (span) => {
+        const result = await ollamaChat({
+          config: options.config,
+          messages:
+            options.messages ??
+            ([
+              { role: 'system', content: options.system ?? '' },
+              { role: 'user', content: JSON.stringify(options.user) },
+            ] satisfies ChatMessage[]),
+          format: options.format,
+          tools: options.tools,
+          allowToolCalls: options.allowToolCalls,
+          temperature: options.temperature,
+          signal: attemptSignal(options.limits, options.signal, options.clock.now()),
+          workflowSignal: options.signal,
+          now: options.clock.now(),
+          usage: options.usage,
+        });
+        span.setAttributes({
+          'llm.input_tokens': result.usage.inputTokens ?? -1,
+          'llm.cached_input_tokens': result.usage.cachedInputTokens ?? -1,
+          'llm.output_tokens': result.usage.outputTokens ?? -1,
+          'llm.load_duration_ns': result.loadDurationNs ?? -1,
+          'llm.prompt_evaluation_duration_ns': result.promptEvaluationDurationNs ?? -1,
+          'llm.generation_duration_ns': result.generationDurationNs ?? -1,
+          'llm.duration_units': 'nanoseconds',
+        });
+        return result;
+      },
+    );
+    attempt = { ...attempt, wallDurationMs: Math.max(0, options.clock.now() - started) };
+    options.timing?.push({
+      wallDurationMs: attempt.wallDurationMs ?? null,
+      loadDurationNs: attempt.loadDurationNs,
+      promptEvaluationDurationNs: attempt.promptEvaluationDurationNs,
+      generationDurationNs: attempt.generationDurationNs,
     });
+    timingRecorded = true;
     if (options.expectedModelTag && attempt.model !== options.expectedModelTag) {
       throw new AppError(409, 'MODEL_TAG_CHANGED', 'The model tag changed during recovery.');
     }
@@ -147,7 +193,16 @@ async function chatOnce(
     options.observed.modelTag = attempt.model;
     options.observed.modelDigest ??= attempt.modelDigest;
     options.observed.ollamaVersion ??= attempt.ollamaVersion;
+    options.observed.quantization ??= attempt.quantization;
   } catch (err) {
+    if (!timingRecorded) {
+      options.timing?.push({
+        wallDurationMs: Math.max(0, options.clock.now() - started),
+        loadDurationNs: null,
+        promptEvaluationDurationNs: null,
+        generationDurationNs: null,
+      });
+    }
     failAttempt(options, reservation, err);
     options.logger.warn(
       {
