@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { EvaluationCaseReport, EvaluationMetadata, EvaluationReport } from './runner.ts';
+import { EVALUATION_PROTOCOL_VERSION, EVALUATION_REPORT_VERSION, REPETITIONS } from './runner.ts';
 
 export const WORKFLOW_COMPARISON_REPORT_VERSION = 'workflow-comparison/v1';
 export const WORKFLOW_MODES = ['single-call', 'deterministic', 'supervisor'] as const;
@@ -12,7 +13,11 @@ const comparableFields = [
   'corpus.rubricVersion',
   'corpus.cases',
   'corpus.holdoutCaseIds',
+  'reportVersion',
+  'protocolVersion',
+  'budget',
   'schemaVersion',
+  'concurrency',
   'model',
   'runtime',
   'hardware',
@@ -31,16 +36,27 @@ export type WorkflowComparisonReport = {
   runs: ComparisonRun[];
   summaries: Record<WorkflowMode, WorkflowSummary | null>;
   humanReview: HumanReviewPlan;
+  findings: {
+    status: 'pending';
+    retain: string[];
+    simplify: string[];
+    defer: string[];
+  };
 };
 
 type WorkflowVersions = {
+  reportVersion: string;
+  protocolVersion: string;
   corpus: EvaluationReport['corpus'];
+  mode: string;
+  budget: EvaluationReport['budget'];
   workflowVersion: string;
   promptVersions: Record<string, string>;
   schemaVersion: string;
   model: EvaluationMetadata['model'];
   runtime: Record<string, unknown>;
   hardware: Record<string, unknown>;
+  concurrency: number;
 };
 
 export type ComparisonRun = {
@@ -71,7 +87,18 @@ type WorkflowSummary = {
   totalRuns: number;
   completeRuns: number;
   incompleteRuns: number;
-  holdout: { totalRuns: number; completeRuns: number; incompleteRuns: number };
+  qualityExcludedRuns: number;
+  holdout: {
+    totalRuns: number;
+    completeRuns: number;
+    incompleteRuns: number;
+    outcomes: WorkflowSummary['outcomes'];
+    qualityProperties: WorkflowSummary['qualityProperties'];
+    latencyMs: WorkflowSummary['latencyMs'];
+    measuredOutputTokens: WorkflowSummary['measuredOutputTokens'];
+    cost: WorkflowSummary['cost'];
+    supervisorActionCounts: Record<string, number>;
+  };
   outcomes: {
     initialSuccess: number;
     revisionAssistedSuccess: number;
@@ -148,9 +175,45 @@ export function compareWorkflowReports(
     }
   }
 
+  for (const mode of WORKFLOW_MODES) {
+    const version = versions[mode];
+    if (version && version.mode !== mode) {
+      inputMismatches.push({
+        field: `${mode}.metadata.mode`,
+        values: { expected: mode, actual: version.mode },
+      });
+    }
+  }
+
   const keys = new Set<string>();
+  const expectedKeys = new Set<string>();
+  for (const run of byMode.get(WORKFLOW_MODES[0])?.runs ?? []) expectedKeys.add(runKey(run));
   for (const report of byMode.values()) {
     for (const run of report.runs) keys.add(runKey(run));
+  }
+  for (const mode of WORKFLOW_MODES) {
+    const report = byMode.get(mode);
+    if (!report) continue;
+    const reportKeys = report.runs.map(runKey);
+    const uniqueKeys = new Set(reportKeys);
+    if (uniqueKeys.size !== reportKeys.length) {
+      inputMismatches.push({ field: `${mode}.runKeys`, values: { duplicate: true } });
+    }
+    if (report.runs.length !== report.corpus.cases * REPETITIONS) {
+      inputMismatches.push({
+        field: `${mode}.runCount`,
+        values: { expected: report.corpus.cases * REPETITIONS, actual: report.runs.length },
+      });
+    }
+    if (
+      expectedKeys.size > 0 &&
+      stableJson([...expectedKeys].sort()) !== stableJson([...uniqueKeys].sort())
+    ) {
+      inputMismatches.push({
+        field: `${mode}.runKeys`,
+        values: { expected: [...expectedKeys], actual: reportKeys },
+      });
+    }
   }
   const runs = [...keys].sort().map((key) => comparisonRun(key, byMode));
   const summaries = Object.fromEntries(
@@ -166,12 +229,18 @@ export function compareWorkflowReports(
 
   return {
     reportVersion: WORKFLOW_COMPARISON_REPORT_VERSION,
-    status: inputMismatches.length ? 'invalid' : hasIncomplete ? 'incomplete' : 'complete',
+    status:
+      inputMismatches.length > 0
+        ? 'invalid'
+        : hasIncomplete || humanReview.status === 'pending'
+          ? 'incomplete'
+          : 'complete',
     inputMismatches,
     versions,
     runs,
     summaries,
     humanReview,
+    findings: { status: 'pending', retain: [], simplify: [], defer: [] },
   };
 }
 
@@ -222,13 +291,13 @@ function summarize(runs: EvaluationCaseReport[]): WorkflowSummary {
     const value = run.usage?.outputTokens;
     return typeof value === 'number' ? [value] : [];
   });
-  const rated = runs.flatMap((run) => {
+  const rated = complete.flatMap((run) => {
     const score = run.outcomes.therapist.score;
     return typeof score === 'number' ? [score] : [];
   });
   const properties: Record<string, { passed: number; total: number }> = {};
   const supervisorActionCounts: Record<string, number> = {};
-  for (const run of runs) {
+  for (const run of complete) {
     for (const finding of run.outcomes.properties) {
       const property = properties[finding.id] ?? { passed: 0, total: 0 };
       properties[finding.id] = property;
@@ -252,10 +321,17 @@ function summarize(runs: EvaluationCaseReport[]): WorkflowSummary {
     totalRuns: runs.length,
     completeRuns: complete.length,
     incompleteRuns: runs.length - complete.length,
+    qualityExcludedRuns: runs.length - complete.length,
     holdout: {
       totalRuns: holdout.length,
       completeRuns: holdout.filter((run) => run.status === 'complete').length,
       incompleteRuns: holdout.filter((run) => run.status === 'incomplete').length,
+      outcomes: summarizeOutcomes(holdout),
+      qualityProperties: summarizeProperties(holdout.filter((run) => run.status === 'complete')),
+      latencyMs: summarizeLatency(holdout),
+      measuredOutputTokens: summarizeTokens(holdout),
+      cost: summarizeCost(holdout),
+      supervisorActionCounts: summarizeActions(holdout),
     },
     outcomes: {
       initialSuccess: runs.filter((run) => outcomeOf(run) === 'initial_success').length,
@@ -287,6 +363,72 @@ function summarize(runs: EvaluationCaseReport[]): WorkflowSummary {
   };
 }
 
+function summarizeOutcomes(runs: EvaluationCaseReport[]) {
+  return {
+    initialSuccess: runs.filter((run) => outcomeOf(run) === 'initial_success').length,
+    revisionAssistedSuccess: runs.filter((run) => outcomeOf(run) === 'revision_assisted_success')
+      .length,
+    refusal: runs.filter((run) => outcomeOf(run) === 'refusal').length,
+    operationalFailure: runs.filter((run) => outcomeOf(run) === 'operational_failure').length,
+  };
+}
+
+function summarizeProperties(runs: EvaluationCaseReport[]) {
+  const properties: Record<string, { passed: number; total: number }> = {};
+  for (const run of runs) {
+    for (const finding of run.outcomes.properties) {
+      const property = properties[finding.id] ?? { passed: 0, total: 0 };
+      properties[finding.id] = property;
+      property.total += 1;
+      if (finding.passed) property.passed += 1;
+    }
+  }
+  return properties;
+}
+
+function summarizeLatency(runs: EvaluationCaseReport[]) {
+  const values = runs.flatMap((run) => (run.latencyMs === null ? [] : [run.latencyMs]));
+  return { min: min(values), max: max(values), mean: mean(values) };
+}
+
+function summarizeTokens(runs: EvaluationCaseReport[]) {
+  const values = runs.flatMap((run) => {
+    const value = run.usage?.outputTokens;
+    return typeof value === 'number' ? [value] : [];
+  });
+  return {
+    total: values.length ? values.reduce((sum, value) => sum + value, 0) : null,
+    measuredRuns: values.length,
+    unmeasuredRuns: runs.length - values.length,
+  };
+}
+
+function summarizeCost(runs: EvaluationCaseReport[]) {
+  const values = runs.flatMap((run) =>
+    typeof run.cost.estimatedCostUsd === 'number' ? [run.cost.estimatedCostUsd] : [],
+  );
+  return {
+    estimatedCostUsd:
+      values.length === runs.length ? values.reduce((sum, value) => sum + value, 0) : null,
+    status:
+      values.length === runs.length
+        ? ('reported' as const)
+        : values.length
+          ? ('mixed' as const)
+          : ('unmeasured_local' as const),
+  };
+}
+
+function summarizeActions(runs: EvaluationCaseReport[]) {
+  const actions: Record<string, number> = {};
+  for (const run of runs) {
+    for (const [action, count] of Object.entries(run.outcomes.supervisorActionCounts ?? {})) {
+      actions[action] = (actions[action] ?? 0) + count;
+    }
+  }
+  return actions;
+}
+
 function buildHumanReview(reports: Map<WorkflowMode, EvaluationReport>): HumanReviewPlan {
   const records: HumanReviewPlan['records'] = [];
   const rubricVersions = Object.fromEntries(
@@ -311,7 +453,21 @@ function buildHumanReview(reports: Map<WorkflowMode, EvaluationReport>): HumanRe
     (sum, report) => sum + report.runs.length,
     0,
   );
-  const complete = records.length === requiredRatings && requiredRatings > 0;
+  const requiredDimensions = new Set(
+    [...reports.values()].flatMap((report) => report.corpus.rubricDimensions),
+  );
+  const reviewedRuns = [...reports.values()]
+    .flatMap((report) => report.runs)
+    .filter((run) => {
+      const review = run.outcomes.therapist;
+      return (
+        typeof review.score === 'number' &&
+        [...requiredDimensions].every(
+          (dimension) => typeof review.dimensions[dimension] === 'number',
+        )
+      );
+    });
+  const complete = reviewedRuns.length === requiredRatings && requiredRatings > 0;
   return {
     required: true,
     status: complete ? 'complete' : 'pending',
@@ -321,7 +477,7 @@ function buildHumanReview(reports: Map<WorkflowMode, EvaluationReport>): HumanRe
       { id: 'score-usefulness-and-dimensions', complete },
       {
         id: 'record-comments-for-corrections',
-        complete: complete && records.every((record) => record.comments !== null),
+        complete,
       },
     ],
     records,
@@ -339,18 +495,27 @@ function outcomeOf(run: EvaluationCaseReport): EvaluationCaseReport['outcomes'][
 
 function versionsOf(report: EvaluationReport): WorkflowVersions {
   return {
+    reportVersion: report.reportVersion,
+    protocolVersion: report.protocolVersion,
     corpus: report.corpus,
+    mode: report.metadata.mode,
+    budget: report.budget,
     workflowVersion: report.metadata.workflowVersion,
     promptVersions: report.metadata.promptVersions,
     schemaVersion: report.metadata.schemaVersion,
     model: report.metadata.model,
     runtime: report.metadata.runtime,
     hardware: report.metadata.hardware,
+    concurrency: report.metadata.concurrency,
   };
 }
 
 function fieldValue(version: WorkflowVersions, field: (typeof comparableFields)[number]) {
   switch (field) {
+    case 'reportVersion':
+      return version.reportVersion;
+    case 'protocolVersion':
+      return version.protocolVersion;
     case 'corpus.version':
       return version.corpus.version;
     case 'corpus.propertiesVersion':
@@ -361,8 +526,12 @@ function fieldValue(version: WorkflowVersions, field: (typeof comparableFields)[
       return version.corpus.cases;
     case 'corpus.holdoutCaseIds':
       return version.corpus.holdoutCaseIds;
+    case 'budget':
+      return version.budget;
     case 'schemaVersion':
       return version.schemaVersion;
+    case 'concurrency':
+      return version.concurrency;
     case 'model':
       return version.model;
     case 'runtime':
@@ -403,14 +572,60 @@ type ComparisonManifest = {
   reports: Array<{ mode: WorkflowMode; path: string }>;
 };
 
+function parseManifest(value: unknown): ComparisonManifest {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !Array.isArray((value as { reports?: unknown }).reports)
+  ) {
+    throw new Error('Comparison manifest must contain a reports array.');
+  }
+  const reports = (value as { reports: unknown[] }).reports.map((item) => {
+    if (!item || typeof item !== 'object') throw new Error('Invalid comparison manifest entry.');
+    const entry = item as { mode?: unknown; path?: unknown };
+    if (!WORKFLOW_MODES.includes(entry.mode as WorkflowMode) || typeof entry.path !== 'string') {
+      throw new Error('Each comparison entry needs a supported mode and path.');
+    }
+    return { mode: entry.mode as WorkflowMode, path: entry.path };
+  });
+  return { reports };
+}
+
+function parseReport(value: unknown): EvaluationReport {
+  if (!value || typeof value !== 'object') throw new Error('Evaluation report must be an object.');
+  const report = value as Partial<EvaluationReport>;
+  if (
+    report.reportVersion !== EVALUATION_REPORT_VERSION ||
+    report.protocolVersion !== EVALUATION_PROTOCOL_VERSION ||
+    !Array.isArray(report.runs) ||
+    !report.corpus ||
+    typeof report.metadata !== 'object' ||
+    report.metadata === null
+  ) {
+    throw new Error('Evaluation report version or shape is invalid.');
+  }
+  for (const run of report.runs) {
+    if (
+      !run ||
+      typeof run.caseId !== 'string' ||
+      !Number.isInteger(run.repetition) ||
+      run.repetition < 1 ||
+      !['complete', 'incomplete'].includes(run.status)
+    ) {
+      throw new Error('Evaluation report contains an invalid run.');
+    }
+  }
+  return report as EvaluationReport;
+}
+
 if (process.argv[1]?.endsWith('/evals/comparison.ts')) {
   const manifestPath = process.argv[2];
   if (!manifestPath) throw new Error('Usage: npm run eval:compare -- <manifest.json>');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ComparisonManifest;
+  const manifest = parseManifest(JSON.parse(readFileSync(manifestPath, 'utf8')));
   const base = dirname(resolve(manifestPath));
   const recorded = manifest.reports.map(({ mode, path }) => ({
     mode,
-    report: JSON.parse(readFileSync(resolve(base, path), 'utf8')) as EvaluationReport,
+    report: parseReport(JSON.parse(readFileSync(resolve(base, path), 'utf8'))),
   }));
   process.stdout.write(`${JSON.stringify(compareWorkflowReports(recorded), null, 2)}\n`);
 }

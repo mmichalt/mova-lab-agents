@@ -70,7 +70,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - [x] [AG-025 — Experimental constrained supervisor](#ag-025)
 - [x] [AG-026 — Distributed tracing and cost reporting](#ag-026)
 - [x] [AG-027 — Budgeted evaluation runner](#ag-027)
-- [x] [AG-028 — Workflow comparison and findings](#ag-028)
+- [ ] [AG-028 — Workflow comparison and findings](#ag-028)
 
 ## Milestone 1: standalone recording-proposal generator
 
@@ -1748,7 +1748,8 @@ promotion, and an uncalibrated LLM judge as the sole quality authority.
 **Stage:** 10, learning review  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-025](#ag-025), [AG-027](#ag-027)  
-**Status:** Complete
+**Status:** In progress — comparison tooling is implemented; live local reports,
+therapist review, and evidence-based findings remain pending.
 
 **Problem and learning objective:** Determine whether additional orchestration
 earns its complexity rather than assuming more agents improve results.
@@ -1771,7 +1772,8 @@ and follow-up recommendations.
 `npm run build`, and `git diff --check` pass. The comparison accepts only
 recorded reports and keeps therapist ratings nullable with an explicit review
 checklist. No live local evaluation or therapist review was performed during
-this ticket verification; real quality evidence remains pending.
+this ticket verification; real quality evidence remains pending, so AG-028 is
+not yet complete.
 
 **Out of scope:** Automatic default changes, claims of clinical validation,
 unrequested provider migration, and implementing every proposed follow-up.

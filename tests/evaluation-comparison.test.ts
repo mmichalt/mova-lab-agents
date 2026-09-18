@@ -48,6 +48,9 @@ function run(
 }
 
 function report(runs: EvaluationCaseReport[], corpusVersion = 'synthetic-corpus/v2') {
+  const expandedRuns = runs.flatMap((item) =>
+    [1, 2, 3].map((repetition) => ({ ...item, repetition })),
+  );
   return {
     reportVersion: 'evaluation-report/v1',
     protocolVersion: 'evaluation-protocol/v1',
@@ -55,6 +58,12 @@ function report(runs: EvaluationCaseReport[], corpusVersion = 'synthetic-corpus/
       version: corpusVersion,
       propertiesVersion: 'properties/v1',
       rubricVersion: 'therapist-rubric/v1',
+      rubricDimensions: [
+        'target-sound relevance',
+        'age appropriateness',
+        'language clarity',
+        'therapy usefulness',
+      ],
       cases: 2,
       holdoutCaseIds: ['holdout-case'],
     },
@@ -70,6 +79,7 @@ function report(runs: EvaluationCaseReport[], corpusVersion = 'synthetic-corpus/
     status: 'complete',
     metadata: {
       workflowVersion: 'workflow/v1',
+      mode: 'deterministic',
       promptVersions: { exercises: 'exercises/v1' },
       schemaVersion: 'schema/v1',
       model: { tag: 'fake', digest: 'digest', quantization: 'Q4' },
@@ -78,17 +88,17 @@ function report(runs: EvaluationCaseReport[], corpusVersion = 'synthetic-corpus/
       concurrency: 1,
     },
     summary: {},
-    runs,
+    runs: expandedRuns,
     incomplete: [],
   } as unknown as EvaluationReport;
 }
 
 function recorded(overrides: Partial<Record<WorkflowMode, EvaluationReport>> = {}) {
-  return modes.map((mode) => ({
-    mode,
-    report:
-      overrides[mode] ?? report([run('case', 1), run('holdout-case', 1, { status: 'incomplete' })]),
-  }));
+  return modes.map((mode) => {
+    const source =
+      overrides[mode] ?? report([run('case', 1), run('holdout-case', 1, { status: 'incomplete' })]);
+    return { mode, report: { ...source, metadata: { ...source.metadata, mode } } };
+  });
 }
 
 test('comparison aggregates outcomes, quality, latency, tokens, cost, and actions', () => {
@@ -127,19 +137,19 @@ test('comparison aggregates outcomes, quality, latency, tokens, cost, and action
   );
 
   assert.equal(comparison.status, 'incomplete');
-  assert.equal(comparison.summaries['single-call']?.outcomes.initialSuccess, 1);
-  assert.equal(comparison.summaries.deterministic?.outcomes.revisionAssistedSuccess, 1);
-  assert.equal(comparison.summaries.supervisor?.outcomes.operationalFailure, 1);
+  assert.equal(comparison.summaries['single-call']?.outcomes.initialSuccess, 3);
+  assert.equal(comparison.summaries.deterministic?.outcomes.revisionAssistedSuccess, 3);
+  assert.equal(comparison.summaries.supervisor?.outcomes.operationalFailure, 3);
   assert.deepEqual(comparison.summaries.supervisor?.supervisorActionCounts, {
-    generate: 2,
-    finish: 1,
+    generate: 6,
+    finish: 3,
   });
   assert.equal(comparison.summaries.deterministic?.humanRatedUsefulness.meanScore, 4);
-  assert.equal(comparison.summaries.deterministic?.measuredOutputTokens.total, 20);
+  assert.equal(comparison.summaries.deterministic?.measuredOutputTokens.total, 60);
   assert.equal(comparison.summaries.supervisor?.measuredOutputTokens.total, null);
-  assert.equal(comparison.summaries['single-call']?.holdout.incompleteRuns, 1);
+  assert.equal(comparison.summaries['single-call']?.holdout.incompleteRuns, 3);
   assert.equal(comparison.humanReview.status, 'pending');
-  assert.equal(comparison.humanReview.records.length, 1);
+  assert.equal(comparison.humanReview.records.length, 3);
 });
 
 test('comparison exposes mismatched inputs and missing runs instead of merging them', () => {

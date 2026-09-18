@@ -349,7 +349,7 @@ npm test            # node:test tests/**/*.test.ts (no Ollama)
 npm run smoke:local # optional live GPU/model smoke; never part of CI
 npm run smoke:tools # optional live native tool-call smoke with stub search; never part of CI
 npm run smoke:redis # optional Redis/BullMQ recovery smoke with fake HTTP services
-npm run eval:local  # explicit 20-case, 3-repetition local evaluation; never part of CI
+npm run eval:local -- --mode deterministic # explicit evaluation; never part of CI
 npm run build       # tsc -p tsconfig.build.json
 npm start           # node --env-file-if-exists=.env dist/server.js
 ```
@@ -361,13 +361,13 @@ live inference. `npm run smoke:redis` is separate: it requires a reachable
 Redis instance and verifies reconciliation, asynchronous approval/import, and
 bounded redelivery without live model inference.
 
-`npm run eval:local` is the only live evaluation command. It requires the local
-Ollama model and Mova-Lab service, writes a versioned report under
-`evals/reports/`, reserves call/token budgets before concurrent submissions, and
-keeps unstarted or missing-usage runs visible as incomplete. The synthetic
-corpus has 20 cases, three repetitions, and an explicit holdout subset. The
-therapist rubric is a structured human-review aid, not an automated clinical
-judge.
+`npm run eval:local -- --mode single-call|deterministic|supervisor` is the only
+live evaluation command. It requires the local Ollama model, writes a versioned
+report under `evals/reports/`, reserves call/token budgets before concurrent
+submissions, and keeps unstarted or missing-usage runs visible as incomplete.
+The synthetic corpus has 20 cases, three repetitions, and an explicit holdout
+subset. The therapist rubric is a structured human-review aid, not an automated
+clinical judge.
 
 ### Observability
 
