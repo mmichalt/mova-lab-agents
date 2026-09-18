@@ -1,6 +1,6 @@
 # Mova-Lab Agents implementation backlog
 
-**Status:** AG-001 through AG-020, AG-022, AG-023, and AG-029 are marked
+**Status:** AG-001 through AG-020, AG-022, AG-023, AG-025, and AG-029 are marked
 complete. AG-021 has implementation awaiting acceptance. AG-030 agents-repo
 follow-up is in progress in this working tree; sibling `mova-lab` findings
 remain. AG-024 implementation is complete across both repositories;
@@ -26,7 +26,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, ask GPT-5.6-Sol medium to review it, then fix the issues with the starting model, create branch from main (name should include the ticket tag) and open a PR.
+- After a ticket is implemented, ask GPT-5.6-Sol medium to review it, fix the findings with the starting model, then create a ticket branch (including the ticket tag) and open its PR. Milestone 4 follows the stacked workflow below.
 
 ## Ticket index
 
@@ -1610,13 +1610,32 @@ Teacher UI redesign.
 **Exit criteria:** Architecture changes can be assessed against repeatable
 quality and operational measurements; the deterministic workflow remains the default.
 
+**Agent and PR workflow:**
+
+- Assign AG-025 through AG-028 to separate agents, one ticket and one branch per
+  agent. An agent changes only its ticket's implementation, tests, and required
+  documentation; dependency-blocked tickets wait for their prerequisites.
+- Keep the agent branches independently reviewable. Run the ticket's acceptance
+  checks, complete the GPT-5.6-Sol medium review/fix pass, and hand off the
+  verified branch before stacking it.
+- Use GitHub's [stacked pull requests](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/creating-stacked-pull-requests)
+  in this order: `main` → `AG-025` → `AG-026` → `AG-027` → `AG-028`. Each PR
+  targets the branch immediately below it, so every PR shows only its ticket's
+  diff; this linear ancestry is for review and does not add a code dependency
+  between AG-025 and AG-026. Merge from the bottom upward.
+- AG-025 and AG-026 may be implemented in parallel because both depend only on
+  AG-024. When the work is ready, rebase/link their branches into the stack;
+  AG-027 waits for AG-026 and AG-028 waits for AG-025 and AG-027.
+- Do not mark a ticket complete or merge its layer until its own acceptance
+  criteria and verification pass.
+
 ### AG-025
 
 **Title:** Add an experimental constrained supervisor  
 **Stage:** 9  
 **Repository:** `mova-lab-agents`  
 **Dependencies:** [AG-024](#ag-024)  
-**Status:** Unstarted
+**Status:** Complete
 
 **Problem and learning objective:** Compare code-selected steps with model-selected
 actions while keeping business guarantees outside model control.

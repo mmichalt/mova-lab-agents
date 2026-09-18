@@ -137,6 +137,7 @@ export type CreateRunInput = {
   modelTag?: string | null;
   modelDigest?: string | null;
   ollamaVersion?: string | null;
+  initialState?: unknown;
   limits: PersistedLimits;
   now: number;
 };
@@ -508,7 +509,7 @@ export function openWorkflowStore(sqlitePath: string): WorkflowStore {
         limits: jsonText(input.limits),
         consumed: jsonText({ providerRequests: 0, revisionCount: 0 }),
         deliveryCounts: jsonText({ generation: 0, import: 0 }),
-        state: jsonText({}),
+        state: jsonText(input.initialState ?? {}),
         now: input.now,
       });
     } catch (err) {

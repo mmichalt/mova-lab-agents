@@ -18,6 +18,7 @@ const httpOrigin = z.url({ protocol: /^https?$/ }).transform((value, ctx) => {
 const redisUrl = z.url({ protocol: /^rediss?$/ });
 
 const positiveInt = z.coerce.number().int().positive();
+const booleanEnv = z.enum(['true', 'false']).transform((value) => value === 'true');
 /** Node `setTimeout` / `AbortSignal.timeout` treat values above this as 1 ms. */
 export const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const timeoutMs = positiveInt.max(MAX_NODE_TIMEOUT_MS);
@@ -41,6 +42,7 @@ const schema = z.object({
     .min(1)
     .refine((value) => value !== ':memory:', { error: 'Must be a filesystem path' }),
   REDIS_URL: redisUrl,
+  EXPERIMENTAL_SUPERVISOR: booleanEnv,
 });
 
 export type Config = {
@@ -58,6 +60,7 @@ export type Config = {
   workflowTimeoutMs: number;
   sqlitePath: string;
   redisUrl: string;
+  experimentalSupervisor: boolean;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -76,6 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     WORKFLOW_TIMEOUT_MS: env.WORKFLOW_TIMEOUT_MS?.trim() || '600000',
     SQLITE_PATH: env.SQLITE_PATH?.trim() || 'data/workflows.sqlite',
     REDIS_URL: env.REDIS_URL?.trim() || 'redis://localhost:6379',
+    EXPERIMENTAL_SUPERVISOR: env.EXPERIMENTAL_SUPERVISOR?.trim() || 'false',
   });
   if (!parsed.success) {
     throw new Error(`Invalid configuration: ${z.prettifyError(parsed.error)}`);
@@ -95,5 +99,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     workflowTimeoutMs: parsed.data.WORKFLOW_TIMEOUT_MS,
     sqlitePath: parsed.data.SQLITE_PATH,
     redisUrl: parsed.data.REDIS_URL,
+    experimentalSupervisor: parsed.data.EXPERIMENTAL_SUPERVISOR,
   };
 }

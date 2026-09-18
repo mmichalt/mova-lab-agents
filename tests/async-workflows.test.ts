@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createApp } from '../src/app.ts';
 import { loadConfig } from '../src/config.ts';
+import { PROMPT_VERSIONS } from '../src/content/runs.ts';
 import { AppError } from '../src/errors.ts';
 import type { WorkflowJobProducer } from '../src/jobs.ts';
 import { createLogger } from '../src/logger.ts';
@@ -102,6 +103,44 @@ test('queued generation is durably accepted before any model call', async (t) =>
   assert.equal(duplicate.status, 200);
   assert.equal((await duplicate.json()).id, body.id);
   assert.equal(jobs.length, 1);
+});
+
+test('queued supervisor mode and prompt version are pinned at creation', async (t) => {
+  const store = tempStore(t);
+  const jobs: Array<{ name: string; runId: string; stateVersion: number }> = [];
+  const queue = fakeQueue(jobs);
+  const ollama = await fakeOllama(t, sequentialReply());
+  const movaLab = await fakeMovaLab(t);
+  const config = loadConfig(
+    testEnv({
+      OLLAMA_BASE_URL: ollama.url,
+      MOVA_LAB_BASE_URL: movaLab.url,
+      EXPERIMENTAL_SUPERVISOR: 'true',
+    }),
+  );
+  const { server, url } = await listen(
+    createApp({ config, logger, store, queue, clock: instantClock() }),
+  );
+  t.after(() => shutDown(server, 50));
+
+  const response = await fetch(`${url}/workflows/content-generation`, {
+    method: 'POST',
+    headers: headers('teacher-1', 'supervisor-pinned'),
+    body: JSON.stringify(teacherRequest),
+  });
+  assert.equal(response.status, 202);
+  const body = await response.json();
+  const run = store.getRun(body.id);
+  assert.deepEqual(run?.state, {
+    supervisor: {
+      mode: 'experimental',
+      version: 'constrained-supervisor/v1',
+      decisions: 0,
+      history: [],
+    },
+  });
+  assert.equal(run?.promptVersions.supervisor, PROMPT_VERSIONS.supervisor);
+  assert.equal(chatCalls(ollama.calls).length, 0);
 });
 
 test('idempotent generation retry requeues a run after dispatch failure', async (t) => {

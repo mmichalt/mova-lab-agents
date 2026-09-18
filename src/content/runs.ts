@@ -41,6 +41,7 @@ import {
   type GeneratedProposal,
   recordingProposalSchema,
 } from './schemas.ts';
+import { createSupervisorState, SUPERVISOR_PROMPT_VERSION } from './supervisor.ts';
 import {
   type GenerationState,
   MAX_REVISIONS,
@@ -71,6 +72,7 @@ export const PROMPT_VERSIONS = {
   revision: REVISION_PROMPT_VERSION,
   age: AGE_PROMPT_VERSION,
   language: LANGUAGE_PROMPT_VERSION,
+  supervisor: SUPERVISOR_PROMPT_VERSION,
 };
 
 export type WorkflowResource = {
@@ -928,6 +930,9 @@ function openPersistedRun(
       constraintsVersion: CONSTRAINTS_VERSION,
       promptVersions: PROMPT_VERSIONS,
       modelTag: options.config.ollamaModel,
+      initialState: options.config.experimentalSupervisor
+        ? { supervisor: createSupervisorState() }
+        : {},
       limits: {
         maxProviderRequests: execution.maxProviderRequests,
         maxRevisions: MAX_REVISIONS,
@@ -1070,7 +1075,7 @@ async function executePersistedRun(
         status: 'RUNNING',
         phase: 'vocabulary',
         consumed: current.consumed,
-        state: {},
+        state: current.state,
       });
     }
     const state = await runContentWorkflow({
@@ -1082,6 +1087,8 @@ async function executePersistedRun(
       attempts,
       maxProviderRequests: current.limits.maxProviderRequests,
       maxRevisions: current.limits.maxRevisions,
+      initialState: current.state,
+      supervisor: options.config.experimentalSupervisor,
       signal: AbortSignal.any(
         [options.signal, leaseLost.signal].filter(
           (signal): signal is AbortSignal => signal !== undefined,
@@ -1157,6 +1164,7 @@ function snapshot(state: GenerationState) {
     modelTag: state.modelTag,
     modelDigest: state.modelDigest,
     ollamaVersion: state.ollamaVersion,
+    supervisor: state.supervisor ?? null,
   };
 }
 

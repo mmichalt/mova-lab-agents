@@ -12,6 +12,7 @@ import { chatFixtures } from './fixtures/ollama.ts';
 export type ChatKind =
   | 'vocabulary-tools'
   | 'vocabulary'
+  | 'supervisor'
   | 'generation'
   | 'revision'
   | 'age'
@@ -165,6 +166,7 @@ export async function postDrafts(
     movaLabTimeoutMs?: string;
     clock?: Clock;
     maxProviderRequests?: number;
+    experimentalSupervisor?: boolean;
     log?: ReturnType<typeof createLogger>;
   } = {},
 ) {
@@ -188,6 +190,7 @@ export async function postDrafts(
       LLM_ATTEMPT_TIMEOUT_MS: options.timeoutMs ?? '2000',
       WORKFLOW_TIMEOUT_MS: options.workflowTimeoutMs ?? '600000',
       MOVA_LAB_TIMEOUT_MS: options.movaLabTimeoutMs,
+      EXPERIMENTAL_SUPERVISOR: options.experimentalSupervisor ? 'true' : 'false',
     }),
   );
   const { server, url } = await listen(
@@ -226,6 +229,7 @@ export function chatKind(call: OllamaCall): ChatKind | 'unknown' {
       ? 'vocabulary-tools'
       : 'vocabulary';
   }
+  if (system.includes('constrained content-generation experiment')) return 'supervisor';
   if (system.includes('Revise Ukrainian recording-exercise')) return 'revision';
   if (system.includes('Produce Ukrainian recording-exercise')) return 'generation';
   if (system.includes('requested child age')) return 'age';

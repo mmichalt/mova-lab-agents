@@ -30,6 +30,7 @@ file on the host and does not copy it into the image. Do not commit `.env`.
 | `OLLAMA_NUM_PREDICT` | `2000` | Sent as `options.num_predict`. |
 | `LLM_ATTEMPT_TIMEOUT_MS` | `120000` | One attempt deadline covering queue wait, model load, and body read. Must be `1`–`2147483647` so Node timers do not overflow. |
 | `WORKFLOW_TIMEOUT_MS` | `600000` | Overall run deadline (ten minutes). Must be `1`–`2147483647`. Each attempt uses the smaller of remaining workflow time and `LLM_ATTEMPT_TIMEOUT_MS`. Chosen deadline and the 20-provider-request budget are stored on the run and are not reset by retries. |
+| `EXPERIMENTAL_SUPERVISOR` | `false` | Opt-in Stage 9 experiment. Only search, vocabulary, generate, revise, and finish actions are allowed; deterministic orchestration remains the default. |
 | `SQLITE_PATH` | `data/workflows.sqlite` | Local SQLite file for workflow artifacts (runs, attempts, candidate revisions, approvals, import receipts). Empty values use the default. `:memory:` is rejected. The Compose `agents` service always uses `/data/workflows.sqlite` on the `workflows` volume. |
 | `REDIS_URL` | `redis://localhost:6379` | BullMQ connection for the API producer and worker. Compose overrides it with `redis://redis:6379`. |
 
@@ -104,6 +105,12 @@ return `503 QUEUE_UNAVAILABLE` if durable dispatch cannot be confirmed. Stale
 job versions and human-review or terminal runs are skipped. The legacy
 `/content-drafts` endpoint remains synchronous and retains
 its request-lifetime cancellation behavior.
+When `EXPERIMENTAL_SUPERVISOR=true`, new runs use the bounded experimental
+supervisor. Its action history and version are checkpointed with existing
+workflow state, and it shares the eight-decision and provider budgets with the
+workflow. Finish still reaches mandatory checks and the human-approval
+checkpoint; planner failure does not start another workflow. Resumed runs keep
+their recorded mode.
 `POST /content-drafts` remains a development-only synchronous
 endpoint during caller migration (`Deprecation: true`). It still authenticates
 the inbound service token before reading JSON (16 KiB limit), then loads Mova-Lab generation
