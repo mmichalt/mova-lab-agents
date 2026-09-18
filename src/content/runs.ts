@@ -184,6 +184,9 @@ export async function createContentGeneration(options: {
   try {
     const opened = openPersistedRun(options, parsed.data);
     if (!opened.created) {
+      if (options.queue && opened.run.status === 'PENDING') {
+        await options.queue.enqueueGeneration(opened.run.id, opened.run.stateVersion);
+      }
       return {
         created: false,
         resource: presentRun(
@@ -389,6 +392,13 @@ async function decideContentGeneration(
   const existing = options.store.getApproval(run.id);
   if (existing) {
     if (sameDecision(existing, decision, payloadHash)) {
+      if (options.queue && existing.decision === 'approved') {
+        const latest = options.store.getRun(run.id);
+        if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
+        if (latest.status === 'RUNNING' && latest.phase === 'import') {
+          await options.queue.enqueueImport(latest.id, latest.stateVersion);
+        }
+      }
       const latest = options.store.getRun(run.id);
       if (!latest) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.');
       return presentRun(options.store, latest, options.ownerId, clock.now(), options.canReview);

@@ -25,7 +25,7 @@ are stable identifiers, not issue numbers from an external tracker.
 - Suggested commit titles appear in the architecture plan. A ticket may need more
   than one commit; do not combine unrelated tickets merely to reduce commit count.
 - Use ponytail skill to reduce LOC bloating
-- After ticket is implemented, ask GPT-5.6-Sol medium to review it, then fix the issues with the starting model (latest grok on High), create branch from main (name should include the ticket tag) and open a PR.
+- After ticket is implemented, ask GPT-5.6-Sol medium to review it, then fix the issues with the starting model, create branch from main (name should include the ticket tag) and open a PR.
 
 ## Ticket index
 
